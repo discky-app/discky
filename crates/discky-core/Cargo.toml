@@ -10,6 +10,10 @@ serde.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 libc.workspace = true
+rayon.workspace = true
+bitflags = { workspace = true, features = ["serde"] }
+globset.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+filetime.workspace = true

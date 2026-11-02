@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod fs;
+pub mod index;
 pub mod paths;
 
 pub use config::{Config, ConfigError, RemovalMode};

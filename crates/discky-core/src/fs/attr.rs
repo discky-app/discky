@@ -1,12 +1,17 @@
 //! Directory listing via `getattrlistbulk(2)`: names, kinds and honest sizes in one syscall per batch.
 
-use std::ffi::OsString;
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::fs::dataless::is_dataless;
 
 // ---- FFI constants ----------------------------------------------------------
 
@@ -25,6 +30,9 @@ const FILE_ATTRS: libc::attrgroup_t =
 /// Interpreted as the extended-common (CMNEXT) group because of `FSOPT_ATTR_CMN_EXTENDED`.
 const CMNEXT_ATTRS: libc::attrgroup_t =
     libc::ATTR_CMNEXT_PRIVATESIZE | libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS;
+/// The same without PRIVATESIZE, which roughly doubles the kernel's per-entry cost.
+const CMNEXT_ATTRS_FAST: libc::attrgroup_t =
+    libc::ATTR_CMNEXT_CLONEID | libc::ATTR_CMNEXT_EXT_FLAGS;
 
 const OPTIONS: u64 =
     (libc::FSOPT_NOFOLLOW | libc::FSOPT_PACK_INVAL_ATTRS | libc::FSOPT_ATTR_CMN_EXTENDED) as u64;
@@ -33,12 +41,16 @@ const VREG: u32 = 1;
 const VDIR: u32 = 2;
 const VLNK: u32 = 5;
 
+/// `EF_MAY_SHARE_BLOCKS` from `<sys/attr.h>` (in `ext_flags`): the file may share blocks
+/// with a clone, so its private size can be below its allocated size.
+pub const EF_MAY_SHARE_BLOCKS: u64 = 0x1;
+
 const INITIAL_BUF: usize = 256 * 1024;
 const GIB: u64 = 1 << 30;
 
 // ---- Public types -----------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjKind {
     File,
     Dir,
@@ -77,10 +89,87 @@ pub fn is_sparse(logical: u64, allocated: u64) -> bool {
 /// List `dir` (not following a symlink at `dir`) with one `getattrlistbulk` call per batch.
 /// `buf` is scratch space reused across calls; it is grown to 256 KiB if smaller.
 pub fn read_dir_bulk(dir: &Path, buf: &mut Vec<u8>) -> io::Result<Vec<RawEntry>> {
-    let file = OpenOptions::new()
+    list(&open_dir(dir)?, buf, CMNEXT_ATTRS)
+}
+
+/// The scanner's listing call. Differs from [`read_dir_bulk`] in two ways:
+///
+/// - It first checks the `st_dev` of the opened directory (one `fstat` on the open fd) and
+///   returns `Ok(None)` without listing when it differs from `dev`, i.e. when `dir` is a
+///   mount point of another volume.
+/// - It does not request PRIVATESIZE in bulk (that doubles the listing cost). `private` is
+///   fetched per entry, with `getattrlistat` on the open directory, only for non-dataless
+///   files whose `ext_flags` has [`EF_MAY_SHARE_BLOCKS`]; for every other entry it is
+///   `None`, meaning "equal to `allocated`".
+pub fn read_dir_bulk_on_dev(
+    dir: &Path,
+    dev: u64,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<Vec<RawEntry>>> {
+    let file = open_dir(dir)?;
+    if file.metadata()?.dev() != dev {
+        return Ok(None);
+    }
+    let mut entries = list(&file, buf, CMNEXT_ATTRS_FAST)?;
+    for e in &mut entries {
+        let may_share = e.ext_flags.is_some_and(|f| f & EF_MAY_SHARE_BLOCKS != 0);
+        if e.kind == ObjKind::File && may_share && !is_dataless(e.bsd_flags) {
+            e.private = private_size_at(&file, &e.name);
+        }
+    }
+    Ok(Some(entries))
+}
+
+/// PRIVATESIZE of `name` inside the open directory `dir`; `None` if unavailable.
+fn private_size_at(dir: &std::fs::File, name: &OsStr) -> Option<u64> {
+    let cname = CString::new(name.as_bytes()).ok()?;
+    let mut list = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: libc::ATTR_CMNEXT_PRIVATESIZE,
+    };
+    // u32 length, attribute_set_t (5 × u32), u64 private size.
+    let mut out = [0u8; 4 + 20 + 8];
+    // SAFETY: `dir` is an open directory fd, `cname` is NUL-terminated, `list` is a valid
+    // attrlist and the kernel writes at most `out.len()` bytes into `out`.
+    let rc = unsafe {
+        libc::getattrlistat(
+            dir.as_raw_fd(),
+            cname.as_ptr(),
+            (&mut list as *mut libc::attrlist).cast(),
+            out.as_mut_ptr().cast(),
+            out.len(),
+            (libc::FSOPT_NOFOLLOW | libc::FSOPT_ATTR_CMN_EXTENDED) as libc::c_ulong,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let mut r = Reader::new(&out);
+    r.skip(4 + 16).ok()?; // length, common/vol/dir/file returned words
+    let ret_ext = r.u32().ok()?;
+    let private = r.u64().ok()?;
+    (ret_ext & libc::ATTR_CMNEXT_PRIVATESIZE != 0).then_some(private)
+}
+
+fn open_dir(dir: &Path) -> io::Result<std::fs::File> {
+    OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(dir)?;
+        .open(dir)
+}
+
+/// List the open directory, requesting `ext_attrs` from the CMNEXT group (which must
+/// contain CLONEID and EXT_FLAGS, and may contain PRIVATESIZE).
+fn list(
+    file: &std::fs::File,
+    buf: &mut Vec<u8>,
+    ext_attrs: libc::attrgroup_t,
+) -> io::Result<Vec<RawEntry>> {
     if buf.len() < INITIAL_BUF {
         buf.resize(INITIAL_BUF, 0);
     }
@@ -91,7 +180,7 @@ pub fn read_dir_bulk(dir: &Path, buf: &mut Vec<u8>) -> io::Result<Vec<RawEntry>>
         volattr: 0,
         dirattr: 0,
         fileattr: FILE_ATTRS,
-        forkattr: CMNEXT_ATTRS,
+        forkattr: ext_attrs,
     };
     let mut out = Vec::new();
     loop {
@@ -108,7 +197,7 @@ pub fn read_dir_bulk(dir: &Path, buf: &mut Vec<u8>) -> io::Result<Vec<RawEntry>>
         };
         match n {
             0 => return Ok(out),
-            n if n > 0 => parse_batch(buf, n as usize, &mut out)?,
+            n if n > 0 => parse_batch(buf, n as usize, ext_attrs, &mut out)?,
             _ => {
                 let err = io::Error::last_os_error();
                 if err.kind() != io::ErrorKind::Interrupted {
@@ -126,14 +215,19 @@ fn invalid(msg: &'static str) -> io::Error {
 }
 
 /// Parse `count` packed records from the start of `buf`, appending to `out`.
-fn parse_batch(buf: &[u8], count: usize, out: &mut Vec<RawEntry>) -> io::Result<()> {
+fn parse_batch(
+    buf: &[u8],
+    count: usize,
+    ext_attrs: libc::attrgroup_t,
+    out: &mut Vec<RawEntry>,
+) -> io::Result<()> {
     let mut rest = buf;
     for _ in 0..count {
         let len = Reader::new(rest).u32()? as usize;
         if len < 4 || len > rest.len() {
             return Err(invalid("getattrlistbulk record length out of bounds"));
         }
-        out.push(parse_record(&rest[..len])?);
+        out.push(parse_record(&rest[..len], ext_attrs)?);
         rest = &rest[len..];
     }
     Ok(())
@@ -143,7 +237,7 @@ fn parse_batch(buf: &[u8], count: usize, out: &mut Vec<RawEntry>) -> io::Result<
 /// attributes in bit order, the file group (absent for directories), the CMNEXT group.
 /// With `FSOPT_PACK_INVAL_ATTRS` every requested field is packed; `returned` says which
 /// carry real values. An entry with a non-zero error carries only NAME and ERROR.
-fn parse_record(rec: &[u8]) -> io::Result<RawEntry> {
+fn parse_record(rec: &[u8], ext_attrs: libc::attrgroup_t) -> io::Result<RawEntry> {
     let mut r = Reader::new(rec);
     r.skip(4)?; // length
     let ret_common = r.u32()?;
@@ -215,7 +309,12 @@ fn parse_record(rec: &[u8]) -> io::Result<RawEntry> {
         }
     }
 
-    let private = r.u64()?;
+    // Only requested attributes are packed, so PRIVATESIZE is absent in the fast set.
+    let private = if ext_attrs & libc::ATTR_CMNEXT_PRIVATESIZE != 0 {
+        r.u64()?
+    } else {
+        0
+    };
     let clone_id = r.u64()?;
     let ext_flags = r.u64()?;
     e.private = has(ret_ext, libc::ATTR_CMNEXT_PRIVATESIZE).then_some(private);
