@@ -63,3 +63,11 @@ fn removal_mode_serializes_lowercase() {
             .contains("mode = \"permanent\"")
     );
 }
+
+#[test]
+fn load_missing_file_expands_tilde_in_default_roots() {
+    let (_guard, _dir, paths) = isolated_home();
+    let c = Config::load(&paths).unwrap();
+    let home = std::env::var("HOME").unwrap();
+    assert_eq!(c.scan.roots[0].to_str(), Some(home.as_str()));
+}

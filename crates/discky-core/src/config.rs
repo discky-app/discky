@@ -101,11 +101,14 @@ pub struct Config {
 
 impl Config {
     /// Load the config; a missing file yields defaults. A leading `~` in
-    /// `scan.roots` entries is expanded to `$HOME`.
+    /// `scan.roots` entries (the defaults' included) is expanded to `$HOME`.
     pub fn load(paths: &DisckyPaths) -> Result<Config, ConfigError> {
-        let text = match std::fs::read_to_string(&paths.config) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        let mut cfg = match std::fs::read_to_string(&paths.config) {
+            Ok(text) => toml::from_str(&text).map_err(|source| ConfigError::Parse {
+                path: paths.config.clone(),
+                source,
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(source) => {
                 return Err(ConfigError::Io {
                     path: paths.config.clone(),
@@ -113,10 +116,6 @@ impl Config {
                 });
             }
         };
-        let mut cfg: Config = toml::from_str(&text).map_err(|source| ConfigError::Parse {
-            path: paths.config.clone(),
-            source,
-        })?;
         let home = std::env::var_os("HOME").map(PathBuf::from);
         if let Some(home) = home {
             for root in &mut cfg.scan.roots {
@@ -142,6 +141,8 @@ impl Config {
 
 fn expand_tilde(path: &Path, home: &Path) -> PathBuf {
     match path.strip_prefix("~") {
+        // `join("")` would leave a trailing slash, shown in messages as `/Users/me/`.
+        Ok(rest) if rest.as_os_str().is_empty() => home.to_path_buf(),
         Ok(rest) => home.join(rest),
         Err(_) => path.to_path_buf(),
     }
