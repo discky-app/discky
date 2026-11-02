@@ -1,6 +1,6 @@
 //! Findings: removable things with an honest size, a safety label and a removal method.
 //!
-//! [`Categorizer::run`] turns an [`Index`] into findings in four passes — rule
+//! [`Categorizer::run`] turns an [`Index`] into findings in five passes — model stores ([`models`]), rule
 //! paths/globs, per-app `~/Library` folders ([`app_caches`]), project build dirs ([`builds`]), large & old ([`large_old`]). Each pass
 //! records the node of every finding it emits in a shared `claimed` set; a node is
 //! claimed when it or any ancestor is in that set (see [`is_claimed`]). Passes walk the
@@ -10,6 +10,7 @@
 pub mod app_caches;
 pub mod builds;
 pub mod large_old;
+pub mod models;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -107,7 +108,17 @@ impl Categorizer<'_> {
     /// `~/Downloads`, and the large & old pass, which only looks inside it).
     pub fn run_with_home(&self, home: Option<&Path>) -> Vec<Finding> {
         let mut claimed = HashSet::new();
-        let mut out = rule_pass(self.index, self.rules, &mut claimed);
+        let mut out = Vec::new();
+        if let Some(home) = home {
+            out.extend(models::find(
+                self.index,
+                self.rules,
+                home,
+                &ollama_url(),
+                &mut claimed,
+            ));
+        }
+        out.extend(rule_pass(self.index, self.rules, &mut claimed));
         if let Some(home) = home {
             out.extend(app_caches::find(self.index, home, &mut claimed));
         }
@@ -121,6 +132,27 @@ impl Categorizer<'_> {
         sort_findings(&mut out);
         out
     }
+}
+
+/// Ollama server address: `$OLLAMA_HOST` (scheme optional), else the local default.
+fn ollama_url() -> String {
+    match std::env::var("OLLAMA_HOST") {
+        Ok(h) if !h.trim().is_empty() => {
+            let h = h.trim();
+            if h.contains("://") {
+                h.to_string()
+            } else {
+                format!("http://{h}")
+            }
+        }
+        _ => "http://127.0.0.1:11434".to_string(),
+    }
+}
+
+/// Whether any argument still holds a `{placeholder}` template.
+fn has_placeholder(argv: &[String]) -> bool {
+    argv.iter()
+        .any(|a| a.find('{').is_some_and(|i| a[i..].contains('}')))
 }
 
 /// Largest `freed_if_deleted` first; ties by path (findings without a path last).
@@ -282,6 +314,12 @@ fn rule_pass(index: &Index, rules: &RuleSet, claimed: &mut HashSet<NodeId>) -> V
                 }
                 let mut f = finding_for_node(index, child, rule, None);
                 f.title = index.name(child).to_string_lossy().into_owned();
+                // A per-child command cannot know the child; never ship a raw template.
+                if matches!(&f.removal, Removal::Command { argv, .. } if has_placeholder(argv)) {
+                    f.removal = Removal::Trash {
+                        paths: vec![index.path(child)],
+                    };
+                }
                 out.push(f);
             }
         } else {
