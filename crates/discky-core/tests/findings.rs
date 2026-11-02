@@ -54,7 +54,7 @@ fn large_file_is_found_with_sparse_flag_and_honest_size() {
         rules: &RuleSet::builtin(),
         thresholds: &th,
     }
-    .run();
+    .run_with_home(Some(d.path()));
     let big = f
         .iter()
         .find(|f| f.path.as_deref() == Some(&d.path().join("big.bin")))
@@ -74,7 +74,7 @@ fn old_dir_is_found_and_claimed_nodes_are_not_double_reported() {
         rules: &RuleSet::builtin(),
         thresholds: &Thresholds::default(),
     }
-    .run();
+    .run_with_home(Some(d.path()));
     assert!(
         f.iter()
             .any(|f| f.path.as_deref() == Some(&d.path().join("old"))
@@ -190,7 +190,7 @@ fn old_dir_containing_a_do_not_touch_rule_is_not_reported_whole() {
         rules: &rs,
         thresholds: &Thresholds::default(),
     }
-    .run();
+    .run_with_home(Some(d.path()));
     let paths: Vec<_> = f.iter().filter_map(|f| f.path.clone()).collect();
     assert!(!paths.contains(&d.path().join("archive")));
     assert!(paths.contains(&d.path().join("archive/stale")));
@@ -248,4 +248,86 @@ fn categorize_home() {
             x.flags
         );
     }
+}
+
+fn large_old_with_home(
+    idx: &discky_core::index::Index,
+    home: &std::path::Path,
+) -> Vec<discky_core::findings::Finding> {
+    discky_core::findings::large_old::find(
+        idx,
+        &Thresholds::default(),
+        Some(home),
+        &mut std::collections::HashSet::new(),
+    )
+}
+
+#[test]
+fn vcs_dirs_are_opaque_and_reported_once_without_removal() {
+    let d = tempfile::tempdir().unwrap();
+    let git = d.path().join("repo/.git");
+    std::fs::create_dir_all(git.join("objects/pack")).unwrap();
+    std::fs::create_dir_all(git.join("objects/ab")).unwrap();
+    old_mtime(&git.join("objects/ab"));
+    let pack = std::fs::File::create(git.join("objects/pack/big.pack")).unwrap();
+    pack.set_len(Thresholds::default().large_file_bytes + 1)
+        .unwrap();
+    drop(pack);
+    let idx = scan(d.path());
+    let f = large_old_with_home(&idx, d.path());
+    let under: Vec<_> = f
+        .iter()
+        .filter(|f| f.path.as_deref().is_some_and(|p| p.starts_with(&git)))
+        .collect();
+    assert_eq!(under.len(), 1, "{under:?}");
+    let g = under[0];
+    assert_eq!(g.path.as_deref(), Some(git.as_path()));
+    assert!(matches!(g.category, Category::LargeOld));
+    assert!(matches!(g.removal, Removal::None));
+    assert_eq!(g.rule_id, "vcs-history");
+    assert_eq!(g.title, "Git history");
+    assert_eq!(g.subtitle.as_deref(), Some("repo"));
+}
+
+#[test]
+fn small_vcs_dirs_are_skipped_entirely() {
+    let d = tempfile::tempdir().unwrap();
+    let git = d.path().join("repo/.git/objects/ab");
+    std::fs::create_dir_all(&git).unwrap();
+    old_mtime(&git);
+    let idx = scan(d.path());
+    let f = large_old_with_home(&idx, d.path());
+    assert!(!f.iter().any(|f| {
+        f.path
+            .as_deref()
+            .is_some_and(|p| p.starts_with(d.path().join("repo/.git")))
+    }));
+}
+
+#[test]
+fn large_old_ignores_roots_outside_home() {
+    let d = tempfile::tempdir().unwrap();
+    fixtures::build_tree(d.path());
+    let idx = scan(d.path());
+    let elsewhere = tempfile::tempdir().unwrap();
+    assert!(large_old_with_home(&idx, elsewhere.path()).is_empty());
+}
+
+#[test]
+fn downloads_children_are_always_reported() {
+    let d = tempfile::tempdir().unwrap();
+    let downloads = d.path().join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    std::fs::write(downloads.join("small.txt"), "hi").unwrap();
+    let idx = scan(d.path());
+    let f = large_old_with_home(&idx, d.path());
+    let small = f
+        .iter()
+        .find(|f| f.path.as_deref() == Some(&downloads.join("small.txt")))
+        .expect("Downloads child reported");
+    assert_eq!(small.subtitle.as_deref(), Some("Downloads"));
+    assert!(
+        !f.iter()
+            .any(|f| f.path.as_deref() == Some(downloads.as_path()))
+    );
 }

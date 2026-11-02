@@ -93,12 +93,18 @@ pub struct Categorizer<'a> {
 }
 
 impl Categorizer<'_> {
-    /// All findings, largest `freed_if_deleted` first (ties by path).
+    /// All findings, largest `freed_if_deleted` first (ties by path), with the home
+    /// directory taken from `$HOME`.
     pub fn run(&self) -> Vec<Finding> {
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from);
-        let home = home.as_deref();
+        self.run_with_home(home.as_deref())
+    }
+
+    /// [`Categorizer::run`] with an explicit home directory (`~` for the exclusions,
+    /// `~/Downloads`, and the large & old pass, which only looks inside it).
+    pub fn run_with_home(&self, home: Option<&Path>) -> Vec<Finding> {
         let mut claimed = HashSet::new();
         let mut out = rule_pass(self.index, self.rules, &mut claimed);
         out.extend(builds::find(self.index, self.rules, home, &mut claimed));
