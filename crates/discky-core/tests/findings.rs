@@ -1,7 +1,7 @@
 mod fixtures;
 use discky_core::{
     config::Thresholds,
-    findings::{Categorizer, Removal},
+    findings::{Categorizer, Finding, Removal},
     fs::walk::{ScanOptions, walk},
     rules::{Category, RuleSet, SafetyLabel},
 };
@@ -28,14 +28,18 @@ fn build_dirs_become_project_build_findings_with_cwd_command() {
         rules: &RuleSet::builtin(),
         thresholds: &Thresholds::default(),
     }
-    .run();
+    .run_with_home(Some(d.path()));
     let t = f
         .iter()
         .find(|f| f.rule_id == "cargo-target")
         .expect("cargo target finding");
     assert!(matches!(t.category, Category::ProjectBuilds));
+    let target = d.path().join("proj/target");
+    let want = ["cargo", "clean", "--target-dir", target.to_str().unwrap()];
     assert!(
-        matches!(&t.removal, Removal::Command { argv, cwd: Some(c), .. } if argv == &["cargo","clean"] && c == &d.path().join("proj"))
+        matches!(&t.removal, Removal::Command { argv, cwd: Some(c), .. } if argv == &want && c == &d.path().join("proj")),
+        "{:?}",
+        t.removal
     );
     assert!(f.iter().any(|f| f.rule_id == "node-modules"));
 }
@@ -100,13 +104,13 @@ fn finding_ids_are_stable_across_scans() {
         rules: &rs,
         thresholds: &th,
     }
-    .run();
+    .run_with_home(Some(d.path()));
     let b = Categorizer {
         index: &scan(d.path()),
         rules: &rs,
         thresholds: &th,
     }
-    .run();
+    .run_with_home(Some(d.path()));
     let ids = |v: &Vec<discky_core::findings::Finding>| {
         v.iter()
             .map(|f| f.id.0.clone())
@@ -211,9 +215,68 @@ fn build_dir_modified_ignores_the_build_dir_itself() {
         rules: &RuleSet::builtin(),
         thresholds: &Thresholds::default(),
     }
-    .run();
+    .run_with_home(Some(d.path()));
     let t = f.iter().find(|f| f.rule_id == "cargo-target").unwrap();
     assert_eq!(t.modified, Some(1_000_000_000));
+}
+
+fn categorize(idx: &discky_core::index::Index, home: &std::path::Path) -> Vec<Finding> {
+    Categorizer {
+        index: idx,
+        rules: &RuleSet::builtin(),
+        thresholds: &Thresholds::default(),
+    }
+    .run_with_home(Some(home))
+}
+
+#[test]
+fn build_dirs_inside_app_bundles_and_packages_are_never_reported() {
+    let d = tempfile::tempdir().unwrap();
+    let h = d.path();
+    let put = |rel: &str| {
+        let p = h.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"{}").unwrap();
+    };
+    let app = h.join("X.app");
+    put("X.app/Contents/Resources/app/package.json");
+    put("X.app/Contents/Resources/app/node_modules/m/index.js");
+    put("X.app/Contents/Resources/app/extensions/e/package.json");
+    put("X.app/Contents/Resources/app/extensions/e/dist/main.js");
+    // Build-like dirs below a package's node_modules belong to the package.
+    put("web/node_modules/pkg/package.json");
+    put("web/node_modules/pkg/dist/index.js");
+    // A tool install under an excluded home tree.
+    put(".local/share/mise/installs/node/19/lib/node_modules/corepack/package.json");
+    put(".local/share/mise/installs/node/19/lib/node_modules/corepack/dist/c.js");
+    put("proj/Cargo.toml");
+    put("proj/target/debug/a.rlib");
+    let f = categorize(&scan(h), h);
+    let builds: Vec<_> = f
+        .iter()
+        .filter(|f| f.category == Category::ProjectBuilds)
+        .filter_map(|f| f.path.clone())
+        .collect();
+    assert!(!builds.iter().any(|p| p.starts_with(&app)), "{builds:?}");
+    assert!(
+        !builds
+            .iter()
+            .any(|p| p.starts_with(h.join("web/node_modules/pkg"))),
+        "{builds:?}"
+    );
+    assert!(
+        !builds.iter().any(|p| p.starts_with(h.join(".local"))),
+        "{builds:?}"
+    );
+    assert!(builds.contains(&h.join("proj/target")), "{builds:?}");
+
+    // A root outside home: no project builds at all.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let f = categorize(&scan(h), elsewhere.path());
+    assert!(
+        !f.iter().any(|f| f.category == Category::ProjectBuilds),
+        "{f:?}"
+    );
 }
 
 /// Manual sanity check on the real home: `cargo test --release -p discky-core --test findings -- --ignored --nocapture`.

@@ -23,8 +23,9 @@ struct Mcp {
 }
 
 impl Mcp {
-    /// Start the server on `home`, with a fake trash binary that `mv`s its arguments into
-    /// `<home>/trashed/`, so tests never touch the real Trash.
+    /// Start the server on `home` (also its `$HOME`, so the fixture trees under it are
+    /// where the build-dir pass looks), with a fake trash binary that `mv`s its arguments
+    /// into `<home>/trashed/`, so tests never touch the real Trash.
     fn start(home: &Path) -> Mcp {
         let bin = home.join("trash");
         let trashed = home.join("trashed");
@@ -40,6 +41,7 @@ impl Mcp {
             .arg("--home")
             .arg(home)
             .env("DISCKY_TRASH_BIN", &bin)
+            .env("HOME", home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

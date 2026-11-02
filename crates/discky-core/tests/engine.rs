@@ -7,10 +7,20 @@ use std::time::Duration;
 /// engine resolves its paths once, in `open`).
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Point `DISCKY_HOME` at `d` and `HOME` at the system temp dir (the same value in every
+/// test), so the test trees — all temp dirs — are under home, where the build-dir pass
+/// looks.
+fn set_env(d: &tempfile::TempDir) {
+    unsafe {
+        std::env::set_var("DISCKY_HOME", d.path());
+        std::env::set_var("HOME", std::env::temp_dir());
+    }
+}
+
 fn engine_in(d: &tempfile::TempDir) -> Engine {
     let e = {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("DISCKY_HOME", d.path()) };
+        set_env(d);
         Engine::open(Actor::Mcp).unwrap()
     };
     let mut c = e.config();
@@ -21,7 +31,7 @@ fn engine_in(d: &tempfile::TempDir) -> Engine {
 
 fn reopen(d: &tempfile::TempDir, actor: Actor) -> Engine {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe { std::env::set_var("DISCKY_HOME", d.path()) };
+    set_env(d);
     Engine::open(actor).unwrap()
 }
 
