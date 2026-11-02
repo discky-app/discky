@@ -387,3 +387,98 @@ fn clients_declaring_tasks_get_a_task_handle_for_scan() {
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+#[test]
+fn unparsable_config_blocks_planning_and_removing_until_fixed() {
+    let d = tempfile::tempdir().unwrap();
+    let tree = d.path().join("tree");
+    fixtures::build_tree(&tree);
+    let good = format!(
+        "[scan]\nroots = [\"{}\"]\n[mcp]\nallow_agent_delete = true\n",
+        tree.display()
+    );
+    let config = d.path().join("config.toml");
+    std::fs::write(&config, &good).unwrap();
+    let mut m = Mcp::start(d.path());
+    m.initialize();
+    m.tool("scan", json!({"wait_seconds": 30}));
+    let f = m.tool("findings", json!({"category": "project_builds"}));
+    let id = f["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["removal_kind"] == "trash")
+        .unwrap()["id"]
+        .clone();
+    let plan = m.tool("plan_removal", json!({"finding_ids": [&id]}));
+
+    // An only_steps index outside the plan is a tool error, and nothing runs.
+    let r = m.call(
+        "tools/call",
+        json!({"name": "execute_plan", "arguments": {"plan_id": plan["id"], "only_steps": [99]}}),
+    );
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Step index 99 is not in the plan"), "{text}");
+    assert!(tree.join("web/node_modules").exists());
+
+    std::fs::write(&config, "this is [not toml").unwrap();
+    let want = "config.toml cannot be parsed";
+    let fix = "Fix it before planning or removing anything.";
+    for (tool, args) in [
+        ("plan_removal", json!({"finding_ids": [&id]})),
+        ("execute_plan", json!({"plan_id": plan["id"]})),
+    ] {
+        let r = m.call("tools/call", json!({"name": tool, "arguments": args}));
+        assert_eq!(r["result"]["isError"], true, "{tool}: {r}");
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with(want) && text.ends_with(fix),
+            "{tool}: {text}"
+        );
+    }
+    assert!(tree.join("web/node_modules").exists());
+    // Read-only tools keep the last good config.
+    m.tool("disk_overview", json!({}));
+
+    std::fs::write(&config, &good).unwrap();
+    let again = m.tool("plan_removal", json!({"finding_ids": [&id]}));
+    assert_eq!(again["steps"][0]["kind"], "trash", "{again}");
+}
+
+#[test]
+fn a_trash_bin_override_is_announced_on_stderr() {
+    let d = tempfile::tempdir().unwrap();
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin!("discky-mcp"))
+        .arg("--home")
+        .arg(d.path())
+        .env("DISCKY_TRASH_BIN", d.path().join("fake-trash"))
+        .env("HOME", d.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn discky-mcp");
+    let err = BufReader::new(child.stderr.take().unwrap());
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        for line in err.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let line = loop {
+        match rx.recv_timeout(READ_TIMEOUT) {
+            Ok(l) if l.contains("DISCKY_TRASH_BIN") => break l,
+            Ok(_) => {}
+            Err(e) => panic!("no DISCKY_TRASH_BIN warning on stderr: {e}"),
+        }
+    };
+    assert!(
+        line.contains("WARN") && line.contains("fake-trash"),
+        "{line}"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}

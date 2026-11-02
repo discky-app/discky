@@ -54,6 +54,12 @@ fn main() -> ExitCode {
     if let Some(e) = engine.last_error() {
         tracing::warn!("{e}");
     }
+    if let Some(bin) = std::env::var_os("DISCKY_TRASH_BIN") {
+        tracing::warn!(
+            "DISCKY_TRASH_BIN is set: Trash steps run {} instead of /usr/bin/trash (tests and development only)",
+            std::path::Path::new(&bin).display()
+        );
+    }
     if cli.self_test_scan {
         return self_test_scan(&engine);
     }

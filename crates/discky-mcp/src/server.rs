@@ -87,10 +87,21 @@ impl DisckyServer {
     }
 
     /// Pick up edits Discky.app made to config.toml; on error keep the last good config.
+    /// For read-only tools.
     fn reload_config(&self) {
         if let Err(e) = self.engine.reload_config() {
             tracing::warn!("keeping the previous config: {e}");
         }
+    }
+
+    /// Re-read config.toml for a tool that plans or removes: a file that cannot be parsed
+    /// is a tool error, never a silent fallback to the last good config.
+    fn reload_config_strict(&self) -> Result<(), String> {
+        self.engine.reload_config().map_err(|e| {
+            format!(
+                "config.toml cannot be parsed: {e}. Fix it before planning or removing anything."
+            )
+        })
     }
 
     fn overview_out(&self) -> OverviewOut {
@@ -297,7 +308,7 @@ impl DisckyServer {
         &self,
         Parameters(p): Parameters<PlanParams>,
     ) -> Result<Json<PlanOut>, String> {
-        self.reload_config();
+        self.reload_config_strict()?;
         let engine = Arc::clone(&self.engine);
         let plan = blocking(move || engine.plan(&p.finding_ids))
             .await?
@@ -322,7 +333,7 @@ impl DisckyServer {
         Parameters(p): Parameters<ExecuteParams>,
     ) -> Result<Json<ExecuteOut>, String> {
         // Re-read on every call so the user's settings apply without a restart.
-        self.reload_config();
+        self.reload_config_strict()?;
         let config = self.engine.config();
         if !config.mcp.allow_agent_delete {
             return Err(DELETE_DISABLED.to_string());
@@ -345,6 +356,10 @@ impl DisckyServer {
                 ExecuteError::PlanStale { path } => format!(
                     "Files changed since planning ({}). Call plan_removal again.",
                     path.display()
+                ),
+                ExecuteError::BadStepIndex(i) => format!(
+                    "Step index {i} is not in the plan (it has {} steps).",
+                    plan.steps.len()
                 ),
                 e => format!("Cannot run the plan: {e}"),
             })?;
