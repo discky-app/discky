@@ -136,13 +136,20 @@ fn hf_omlx_lmstudio_one_finding_per_model() {
     let hf = fs.iter().find(|f| f.rule_id == "hf-hub").unwrap();
     assert_eq!(hf.title, "Systran/faster-whisper-base");
     assert_eq!(hf.label, SafetyLabel::AppData);
+    // Always the official tool, installed or not: the planner flags a missing `hf`.
     match &hf.removal {
-        Removal::Command { argv, .. } => assert!(!argv.iter().any(|a| a.contains('{'))),
-        Removal::Trash { .. } => {}
+        Removal::Command {
+            tool,
+            argv,
+            install_hint,
+            ..
+        } => {
+            assert_eq!(tool, "hf");
+            assert!(!argv.iter().any(|a| a.contains('{')));
+            assert_eq!(argv[3], "Systran/faster-whisper-base");
+            assert!(install_hint.is_some());
+        }
         other => panic!("unexpected removal {other:?}"),
-    }
-    if let Removal::Command { argv, .. } = &hf.removal {
-        assert_eq!(argv[3], "Systran/faster-whisper-base");
     }
     assert!(hf.allocated >= 4096 && hf.node.is_some());
 
@@ -186,11 +193,8 @@ argv = ["tool", "rm", "{{repo}}"]
     }
     .run_with_home(None);
     let f = fs.iter().find(|f| f.rule_id == "t").unwrap();
-    assert!(
-        matches!(f.removal, Removal::Trash { .. }),
-        "{:?}",
-        f.removal
-    );
+    assert_eq!(f.removal, Removal::None);
+    assert_eq!(f.explain, "x (removal command template unresolved)");
 }
 
 fn put_file(p: &Path, kb: usize) {
@@ -257,4 +261,29 @@ fn unprocessed_hf_root_is_not_claimed() {
     let idx = scan(d.path());
     find(&idx, &RuleSet::builtin(), d.path(), DEAD, &mut claimed);
     assert!(claimed.contains(&idx.find(&hub).unwrap()));
+}
+
+#[test]
+fn hf_finding_without_hf_installed_is_planned_as_tool_missing_not_trash() {
+    let d = tempfile::tempdir().unwrap();
+    put_file(&d.path().join(".cache/huggingface/hub/models--o--n/f"), 4);
+    let idx = scan(d.path());
+    let fs = find(
+        &idx,
+        &RuleSet::builtin(),
+        d.path(),
+        DEAD,
+        &mut HashSet::new(),
+    );
+    let plan = discky_core::plan::plan_removal(&[&fs[0]], &discky_core::config::Config::default());
+    let s = &plan.steps[0];
+    assert!(
+        matches!(s.kind, discky_core::plan::StepKind::Command { .. }),
+        "{:?}",
+        s.kind
+    );
+    if discky_core::tools::tool_path("hf").is_none() {
+        assert!(s.flags.contains(discky_core::plan::StepFlags::TOOL_MISSING));
+        assert_eq!(s.warnings, ["hf not found. pip install -U huggingface_hub"]);
+    }
 }

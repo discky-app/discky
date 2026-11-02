@@ -12,7 +12,9 @@ use crate::index::{Index, NodeId};
 use crate::rules::{Category, Rule, RuleSet, SafetyLabel};
 
 use super::app_caches::unclaimed_sizes;
-use super::{Finding, FindingId, Removal, finding_for_node, has_placeholder, node_finding};
+use super::{
+    Finding, FindingId, Removal, UNRESOLVED, finding_for_node, has_placeholder, node_finding,
+};
 
 const OLLAMA_ID: &str = "ollama-models";
 const HF_ID: &str = "hf-hub";
@@ -379,13 +381,11 @@ fn hub_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn hf_finding(
-    index: &Index,
-    node: NodeId,
-    item: &HfItem,
-    rule: Option<&Rule>,
-    hf_installed: bool,
-) -> Finding {
+/// A Hugging Face repo finding. Its removal is always the rule's `hf` command with `{repo}`
+/// substituted, whether or not `hf` is installed: the planner flags a missing tool with
+/// its install hint instead of falling back to the Trash. Without a command, or with a
+/// placeholder left unresolved, there is no removal (`None`, said so in `explain`).
+fn hf_finding(index: &Index, node: NodeId, item: &HfItem, rule: Option<&Rule>) -> Finding {
     let mut f = node_finding(
         index,
         node,
@@ -397,21 +397,27 @@ fn hf_finding(
     f.title = item.title.clone();
     f.subtitle = Some("Hugging Face hub".to_string());
     f.explain = "Downloaded Hugging Face repository. It can be downloaded again.".to_string();
-    if let (Some(cmd), true) = (rule.and_then(|r| r.command.as_ref()), hf_installed) {
-        let argv: Vec<String> = cmd
-            .argv
-            .iter()
-            .map(|a| a.replace("{repo}", &item.repo_arg))
-            .collect();
-        if !has_placeholder(&argv) {
-            f.removal = Removal::Command {
-                tool: cmd.tool.clone(),
-                argv,
-                cwd: None,
-                install_hint: cmd.install_hint.clone(),
-                freed_note: None,
-            };
+    f.removal = Removal::None;
+    match rule.and_then(|r| r.command.as_ref()) {
+        Some(cmd) => {
+            let argv: Vec<String> = cmd
+                .argv
+                .iter()
+                .map(|a| a.replace("{repo}", &item.repo_arg))
+                .collect();
+            if has_placeholder(&argv) {
+                f.explain.push_str(UNRESOLVED);
+            } else {
+                f.removal = Removal::Command {
+                    tool: cmd.tool.clone(),
+                    argv,
+                    cwd: None,
+                    install_hint: cmd.install_hint.clone(),
+                    freed_note: None,
+                };
+            }
         }
+        None => f.explain.push_str(" (no removal command configured)"),
     }
     f
 }
@@ -533,7 +539,6 @@ pub fn find(
     }
 
     let hf_rule = rules.get(HF_ID);
-    let hf_installed = crate::tools::tool_path("hf").is_some();
     for hub in hub_dirs(home) {
         let Some(root) = index.find(&hub) else {
             continue;
@@ -542,7 +547,7 @@ pub fn find(
         for item in hf_items(&hub) {
             if let Some(n) = index.find(&item.path) {
                 reported.insert(n);
-                out.push(hf_finding(index, n, &item, hf_rule, hf_installed));
+                out.push(hf_finding(index, n, &item, hf_rule));
             }
         }
         out.extend(residual_finding(
@@ -622,14 +627,11 @@ mod tests {
         };
         let node = idx.find(&repo).unwrap();
         let bad = RuleSet::from_toml(&toml(r#"["hf", "rm", "{repo}", "{other}"]"#)).unwrap();
-        let f = hf_finding(&idx, node, &item, bad.get("hf-hub"), true);
-        assert!(
-            matches!(f.removal, Removal::Trash { .. }),
-            "{:?}",
-            f.removal
-        );
+        let f = hf_finding(&idx, node, &item, bad.get("hf-hub"));
+        assert_eq!(f.removal, Removal::None);
+        assert!(f.explain.ends_with(UNRESOLVED), "{}", f.explain);
         let ok = RuleSet::from_toml(&toml(r#"["hf", "rm", "{repo}"]"#)).unwrap();
-        let f = hf_finding(&idx, node, &item, ok.get("hf-hub"), true);
+        let f = hf_finding(&idx, node, &item, ok.get("hf-hub"));
         assert!(matches!(&f.removal, Removal::Command { argv, .. } if argv[2] == "o/n"));
     }
 

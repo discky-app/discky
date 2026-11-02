@@ -149,6 +149,9 @@ pub(crate) fn ollama_url() -> String {
     }
 }
 
+/// Appended to `explain` when a removal command template could not be resolved.
+pub const UNRESOLVED: &str = " (removal command template unresolved)";
+
 /// Whether any argument still holds a `{placeholder}` template.
 pub(crate) fn has_placeholder(argv: &[String]) -> bool {
     argv.iter()
@@ -314,11 +317,11 @@ fn rule_pass(index: &Index, rules: &RuleSet, claimed: &mut HashSet<NodeId>) -> V
                 }
                 let mut f = finding_for_node(index, child, rule, None);
                 f.title = index.name(child).to_string_lossy().into_owned();
-                // A per-child command cannot know the child; never ship a raw template.
+                // A per-child command cannot know the child: never ship a raw template,
+                // and never swap in the Trash for the tool the rule asked for.
                 if matches!(&f.removal, Removal::Command { argv, .. } if has_placeholder(argv)) {
-                    f.removal = Removal::Trash {
-                        paths: vec![index.path(child)],
-                    };
+                    f.removal = Removal::None;
+                    f.explain.push_str(UNRESOLVED);
                 }
                 out.push(f);
             }
