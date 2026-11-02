@@ -193,6 +193,7 @@ fn in_trash_lists_recorded_items_that_still_exist_once() {
         freed: 0,
         output_tail: String::new(),
         trash_paths,
+        reason: None,
     };
     history::append(
         &paths,
@@ -291,4 +292,85 @@ fn remove_step_deletes_and_never_follows_symlinks() {
     assert!(std::fs::symlink_metadata(&link).is_err());
     assert!(!dir.exists());
     assert!(keep.join("data").exists());
+}
+
+fn command_finding(d: &std::path::Path, script: &str, cwd: Option<std::path::PathBuf>) -> Finding {
+    Finding {
+        removal: Removal::Command {
+            tool: "sh".into(),
+            argv: vec!["sh".into(), "-c".into(), script.into()],
+            cwd,
+            install_hint: None,
+            freed_note: None,
+        },
+        ..trash_finding(&d.join("nope"))
+    }
+}
+
+#[test]
+fn failed_history_write_stops_the_plan_but_returns_the_report() {
+    let (d, paths, bin) = setup();
+    let later = d.path().join("later");
+    std::fs::create_dir(&later).unwrap();
+    // Step 0 replaces the (already opened-and-checked) log file with a directory, so the
+    // append right after it fails.
+    let log = paths.log.display().to_string();
+    let f1 = command_finding(d.path(), &format!("rm -f '{log}' && mkdir '{log}'"), None);
+    let plan = plan_removal(&[&f1, &trash_finding(&later)], &Config::default());
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done));
+    let reason = rep.results[0].reason.as_deref().unwrap();
+    assert!(reason.starts_with("History write failed:"), "{reason}");
+    assert!(reason.ends_with("; stopping"));
+    assert_eq!(rep.stopped_at, Some(0));
+    assert!(matches!(rep.results[1].status, StepStatus::NotRun));
+    assert!(later.exists());
+}
+
+#[test]
+fn trash_of_an_already_missing_path_is_done_without_invoking_trash() {
+    let (d, paths, bin) = setup();
+    let missing = d.path().join("gone-before-planning");
+    let plan = plan_removal(&[&trash_finding(&missing)], &Config::default());
+    assert!(!plan.steps[0].fingerprints[0].exists);
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done));
+    assert_eq!(rep.results[0].reason.as_deref(), Some("already absent"));
+    assert_eq!(rep.results[0].freed, 4096);
+    assert_eq!(
+        std::fs::read_dir(d.path().join("trashed")).unwrap().count(),
+        0
+    );
+    let h = history::read(&paths, 1).unwrap();
+    assert_eq!(h[0].reason.as_deref(), Some("already absent"));
+    assert!(h[0].trash_paths.is_empty());
+}
+
+#[test]
+fn relative_command_cwd_fails() {
+    let (d, paths, bin) = setup();
+    let f = command_finding(d.path(), "true", Some("relative/dir".into()));
+    let plan = plan_removal(&[&f], &Config::default());
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Failed));
+    assert!(
+        rep.results[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("relative")
+    );
+    let h = history::read(&paths, 1).unwrap();
+    assert!(h[0].reason.as_deref().unwrap().contains("relative"));
+}
+
+#[test]
+fn stale_interactive_step_that_will_be_skipped_does_not_block() {
+    let (d, paths, bin) = setup();
+    let mut plan = plan_removal(&[&trash_finding(&d.path().join("x"))], &Config::default());
+    // Pretend the step needs admin and its target changed since planning.
+    plan.steps[0].flags |= discky_core::plan::StepFlags::INTERACTIVE;
+    plan.steps[0].fingerprints[0].mtime = 1;
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Skipped));
 }

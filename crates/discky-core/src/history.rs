@@ -30,6 +30,9 @@ pub struct HistoryRecord {
     /// For trash steps, `~/.Trash/<basename>` per path: where the item is expected to
     /// be (the Trash may rename it on a name collision).
     pub trash_paths: Vec<PathBuf>,
+    /// Why the step was skipped or failed, or a note such as "already absent".
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// The log opened for appending, its parent directories created.
@@ -47,7 +50,9 @@ pub(crate) fn open_log(paths: &DisckyPaths) -> io::Result<File> {
 pub fn append(paths: &DisckyPaths, rec: &HistoryRecord) -> io::Result<()> {
     let mut line = serde_json::to_string(rec).map_err(io::Error::other)?;
     line.push('\n');
-    open_log(paths)?.write_all(line.as_bytes())
+    let mut f = open_log(paths)?;
+    f.write_all(line.as_bytes())?;
+    f.sync_data()
 }
 
 /// Up to `limit` records, newest first. A missing log is empty; lines that do not parse

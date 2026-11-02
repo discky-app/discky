@@ -4,6 +4,8 @@
 //! whole plan. Steps then run in order, the first failure stops the plan, and every
 //! executed step is appended to the history log before the next one starts. Paths are
 //! only ever handed to the Trash or removed when they are listed in the step itself.
+//! A window between the stale check and each action is unavoidable; the last path
+//! component is still protected because every removal decides by `lstat`.
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -103,14 +105,20 @@ impl Outcome {
 }
 
 /// Run `plan` (see the module docs). `Err(PlanStale)` and a log that cannot be opened
-/// are reported before any side effect.
+/// are reported before any side effect. A history write that fails after a step ran
+/// stops the plan at that step (noted in its `reason`) and the report is still returned.
 pub fn execute_plan(
     plan: &Plan,
     opts: &ExecuteOptions,
     paths: &DisckyPaths,
 ) -> Result<ExecutionReport, ExecuteError> {
     let selected = |i: usize| opts.only_steps.as_ref().is_none_or(|o| o.contains(&i));
-    check_fresh(plan.steps.iter().filter(|s| selected(s.index)))?;
+    let skipped = |s: &Step| s.flags.contains(StepFlags::INTERACTIVE) && !opts.allow_interactive;
+    check_fresh(
+        plan.steps
+            .iter()
+            .filter(|s| selected(s.index) && !skipped(s)),
+    )?;
     history::open_log(paths)?;
 
     let mut results = Vec::with_capacity(plan.steps.len());
@@ -121,7 +129,7 @@ pub fn execute_plan(
             results.push(not_run(step.index));
             continue;
         }
-        let outcome = run_step(step, opts);
+        let mut outcome = run_step(step, opts);
         let freed = match outcome.status {
             StepStatus::Done => step.freed.unwrap_or(0),
             _ => 0,
@@ -129,8 +137,15 @@ pub fn execute_plan(
         if outcome.status == StepStatus::Done && matches!(step.kind, StepKind::Trash { .. }) {
             trashed_bytes += freed;
         }
-        history::append(paths, &record(plan, step, opts.actor, &outcome, freed))?;
         if outcome.status == StepStatus::Failed {
+            stopped_at = Some(step.index);
+        }
+        if let Err(e) = history::append(paths, &record(plan, step, opts.actor, &outcome, freed)) {
+            let note = format!("History write failed: {e}; stopping");
+            outcome.reason = Some(match outcome.reason.take() {
+                Some(r) => format!("{r}; {note}"),
+                None => note,
+            });
             stopped_at = Some(step.index);
         }
         results.push(StepResult {
@@ -197,6 +212,13 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
     }
 }
 
+fn already_absent(output: String) -> Outcome {
+    Outcome {
+        reason: Some("already absent".to_string()),
+        ..Outcome::done(output)
+    }
+}
+
 /// Plan paths must be absolute: a relative one would resolve against our cwd, and one
 /// starting with `-` could be read as an option by the trash binary.
 fn check_absolute(paths: &[PathBuf]) -> Result<(), Outcome> {
@@ -213,8 +235,12 @@ fn run_trash(trash_bin: &Path, paths: &[PathBuf]) -> Outcome {
     if let Err(o) = check_absolute(paths) {
         return o;
     }
+    let present: Vec<&PathBuf> = paths.iter().filter(|p| !is_gone(p)).collect();
+    if present.is_empty() {
+        return already_absent(String::new());
+    }
     let mut cmd = Command::new(trash_bin);
-    cmd.args(paths);
+    cmd.args(present);
     process_outcome(&mut cmd, "trash")
 }
 
@@ -269,6 +295,9 @@ fn run_command(argv: &[String], cwd: Option<&Path>) -> Outcome {
     let mut cmd = Command::new(program);
     cmd.args(args);
     if let Some(cwd) = cwd {
+        if let Err(o) = check_absolute(&[cwd.to_path_buf()]) {
+            return o;
+        }
         cmd.current_dir(cwd);
     }
     process_outcome(&mut cmd, program)
@@ -308,10 +337,7 @@ fn run_ollama_delete(url: &str, model: &str) -> Outcome {
     );
     match status {
         200..=299 => Outcome::done(body),
-        404 => Outcome {
-            reason: Some("already absent".to_string()),
-            ..Outcome::done(body)
-        },
+        404 => already_absent(body),
         _ => Outcome::failed(body.clone(), format!("HTTP {status}: {body}")),
     }
 }
@@ -436,6 +462,7 @@ fn record(plan: &Plan, step: &Step, actor: Actor, outcome: &Outcome, freed: u64)
         freed,
         output_tail: outcome.output.clone(),
         trash_paths,
+        reason: outcome.reason.clone(),
     }
 }
 
