@@ -7,6 +7,7 @@ pub mod history;
 pub mod index;
 pub mod paths;
 pub mod plan;
+pub mod query;
 pub mod rules;
 pub mod tools;
 
