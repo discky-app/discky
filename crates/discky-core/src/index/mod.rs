@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs::attr::ObjKind;
 
+pub mod snapshot;
+
 /// Position of a node in [`Index::nodes`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u32);

@@ -14,6 +14,8 @@ rayon.workspace = true
 bitflags = { workspace = true, features = ["serde"] }
 globset.workspace = true
 xxhash-rust.workspace = true
+postcard.workspace = true
+fd-lock.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
