@@ -30,3 +30,8 @@ assert_cmd = "2"
 bitflags = "2"
 plist = "1"
 filetime = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -23,3 +23,7 @@ assert_cmd.workspace = true
 tempfile.workspace = true
 filetime.workspace = true
 serde_json.workspace = true
+
+[[bin]]
+name = "discky-mcp"
+path = "src/main.rs"
