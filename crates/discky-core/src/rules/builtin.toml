@@ -1,0 +1,557 @@
+# Built-in Discky rules. Paths starting with ~ are expanded with $HOME at load.
+
+# --- Dev caches ---
+
+[[rule]]
+id = "cargo-registry"
+category = "dev_caches"
+label = "regenerates"
+title = "Cargo registry"
+explain = "Downloaded crate sources and archives. Cargo re-downloads them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/.cargo/registry"
+[rule.command]
+tool = "cargo"
+argv = ["cargo", "cache", "--autoclean"]
+install_hint = "cargo install cargo-cache"
+
+[[rule]]
+id = "cargo-git"
+category = "dev_caches"
+label = "regenerates"
+title = "Cargo git checkouts"
+explain = "Git dependencies cloned by Cargo. Cargo fetches them again when needed."
+[rule.matcher]
+kind = "path"
+path = "~/.cargo/git"
+[rule.command]
+tool = "cargo"
+argv = ["cargo", "cache", "--autoclean"]
+install_hint = "cargo install cargo-cache"
+
+[[rule]]
+id = "rustup-toolchains"
+category = "dev_caches"
+label = "regenerates"
+title = "Rust toolchains"
+explain = "Installed Rust toolchains. Rustup reinstalls them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/.rustup/toolchains"
+
+[[rule]]
+id = "npm-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "npm cache"
+explain = "Cached npm package tarballs. npm re-downloads them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/.npm/_cacache"
+[rule.command]
+tool = "npm"
+argv = ["npm", "cache", "clean", "--force"]
+
+[[rule]]
+id = "pnpm-store"
+category = "dev_caches"
+label = "regenerates"
+title = "pnpm store"
+explain = "Content-addressable store of pnpm packages. pnpm re-downloads what it needs."
+[rule.matcher]
+kind = "path"
+path = "~/Library/pnpm/store"
+[rule.command]
+tool = "pnpm"
+argv = ["pnpm", "store", "prune"]
+
+[[rule]]
+id = "pnpm-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "pnpm cache"
+explain = "Metadata and package cache of pnpm. It is rebuilt on demand."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/pnpm"
+
+[[rule]]
+id = "yarn-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "Yarn cache"
+explain = "Cached Yarn packages. Yarn re-downloads them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/Yarn"
+[rule.command]
+tool = "yarn"
+argv = ["yarn", "cache", "clean"]
+
+[[rule]]
+id = "pip-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "pip cache"
+explain = "Cached Python wheels and downloads. pip fetches them again when needed."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/pip"
+[rule.command]
+tool = "pip3"
+argv = ["pip3", "cache", "purge"]
+
+[[rule]]
+id = "uv-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "uv cache"
+explain = "Cached Python packages and environments of uv. uv rebuilds them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/.cache/uv"
+[rule.command]
+tool = "uv"
+argv = ["uv", "cache", "clean"]
+
+[[rule]]
+id = "go-modcache"
+category = "dev_caches"
+label = "regenerates"
+title = "Go module cache"
+explain = "Downloaded Go modules. Go re-downloads them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/go/pkg/mod"
+[rule.command]
+tool = "go"
+argv = ["go", "clean", "-modcache"]
+
+[[rule]]
+id = "gem-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "RubyGems data"
+explain = "Installed gems and gem caches. Gems can be reinstalled with bundler or gem."
+[rule.matcher]
+kind = "path"
+path = "~/.gem"
+
+[[rule]]
+id = "cocoapods-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "CocoaPods cache"
+explain = "Cached pod sources and specs. CocoaPods downloads them again when needed."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/CocoaPods"
+[rule.command]
+tool = "pod"
+argv = ["pod", "cache", "clean", "--all"]
+
+[[rule]]
+id = "swiftpm-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "SwiftPM cache"
+explain = "Cached Swift package repositories. SwiftPM fetches them again when needed."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/org.swift.swiftpm"
+[rule.command]
+tool = "swift"
+argv = ["swift", "package", "purge-cache"]
+
+[[rule]]
+id = "gradle-caches"
+category = "dev_caches"
+label = "regenerates"
+title = "Gradle caches"
+explain = "Downloaded dependencies and build caches. Gradle re-downloads them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/.gradle/caches"
+
+[[rule]]
+id = "xcode-deriveddata"
+category = "dev_caches"
+label = "regenerates"
+title = "Xcode DerivedData"
+explain = "Intermediate build products and indexes. Xcode rebuilds them on the next build."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Developer/Xcode/DerivedData"
+
+[[rule]]
+id = "xcode-devicesupport"
+category = "dev_caches"
+label = "regenerates"
+title = "Xcode iOS DeviceSupport"
+explain = "Debug symbols copied from connected devices. Xcode recreates them when a device is connected again."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Developer/Xcode/iOS DeviceSupport"
+
+[[rule]]
+id = "xcode-archives"
+category = "dev_caches"
+label = "app_data"
+title = "Xcode Archives"
+explain = "App archives you built for distribution. They cannot be regenerated if the source is gone."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Developer/Xcode/Archives"
+
+[[rule]]
+id = "coresimulator"
+category = "dev_caches"
+label = "regenerates"
+title = "iOS Simulator data"
+explain = "Simulator runtimes and devices. Only runtimes the current Xcode no longer supports are removed."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Developer/CoreSimulator"
+[rule.command]
+tool = "xcrun"
+argv = ["xcrun", "simctl", "delete", "unavailable"]
+freed_note = "Only runtimes no longer supported by the current Xcode are removed"
+
+[[rule]]
+id = "homebrew-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "Homebrew cache"
+explain = "Downloaded bottles and sources. Homebrew re-downloads them on demand."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/Homebrew"
+[rule.command]
+tool = "brew"
+argv = ["brew", "cleanup", "--prune=all"]
+
+[[rule]]
+id = "playwright-browsers"
+category = "dev_caches"
+label = "regenerates"
+title = "Playwright browsers"
+explain = "Browser builds downloaded by Playwright. They are downloaded again on demand."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/ms-playwright"
+
+[[rule]]
+id = "docker-desktop-disk"
+category = "dev_caches"
+label = "app_data"
+title = "Docker Desktop disk image"
+explain = "Virtual disk holding images, containers and volumes. Pruning frees space inside the VM only."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+[rule.command]
+tool = "docker"
+argv = ["docker", "system", "prune", "-f"]
+freed_note = "Frees space inside the VM; the host image shrinks later"
+
+[[rule]]
+id = "orbstack-disk"
+category = "dev_caches"
+label = "app_data"
+title = "OrbStack disk image"
+explain = "Virtual disk holding images, containers and volumes. Pruning frees space inside the VM only."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Group Containers/HUAQ24HBR6.dev.orbstack/data/data.img.raw"
+[rule.command]
+tool = "docker"
+argv = ["docker", "system", "prune", "-f"]
+freed_note = "Frees space inside the VM; the host image shrinks later"
+
+[[rule]]
+id = "codex-runtimes"
+category = "dev_caches"
+label = "regenerates"
+title = "Codex runtimes"
+explain = "Runtimes cached by Codex. They are downloaded again when needed."
+[rule.matcher]
+kind = "path"
+path = "~/.cache/codex-runtimes"
+
+[[rule]]
+id = "codebase-memory-cache"
+category = "dev_caches"
+label = "regenerates"
+title = "codebase-memory cache"
+explain = "Index cache of the codebase-memory MCP server. It is rebuilt on demand."
+[rule.matcher]
+kind = "path"
+path = "~/.cache/codebase-memory-mcp"
+
+# --- Models ---
+
+[[rule]]
+id = "ollama-models"
+category = "models"
+label = "app_data"
+title = "Ollama models"
+explain = "Models pulled with Ollama, listed per model by the models finder. They can be pulled again."
+[rule.matcher]
+kind = "path"
+path = "~/.ollama/models"
+
+[[rule]]
+id = "hf-hub"
+category = "models"
+label = "regenerates"
+title = "Hugging Face hub"
+explain = "Downloaded Hugging Face model repositories. Each repo can be downloaded again."
+per_child = true
+[rule.matcher]
+kind = "path"
+path = "~/.cache/huggingface/hub"
+[rule.command]
+tool = "hf"
+argv = ["hf", "cache", "rm", "{repo}", "-y"]
+install_hint = "pip install -U huggingface_hub"
+
+[[rule]]
+id = "omlx-models"
+category = "models"
+label = "regenerates"
+title = "oMLX models"
+explain = "Downloaded MLX models. Each model can be downloaded again."
+per_child = true
+[rule.matcher]
+kind = "path"
+path = "~/.omlx/models"
+
+[[rule]]
+id = "lmstudio-models"
+category = "models"
+label = "regenerates"
+title = "LM Studio models"
+explain = "Models downloaded by LM Studio. Each model can be downloaded again."
+per_child = true
+[rule.matcher]
+kind = "path"
+path = "~/.lmstudio/models"
+
+[[rule]]
+id = "macwhisper-models"
+category = "models"
+label = "app_data"
+title = "MacWhisper models"
+explain = "Speech models used by MacWhisper. Each model can be downloaded again from the app."
+per_child = true
+[rule.matcher]
+kind = "path"
+path = "~/Library/Application Support/MacWhisper/models"
+
+# --- Project builds ---
+
+[[rule]]
+id = "cargo-target"
+category = "project_builds"
+label = "regenerates"
+title = "Rust target directory"
+explain = "Build output or dependencies of a project with a Cargo.toml file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = "target"
+marker = "Cargo.toml"
+[rule.command]
+tool = "cargo"
+argv = ["cargo", "clean"]
+
+[[rule]]
+id = "node-modules"
+category = "project_builds"
+label = "regenerates"
+title = "node_modules"
+explain = "Build output or dependencies of a project with a package.json file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = "node_modules"
+marker = "package.json"
+
+[[rule]]
+id = "python-venv"
+category = "project_builds"
+label = "regenerates"
+title = "Python .venv"
+explain = "Build output or dependencies of a project with a pyproject.toml file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = ".venv"
+marker = "pyproject.toml"
+
+[[rule]]
+id = "python-venv-legacy"
+category = "project_builds"
+label = "regenerates"
+title = "Python venv"
+explain = "Build output or dependencies of a project with a requirements.txt file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = "venv"
+marker = "requirements.txt"
+
+[[rule]]
+id = "next-build"
+category = "project_builds"
+label = "regenerates"
+title = "Next.js build"
+explain = "Build output or dependencies of a project with a package.json file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = ".next"
+marker = "package.json"
+
+[[rule]]
+id = "gradle-build"
+category = "project_builds"
+label = "regenerates"
+title = "Gradle build"
+explain = "Build output or dependencies of a project with a build.gradle file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = "build"
+marker = "build.gradle"
+
+[[rule]]
+id = "gradle-build-kts"
+category = "project_builds"
+label = "regenerates"
+title = "Gradle build (Kotlin DSL)"
+explain = "Build output or dependencies of a project with a build.gradle.kts file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = "build"
+marker = "build.gradle.kts"
+
+[[rule]]
+id = "dist"
+category = "project_builds"
+label = "regenerates"
+title = "dist output"
+explain = "Build output or dependencies of a project with a package.json file. It is regenerated by the next build or install."
+[rule.matcher]
+kind = "build_dir"
+name = "dist"
+marker = "package.json"
+
+# --- App caches ---
+
+[[rule]]
+id = "claude-vm-bundles"
+category = "app_caches"
+label = "app_data"
+title = "Claude Desktop VM images"
+explain = "Claude Desktop VM images; re-downloaded when needed."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Application Support/Claude/vm_bundles"
+
+[[rule]]
+id = "vscode-shipit"
+category = "app_caches"
+label = "regenerates"
+title = "VS Code update cache"
+explain = "Downloaded VS Code updates. They are fetched again on the next update."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/com.microsoft.VSCode.ShipIt"
+
+[[rule]]
+id = "slack-shipit"
+category = "app_caches"
+label = "regenerates"
+title = "Slack update cache"
+explain = "Downloaded Slack updates. They are fetched again on the next update."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Caches/com.tinyspeck.slackmacgap.ShipIt"
+
+[[rule]]
+id = "chrome-profile"
+category = "app_caches"
+label = "do_not_touch"
+title = "Chrome profile"
+explain = "Your Chrome profile with bookmarks, passwords and sessions. It does not regenerate."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Application Support/Google/Chrome"
+
+[[rule]]
+id = "drivefs-cache"
+category = "app_caches"
+label = "app_data"
+title = "Google Drive cache"
+explain = "Local cache of Google Drive for desktop. Files not yet synced may be lost."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Application Support/Google/DriveFS"
+
+# --- Do not touch ---
+
+[[rule]]
+id = "keychains"
+category = "app_caches"
+label = "do_not_touch"
+title = "Keychains"
+explain = "Your saved passwords and certificates. They cannot be regenerated."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Keychains"
+
+[[rule]]
+id = "mail"
+category = "app_caches"
+label = "do_not_touch"
+title = "Mail"
+explain = "Your local Mail data. It may be the only copy of your messages."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Mail"
+
+[[rule]]
+id = "messages"
+category = "app_caches"
+label = "do_not_touch"
+title = "Messages"
+explain = "Your local Messages history and attachments. It cannot be regenerated."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Messages"
+
+[[rule]]
+id = "photos-library"
+category = "app_caches"
+label = "do_not_touch"
+title = "Photos library"
+explain = "Your Photos library with the original pictures. It cannot be regenerated."
+[rule.matcher]
+kind = "glob"
+glob = "~/Pictures/*.photoslibrary"
+
+[[rule]]
+id = "icloud"
+category = "app_caches"
+label = "do_not_touch"
+title = "iCloud Drive"
+explain = "Local copies of your iCloud documents. Managed by macOS."
+[rule.matcher]
+kind = "path"
+path = "~/Library/Mobile Documents"
+
+[[rule]]
+id = "cloudstorage"
+category = "app_caches"
+label = "do_not_touch"
+title = "Cloud storage"
+explain = "Cloud provider folders synced by macOS. Deleting files here deletes them in the cloud."
+[rule.matcher]
+kind = "path"
+path = "~/Library/CloudStorage"
