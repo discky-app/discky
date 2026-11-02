@@ -130,3 +130,26 @@ fn findings_in_filters_and_pages() {
     );
     assert!(!b.is_empty() && b.iter().all(|f| f.category == Category::ProjectBuilds));
 }
+
+#[test]
+fn search_limit_keeps_the_largest_matches() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("many");
+    std::fs::create_dir(&dir).unwrap();
+    for i in 0..60 {
+        std::fs::write(dir.join(format!("f{i:02}.dat")), vec![1u8; 100]).unwrap();
+    }
+    std::fs::write(dir.join("largest.dat"), vec![1u8; 1024 * 1024]).unwrap();
+    let s = snap(d.path());
+    let r = search(
+        &s,
+        &SearchQuery {
+            kind: Some(ObjKind::File),
+            under: Some(dir),
+            limit: 10,
+            ..Default::default()
+        },
+    );
+    assert_eq!(r.len(), 10);
+    assert_eq!(r[0].name, "largest.dat");
+}

@@ -71,6 +71,7 @@ pub struct TreeEntry {
 pub struct SearchQuery {
     pub name_glob: Option<String>,
     pub min_allocated: Option<u64>,
+    /// Entries with an unknown (zero) modification time never match.
     pub older_than_days: Option<u32>,
     pub kind: Option<ObjKind>,
     pub under: Option<PathBuf>,
@@ -245,7 +246,8 @@ fn is_within(index: &Index, mut id: NodeId, ancestor: NodeId) -> bool {
     }
 }
 
-/// Linear scan over all nodes; empty if `name_glob` is invalid or `under` is unknown.
+/// Linear scan over all nodes, returning the `limit` largest matches, largest first (ties
+/// by path). Ties at the cut boundary are broken by `NodeId`, not path. Empty if `name_glob` is invalid or `under` is unknown.
 pub fn search(snap: &Snapshot, q: &SearchQuery) -> Vec<TreeEntry> {
     let index = &snap.index;
     let matcher = match &q.name_glob {
@@ -266,10 +268,9 @@ pub fn search(snap: &Snapshot, q: &SearchQuery) -> Vec<TreeEntry> {
         .older_than_days
         .map(|d| now_secs() - i64::from(d) * SECS_PER_DAY);
 
-    let findings = finding_ids(snap);
-    let mut hits: Vec<TreeEntry> = (0..index.nodes.len() as u32)
-        .map(NodeId)
-        .filter(|&id| {
+    let mut hits: Vec<(u64, u32)> = (0..index.nodes.len() as u32)
+        .filter(|&i| {
+            let id = NodeId(i);
             let n = index.node(id);
             let modified = if n.kind == ObjKind::Dir {
                 n.max_mtime
@@ -278,19 +279,32 @@ pub fn search(snap: &Snapshot, q: &SearchQuery) -> Vec<TreeEntry> {
             };
             q.kind.is_none_or(|k| n.kind == k)
                 && q.min_allocated.is_none_or(|m| n.agg_allocated >= m)
-                && cutoff.is_none_or(|c| modified < c)
+                && cutoff.is_none_or(|c| modified > 0 && modified < c)
                 && matcher.as_ref().is_none_or(|m| m.is_match(index.name(id)))
                 && under.is_none_or(|u| is_within(index, id, u))
         })
-        .map(|id| tree_entry(index, id, &findings))
+        .map(|i| (index.node(NodeId(i)).agg_allocated, i))
         .collect();
-    hits.sort_by(|a, b| {
+    // Keep the top `limit` by allocated desc (ties by node id) before building any entry.
+    let by_rank = |a: &(u64, u32), b: &(u64, u32)| b.0.cmp(&a.0).then(a.1.cmp(&b.1));
+    if q.limit == 0 {
+        return Vec::new();
+    }
+    if hits.len() > q.limit {
+        hits.select_nth_unstable_by(q.limit - 1, by_rank);
+        hits.truncate(q.limit);
+    }
+    let findings = finding_ids(snap);
+    let mut entries: Vec<TreeEntry> = hits
+        .into_iter()
+        .map(|(_, i)| tree_entry(index, NodeId(i), &findings))
+        .collect();
+    entries.sort_by(|a, b| {
         b.allocated
             .cmp(&a.allocated)
             .then_with(|| a.path.cmp(&b.path))
     });
-    hits.truncate(q.limit);
-    hits
+    entries
 }
 
 /// Findings passing every filter, paged; also returns the count before paging.
@@ -310,7 +324,7 @@ pub fn findings_in(
         .filter(|f| category.is_none_or(|c| f.category == c))
         .filter(|f| label.is_none_or(|l| f.label == l))
         .filter(|f| f.allocated >= min_allocated)
-        .filter(|f| cutoff.is_none_or(|c| f.modified.is_some_and(|m| m < c)))
+        .filter(|f| cutoff.is_none_or(|c| f.modified.is_some_and(|m| m > 0 && m < c)))
         .collect();
     let total = matching.len();
     (
