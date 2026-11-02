@@ -112,6 +112,7 @@ fn failed_command_stops_the_plan() {
             install_hint: None,
             freed_note: None,
         },
+        path: None,
         ..trash_finding(&d.path().join("nope"))
     };
     let f2 = trash_finding(&later);
@@ -131,14 +132,16 @@ fn failed_command_stops_the_plan() {
 #[test]
 fn interactive_steps_are_skipped_without_permission() {
     let (d, paths, bin) = setup();
-    let mut f = trash_finding(&d.path().join("x"));
-    std::fs::create_dir(d.path().join("x")).unwrap();
-    f.path = Some("/Library/Logs/Discky-test".into());
-    f.removal = Removal::Trash {
-        paths: vec!["/Library/Logs/Discky-test".into()],
-    };
-    let plan = plan_removal(&[&f], &Config::default());
-    let rep = execute_plan(&plan, &opts(Actor::Mcp, bin), &paths).unwrap();
+    // Inside a read-only dir: removing it would need an admin prompt.
+    let ro = d.path().join("ro");
+    let x = ro.join("x");
+    std::fs::create_dir_all(&x).unwrap();
+    std::fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+    let plan = plan_removal(&[&trash_finding(&x)], &Config::default());
+    let rep = execute_plan(&plan, &opts(Actor::Mcp, bin), &paths);
+    std::fs::set_permissions(&ro, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let rep = rep.unwrap();
+    assert!(x.exists());
     assert!(matches!(rep.results[0].status, StepStatus::Skipped));
     assert!(
         rep.results[0]
@@ -250,6 +253,7 @@ fn missing_tool_fails_and_stops() {
             install_hint: Some("Install it.".into()),
             freed_note: None,
         },
+        path: None,
         ..trash_finding(&d.path().join("nope"))
     };
     let plan = plan_removal(&[&f1, &trash_finding(&later)], &Config::default());
@@ -303,6 +307,7 @@ fn command_finding(d: &std::path::Path, script: &str, cwd: Option<std::path::Pat
             install_hint: None,
             freed_note: None,
         },
+        path: None,
         ..trash_finding(&d.join("nope"))
     }
 }
@@ -327,23 +332,201 @@ fn failed_history_write_stops_the_plan_but_returns_the_report() {
     assert!(later.exists());
 }
 
+/// A plan for `f` made while its paths existed, then the paths removed behind its back
+/// and the fingerprints re-taken, as if they had been missing at planning time but
+/// planned anyway (planning itself skips such findings).
+fn plan_then_vanish(f: &Finding, cfg: &Config) -> discky_core::plan::Plan {
+    let mut plan = plan_removal(&[f], cfg);
+    assert_eq!(plan.steps.len(), 1);
+    for fp in &mut plan.steps[0].fingerprints {
+        std::fs::remove_dir_all(&fp.path).unwrap();
+        *fp = discky_core::plan::Fingerprint::take(&fp.path);
+        assert!(!fp.exists);
+    }
+    plan
+}
+
 #[test]
-fn trash_of_an_already_missing_path_is_done_without_invoking_trash() {
+fn trash_of_an_already_missing_path_is_done_frees_nothing_and_skips_trash() {
     let (d, paths, bin) = setup();
-    let missing = d.path().join("gone-before-planning");
-    let plan = plan_removal(&[&trash_finding(&missing)], &Config::default());
-    assert!(!plan.steps[0].fingerprints[0].exists);
+    let missing = d.path().join("gone-before-running");
+    std::fs::create_dir(&missing).unwrap();
+    let plan = plan_then_vanish(&trash_finding(&missing), &Config::default());
     let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
     assert!(matches!(rep.results[0].status, StepStatus::Done));
     assert_eq!(rep.results[0].reason.as_deref(), Some("already absent"));
-    assert_eq!(rep.results[0].freed, 4096);
+    assert_eq!(rep.results[0].freed, 0);
+    assert_eq!((rep.freed_total, rep.trashed_bytes), (0, 0));
     assert_eq!(
         std::fs::read_dir(d.path().join("trashed")).unwrap().count(),
         0
     );
     let h = history::read(&paths, 1).unwrap();
     assert_eq!(h[0].reason.as_deref(), Some("already absent"));
+    assert_eq!(h[0].freed, 0);
     assert!(h[0].trash_paths.is_empty());
+}
+
+#[test]
+fn remove_of_an_already_missing_path_is_done_and_frees_nothing() {
+    let (d, paths, bin) = setup();
+    let missing = d.path().join("gone");
+    std::fs::create_dir(&missing).unwrap();
+    let mut cfg = Config::default();
+    cfg.removal.mode = discky_core::RemovalMode::Permanent;
+    let plan = plan_then_vanish(&trash_finding(&missing), &cfg);
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done));
+    assert_eq!(rep.results[0].reason.as_deref(), Some("already absent"));
+    assert_eq!(rep.freed_total, 0);
+}
+
+#[test]
+fn findings_already_gone_at_planning_are_skipped_and_not_counted() {
+    let d = tempfile::tempdir().unwrap();
+    let present = d.path().join("present");
+    std::fs::create_dir(&present).unwrap();
+    let gone = Finding {
+        id: FindingId("gone".into()),
+        ..trash_finding(&d.path().join("gone"))
+    };
+    let gone_cmd = Finding {
+        id: FindingId("gone-cmd".into()),
+        removal: Removal::Command {
+            tool: "sh".into(),
+            argv: vec!["sh".into(), "-c".into(), "true".into()],
+            cwd: None,
+            install_hint: None,
+            freed_note: None,
+        },
+        ..trash_finding(&d.path().join("gone-too"))
+    };
+    let plan = plan_removal(
+        &[&gone, &trash_finding(&present), &gone_cmd],
+        &Config::default(),
+    );
+    assert_eq!(plan.steps.len(), 1);
+    assert_eq!(plan.total_freed, 4096);
+    let reasons: Vec<_> = plan
+        .skipped
+        .iter()
+        .map(|(id, r)| (id.0.as_str(), r.as_str()))
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            ("gone", "Already gone (rescan to refresh)"),
+            ("gone-cmd", "Already gone (rescan to refresh)")
+        ]
+    );
+}
+
+#[test]
+fn command_that_leaves_the_finding_path_frees_nothing() {
+    let (d, paths, bin) = setup();
+    let proj = d.path().join("proj");
+    let target = proj.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let cmd = |script: &str| Finding {
+        removal: Removal::Command {
+            tool: "sh".into(),
+            argv: vec!["sh".into(), "-c".into(), script.into()],
+            cwd: Some(proj.clone()),
+            install_hint: None,
+            freed_note: None,
+        },
+        ..trash_finding(&target)
+    };
+    let plan = plan_removal(&[&cmd("true")], &Config::default());
+    let rep = execute_plan(&plan, &opts(Actor::App, bin.clone()), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done));
+    assert_eq!(
+        rep.results[0].reason.as_deref(),
+        Some("command finished; path still present")
+    );
+    assert_eq!(rep.freed_total, 0);
+    assert_eq!(history::read(&paths, 1).unwrap()[0].freed, 0);
+
+    // The same command that does remove the path (the cwd stays) is credited.
+    let plan = plan_removal(&[&cmd("rmdir target")], &Config::default());
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done));
+    assert_eq!(rep.results[0].reason, None);
+    assert_eq!(rep.freed_total, 4096);
+}
+
+#[test]
+fn only_steps_outside_the_plan_is_an_error_before_anything_runs() {
+    let (d, paths, bin) = setup();
+    let a = d.path().join("a");
+    std::fs::create_dir(&a).unwrap();
+    let plan = plan_removal(&[&trash_finding(&a)], &Config::default());
+    let mut o = opts(Actor::App, bin);
+    o.only_steps = Some(vec![0, 5]);
+    let e = execute_plan(&plan, &o, &paths).unwrap_err();
+    assert!(matches!(e, ExecuteError::BadStepIndex(5)), "{e}");
+    assert!(a.exists());
+    assert!(!paths.log.exists());
+}
+
+/// A one-shot HTTP server answering every request with `status`; returns its base URL.
+fn http_once(status: &'static str) -> String {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut c, _) = l.accept().unwrap();
+        c.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut req = Vec::new();
+        let mut buf = [0u8; 1024];
+        // Headers, then the declared body.
+        while let Ok(n) = c.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&req).to_lowercase();
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if req.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        let body = r#"{"error":"model not found"}"#;
+        let _ = write!(
+            c,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    });
+    url
+}
+
+#[test]
+fn ollama_404_is_done_already_absent_and_frees_nothing() {
+    let (_d, paths, bin) = setup();
+    let f = Finding {
+        removal: Removal::OllamaDelete {
+            model: "gone:1b".into(),
+        },
+        path: None,
+        ..trash_finding(std::path::Path::new("/unused"))
+    };
+    let mut plan = plan_removal(&[&f], &Config::default());
+    let url = http_once("404 Not Found");
+    if let discky_core::plan::StepKind::OllamaDelete { url: u, .. } = &mut plan.steps[0].kind {
+        *u = url;
+    }
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done), "{rep:?}");
+    assert_eq!(rep.results[0].reason.as_deref(), Some("already absent"));
+    assert_eq!(rep.freed_total, 0);
 }
 
 #[test]
@@ -367,6 +550,7 @@ fn relative_command_cwd_fails() {
 #[test]
 fn stale_interactive_step_that_will_be_skipped_does_not_block() {
     let (d, paths, bin) = setup();
+    std::fs::create_dir(d.path().join("x")).unwrap();
     let mut plan = plan_removal(&[&trash_finding(&d.path().join("x"))], &Config::default());
     // Pretend the step needs admin and its target changed since planning.
     plan.steps[0].flags |= discky_core::plan::StepFlags::INTERACTIVE;

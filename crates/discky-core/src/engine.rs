@@ -17,7 +17,7 @@ use crate::paths::DisckyPaths;
 use crate::plan::execute::{
     ExecuteError, ExecuteOptions, ExecutionReport, StepStatus, execute_plan,
 };
-use crate::plan::{Fingerprint, Plan, PlanId, plan_removal};
+use crate::plan::{Fingerprint, Plan, PlanId, StepKind, plan_removal};
 use crate::query::{self, Overview, QueryError, SearchQuery, TreeEntry};
 use crate::rules::{Category, RuleSet, SafetyLabel};
 use crate::scan::{self, Current, ScanId, ScanJob, ScanRequest, ScanStatus, lock};
@@ -270,13 +270,15 @@ impl Engine {
         })
     }
 
-    /// Plan the removal of the findings `ids`; ids not in the current snapshot are listed
-    /// in `Plan::skipped`. The plan is kept for [`Engine::get_plan`].
+    /// Plan the removal of the findings `ids` (a repeated id counts once, at its first
+    /// position); ids not in the current snapshot are listed in `Plan::skipped`. The plan
+    /// is kept for [`Engine::get_plan`].
     pub fn plan(&self, ids: &[String]) -> Result<Plan, EngineError> {
         let snap = self.snapshot().ok_or(EngineError::NoSnapshot)?;
         let mut found = Vec::new();
         let mut unknown = Vec::new();
-        for id in ids {
+        let mut seen = std::collections::HashSet::new();
+        for id in ids.iter().filter(|id| seen.insert(id.as_str())) {
             match snap.findings.iter().find(|f| &f.id.0 == id) {
                 Some(f) => found.push(f),
                 None => unknown.push((
@@ -300,7 +302,7 @@ impl Engine {
     }
 
     /// Run `plan`, then drop from the in-memory snapshot the findings of `Done` steps
-    /// whose paths are gone. The index and the snapshot file are left as they are; the
+    /// whose paths are gone, and of `Done` Ollama deletes. The index and the snapshot file are left as they are; the
     /// next scan brings both up to date.
     ///
     /// Trash steps run `/usr/bin/trash`, or the program named by the `DISCKY_TRASH_BIN`
@@ -348,21 +350,23 @@ impl Engine {
         })
     }
 
-    /// Publish a snapshot without the findings of `done` steps whose paths are gone. The
-    /// filtering runs without holding the lock; the new snapshot shares the old index.
+    /// Publish a snapshot without the findings of `done` steps whose paths are gone, and
+    /// of `done` Ollama deletes. The filtering runs without holding the lock; the new
+    /// snapshot shares the old index.
     fn forget_removed(&self, done: &[&crate::plan::Step]) {
         let Some(old) = self.snapshot() else {
             return;
         };
         let gone = |f: &Finding| {
             done.iter().any(|s| {
-                s.finding == f.id && {
-                    let paths: Vec<&Path> = match &f.path {
-                        Some(p) => vec![p.as_path()],
-                        None => s.fingerprints.iter().map(|fp| fp.path.as_path()).collect(),
-                    };
-                    !paths.is_empty() && paths.iter().all(|p| !Fingerprint::take(p).exists)
-                }
+                s.finding == f.id
+                    && (matches!(s.kind, StepKind::OllamaDelete { .. }) || {
+                        let paths: Vec<&Path> = match &f.path {
+                            Some(p) => vec![p.as_path()],
+                            None => s.fingerprints.iter().map(|fp| fp.path.as_path()).collect(),
+                        };
+                        !paths.is_empty() && paths.iter().all(|p| !Fingerprint::take(p).exists)
+                    })
             })
         };
         let kept: Vec<&Finding> = old.findings.iter().filter(|f| !gone(f)).collect();
@@ -410,4 +414,99 @@ fn tree_entry(snap: &Snapshot, path: &Path) -> Option<TreeEntry> {
         };
         query::search(snap, &q).into_iter().find(|e| e.path == path)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::findings::Removal;
+    use crate::fs::walk::{ScanOptions, walk};
+    use crate::index::snapshot::SnapshotMeta;
+    use crate::plan::{Step, StepFlags};
+
+    fn ollama_finding(id: &str) -> Finding {
+        Finding {
+            id: FindingId(id.into()),
+            category: Category::Models,
+            title: id.into(),
+            subtitle: None,
+            path: None,
+            node: None,
+            allocated: 1,
+            logical: 1,
+            freed_if_deleted: 1,
+            modified: None,
+            label: SafetyLabel::AppData,
+            rule_id: "ollama-models".into(),
+            explain: String::new(),
+            removal: Removal::OllamaDelete { model: id.into() },
+            flags: vec![],
+        }
+    }
+
+    #[test]
+    fn done_ollama_deletes_are_forgotten() {
+        let d = tempfile::tempdir().unwrap();
+        let index = walk(
+            &ScanOptions {
+                roots: vec![d.path().into()],
+                exclude: globset::GlobSet::empty(),
+                threads: 0,
+                exact_private_size: false,
+            },
+            &|_| {},
+        );
+        let snapshot = Snapshot {
+            meta: SnapshotMeta {
+                format_version: 1,
+                created_at: 1,
+                actor: Actor::Mcp,
+                roots: vec![d.path().into()],
+                no_access: vec![],
+                node_count: 0,
+            },
+            index: Arc::new(index),
+            findings: vec![ollama_finding("a:1b"), ollama_finding("b:1b")],
+        };
+        let engine = Engine {
+            paths: DisckyPaths {
+                config: d.path().join("config.toml"),
+                snapshot: d.path().join("snapshot.bin"),
+                log: d.path().join("removals.log"),
+            },
+            config: RwLock::new(Config::default()),
+            rules: Arc::new(RuleSet::builtin()),
+            actor: Actor::Mcp,
+            current: Arc::new(RwLock::new(Current {
+                snapshot: Some(Arc::new(snapshot)),
+                exact_private_size: None,
+            })),
+            scans: Mutex::default(),
+            plans: Mutex::default(),
+            last_error: Mutex::default(),
+        };
+        let step = Step {
+            index: 0,
+            finding: FindingId("a:1b".into()),
+            description: String::new(),
+            kind: StepKind::OllamaDelete {
+                url: "http://127.0.0.1:9".into(),
+                model: "a:1b".into(),
+            },
+            freed: Some(1),
+            freed_note: None,
+            flags: StepFlags::empty(),
+            warnings: vec![],
+            fingerprints: vec![],
+        };
+        engine.forget_removed(&[&step]);
+        let left: Vec<_> = engine
+            .snapshot()
+            .unwrap()
+            .findings
+            .iter()
+            .map(|f| f.id.0.clone())
+            .collect();
+        assert_eq!(left, ["b:1b"]);
+    }
 }

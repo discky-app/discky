@@ -43,7 +43,9 @@ pub struct StepResult {
     pub status: StepStatus,
     /// Last 4 KiB of stdout+stderr.
     pub output: String,
-    /// The step's planned `freed` when it is `Done`, else 0.
+    /// The step's planned `freed` when it is `Done` and actually freed it, else 0: an
+    /// "already absent" step, or a command whose finding path is still present
+    /// afterwards, frees nothing.
     pub freed: u64,
     pub reason: Option<String>,
 }
@@ -76,6 +78,8 @@ pub struct ExecuteOptions {
 pub enum ExecuteError {
     #[error("plan is stale: {} changed since it was planned", path.display())]
     PlanStale { path: PathBuf },
+    #[error("step index {0} is not in the plan")]
+    BadStepIndex(usize),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -85,6 +89,8 @@ struct Outcome {
     status: StepStatus,
     output: String,
     reason: Option<String>,
+    /// `Done`, but nothing was freed (already absent, or the path is still there).
+    freed_nothing: bool,
 }
 
 impl Outcome {
@@ -93,6 +99,7 @@ impl Outcome {
             status: StepStatus::Done,
             output,
             reason: None,
+            freed_nothing: false,
         }
     }
     fn failed(output: String, reason: impl Into<String>) -> Outcome {
@@ -100,18 +107,36 @@ impl Outcome {
             status: StepStatus::Failed,
             output,
             reason: Some(reason.into()),
+            freed_nothing: false,
+        }
+    }
+    /// `Done` with nothing freed, for `reason`.
+    fn done_freeing_nothing(output: String, reason: &str) -> Outcome {
+        Outcome {
+            reason: Some(reason.to_string()),
+            freed_nothing: true,
+            ..Outcome::done(output)
         }
     }
 }
 
-/// Run `plan` (see the module docs). `Err(PlanStale)` and a log that cannot be opened
-/// are reported before any side effect. A history write that fails after a step ran
+/// Run `plan` (see the module docs). `Err(BadStepIndex)` for an `only_steps` index
+/// outside the plan, `Err(PlanStale)` and a log that cannot be opened are reported before
+/// any side effect. A history write that fails after a step ran
 /// stops the plan at that step (noted in its `reason`) and the report is still returned.
 pub fn execute_plan(
     plan: &Plan,
     opts: &ExecuteOptions,
     paths: &DisckyPaths,
 ) -> Result<ExecutionReport, ExecuteError> {
+    if let Some(&bad) = opts
+        .only_steps
+        .iter()
+        .flatten()
+        .find(|&&i| i >= plan.steps.len())
+    {
+        return Err(ExecuteError::BadStepIndex(bad));
+    }
     let selected = |i: usize| opts.only_steps.as_ref().is_none_or(|o| o.contains(&i));
     let skipped = |s: &Step| s.flags.contains(StepFlags::INTERACTIVE) && !opts.allow_interactive;
     check_fresh(
@@ -131,7 +156,7 @@ pub fn execute_plan(
         }
         let mut outcome = run_step(step, opts);
         let freed = match outcome.status {
-            StepStatus::Done => step.freed.unwrap_or(0),
+            StepStatus::Done if !outcome.freed_nothing => step.freed.unwrap_or(0),
             _ => 0,
         };
         if outcome.status == StepStatus::Done && matches!(step.kind, StepKind::Trash { .. }) {
@@ -194,6 +219,7 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
             status: StepStatus::Skipped,
             output: String::new(),
             reason: Some(INTERACTIVE_REASON.to_string()),
+            freed_nothing: false,
         };
     }
     if step.flags.contains(StepFlags::TOOL_MISSING) {
@@ -207,15 +233,33 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
         StepKind::Quit { bundle_id } => run_quit(bundle_id),
         StepKind::Trash { paths } => verify_gone(paths, run_trash(&opts.trash_bin, paths)),
         StepKind::Remove { paths } => verify_gone(paths, run_remove(paths)),
-        StepKind::Command { argv, cwd } => run_command(argv, cwd.as_deref()),
+        StepKind::Command { argv, cwd } => {
+            verify_command(step, cwd.as_deref(), run_command(argv, cwd.as_deref()))
+        }
         StepKind::OllamaDelete { url, model } => run_ollama_delete(url, model),
     }
 }
 
 fn already_absent(output: String) -> Outcome {
-    Outcome {
-        reason: Some("already absent".to_string()),
-        ..Outcome::done(output)
+    Outcome::done_freeing_nothing(output, "already absent")
+}
+
+/// The finding path of a command step: its fingerprinted path that is not the cwd.
+fn command_target<'a>(step: &'a Step, cwd: Option<&Path>) -> Option<&'a Path> {
+    step.fingerprints
+        .iter()
+        .map(|f| f.path.as_path())
+        .find(|p| Some(*p) != cwd)
+}
+
+/// A `Done` command whose finding path still exists afterwards stays `Done` but frees
+/// nothing: what it actually removed cannot be measured here.
+fn verify_command(step: &Step, cwd: Option<&Path>, outcome: Outcome) -> Outcome {
+    match command_target(step, cwd) {
+        Some(p) if outcome.status == StepStatus::Done && !is_gone(p) => {
+            Outcome::done_freeing_nothing(outcome.output, "command finished; path still present")
+        }
+        _ => outcome,
     }
 }
 
@@ -247,6 +291,9 @@ fn run_trash(trash_bin: &Path, paths: &[PathBuf]) -> Outcome {
 fn run_remove(paths: &[PathBuf]) -> Outcome {
     if let Err(o) = check_absolute(paths) {
         return o;
+    }
+    if paths.iter().all(|p| is_gone(p)) {
+        return already_absent(String::new());
     }
     for p in paths {
         // `lstat`: a symlink is removed as a link, never followed.

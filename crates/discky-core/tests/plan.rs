@@ -1,17 +1,25 @@
 use discky_core::{
     config::{Config, RemovalMode},
     findings::{Finding, FindingId, Removal},
-    plan::{StepFlags, StepKind, plan_removal},
+    plan::{StepFlags, StepKind, needs_admin, plan_removal},
     rules::{Category, SafetyLabel},
 };
 
+/// `<tmp>/discky-plan-<name>`, created: planning skips findings whose paths are all gone.
+fn existing(name: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("discky-plan-{name}"));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+/// A finding whose own path exists.
 fn finding(id: &str, removal: Removal, freed: u64, label: SafetyLabel) -> Finding {
     Finding {
         id: FindingId(id.into()),
         category: Category::DevCaches,
         title: id.into(),
         subtitle: None,
-        path: Some(std::env::temp_dir().join(id)),
+        path: Some(existing(id)),
         node: None,
         allocated: freed,
         logical: freed,
@@ -100,21 +108,21 @@ fn command_without_note_credits_freed_and_finds_installed_tool() {
 #[test]
 fn do_not_touch_is_skipped_and_outside_home_is_interactive() {
     let f1 = finding("k", Removal::None, 1, SafetyLabel::DoNotTouch);
+    // Planned only, never run: a root-owned dir that exists on every Mac.
     let mut f2 = finding(
         "sys",
         Removal::Trash {
-            paths: vec!["/Library/Logs/X".into()],
+            paths: vec!["/Library/Logs".into()],
         },
         1,
         SafetyLabel::AppData,
     );
-    f2.path = Some("/Library/Logs/X".into());
+    f2.path = Some("/Library/Logs".into());
     let plan = plan_removal(&[&f1, &f2], &Config::default());
     assert_eq!(plan.skipped.len(), 1);
     assert_eq!(plan.skipped[0].1, "Marked do-not-touch");
     assert!(plan.steps[0].flags.contains(StepFlags::INTERACTIVE));
-    assert!(!plan.steps[0].fingerprints[0].exists);
-    assert_eq!(plan.steps[0].fingerprints[0].allocated, 0);
+    assert!(plan.steps[0].fingerprints[0].exists);
 }
 
 #[test]
@@ -140,7 +148,7 @@ fn steps_are_ordered_quit_then_commands_then_trash() {
     let trash = finding(
         "t1",
         Removal::Trash {
-            paths: vec![std::env::temp_dir().join("t1")],
+            paths: vec![existing("t1")],
         },
         1,
         SafetyLabel::Regenerates,
@@ -151,7 +159,8 @@ fn steps_are_ordered_quit_then_commands_then_trash() {
         2,
         SafetyLabel::AppData,
     );
-    let app_dir = std::env::temp_dir().join("com.example.app");
+    let app_dir = existing("x").join("com.example.app");
+    std::fs::create_dir_all(&app_dir).unwrap();
     let mut app = finding(
         "a1",
         Removal::Trash {
@@ -189,7 +198,7 @@ fn steps_are_ordered_quit_then_commands_then_trash() {
 
 #[test]
 fn to_json_has_the_documented_shape() {
-    let p = std::env::temp_dir().join("discky-plan-json");
+    let p = existing("json");
     let f = finding(
         "discky-plan-json",
         Removal::Trash {
@@ -230,32 +239,13 @@ fn symlinked_ancestor_is_resolved_for_the_admin_check() {
     let tmp = tempfile::tempdir().unwrap();
     let link = tmp.path().join("link");
     std::os::unix::fs::symlink("/Library/Logs", &link).unwrap();
-    let target = link.join("X");
-    let mut f = finding(
-        "lnk",
-        Removal::Trash {
-            paths: vec![target.clone()],
-        },
-        1,
-        SafetyLabel::AppData,
-    );
-    f.path = Some(target);
-    let plan = plan_removal(&[&f], &Config::default());
-    assert!(plan.steps[0].flags.contains(StepFlags::INTERACTIVE));
+    // Checked directly: planning skips findings whose paths do not exist.
+    assert!(needs_admin(&link.join("X")));
 
     // A dangling link is skipped: the next ancestor (our temp dir) decides.
     let dangling = tmp.path().join("dangling");
     std::os::unix::fs::symlink(tmp.path().join("missing"), &dangling).unwrap();
-    let f2 = finding(
-        "dng",
-        Removal::Trash {
-            paths: vec![dangling.join("X")],
-        },
-        1,
-        SafetyLabel::AppData,
-    );
-    let plan = plan_removal(&[&f2], &Config::default());
-    assert!(!plan.steps[0].flags.contains(StepFlags::INTERACTIVE));
+    assert!(!needs_admin(&dangling.join("X")));
 }
 
 #[test]

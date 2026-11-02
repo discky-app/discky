@@ -146,8 +146,12 @@ fn inspect_by_path_and_unknown_ids_are_skipped() {
     let finding = target.finding.expect("proj/target is a finding");
     assert!(target.rule.is_some());
 
-    let plan = e.plan(&[finding.id.0.clone(), "nope".into()]).unwrap();
+    // A repeated id is planned once, at its first position.
+    let plan = e
+        .plan(&[finding.id.0.clone(), "nope".into(), finding.id.0.clone()])
+        .unwrap();
     assert_eq!(plan.steps.len(), 1);
+    assert_eq!(plan.total_freed, finding.freed_if_deleted);
     assert_eq!(plan.skipped.len(), 1);
     assert_eq!(plan.skipped[0].0.0, "nope");
     assert_eq!(e.get_plan(&plan.id).unwrap().id, plan.id);

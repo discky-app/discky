@@ -156,7 +156,8 @@ pub struct Plan {
     pub steps: Vec<Step>,
     /// Sum of every step's `freed`.
     pub total_freed: u64,
-    /// Findings not planned, with the reason.
+    /// Findings not planned, with the reason (e.g. do-not-touch, or every path already
+    /// gone at planning time).
     pub skipped: Vec<(FindingId, String)>,
 }
 
@@ -332,6 +333,20 @@ fn removal_step(f: &Finding, cfg: &Config) -> Result<Step, String> {
     }
 }
 
+const ALREADY_GONE: &str = "Already gone (rescan to refresh)";
+
+/// Every path the finding's removal acts on is missing now (by [`Fingerprint::take`], so
+/// an unreadable path is never "gone"). Trash removals act on their paths, commands on
+/// the finding's path; Ollama models and findings without paths are never gone here.
+fn already_gone(f: &Finding) -> bool {
+    let paths: Vec<&Path> = match &f.removal {
+        Removal::Trash { paths } => paths.iter().map(PathBuf::as_path).collect(),
+        Removal::Command { .. } => f.path.as_deref().into_iter().collect(),
+        Removal::OllamaDelete { .. } | Removal::None => Vec::new(),
+    };
+    !paths.is_empty() && paths.iter().all(|p| !Fingerprint::take(p).exists)
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -348,6 +363,10 @@ pub fn plan_removal(findings: &[&Finding], cfg: &Config) -> Plan {
     let mut skipped = Vec::new();
     let mut quitting = HashSet::new();
     for f in findings {
+        if already_gone(f) {
+            skipped.push((f.id.clone(), ALREADY_GONE.to_string()));
+            continue;
+        }
         let main = match removal_step(f, cfg) {
             Ok(s) => s,
             Err(reason) => {
