@@ -422,12 +422,18 @@ fn findings_already_gone_at_planning_are_skipped_and_not_counted() {
 }
 
 #[test]
-fn command_that_leaves_the_finding_path_frees_nothing() {
+fn command_that_leaves_the_finding_path_is_credited_what_it_measurably_freed() {
+    use std::os::unix::fs::MetadataExt;
     let (d, paths, bin) = setup();
     let proj = d.path().join("proj");
     let target = proj.join("target");
-    std::fs::create_dir_all(&target).unwrap();
-    let cmd = |script: &str| Finding {
+    for sub in ["sub", "keep"] {
+        std::fs::create_dir_all(target.join(sub)).unwrap();
+        std::fs::write(target.join(sub).join("f"), vec![1u8; 64 * 1024]).unwrap();
+    }
+    let blocks = |p: &std::path::Path| std::fs::symlink_metadata(p).unwrap().blocks() * 512;
+    let sub_bytes = blocks(&target.join("sub")) + blocks(&target.join("sub/f"));
+    let cmd = |script: &str, freed: u64| Finding {
         removal: Removal::Command {
             tool: "sh".into(),
             argv: vec!["sh".into(), "-c".into(), script.into()],
@@ -435,20 +441,46 @@ fn command_that_leaves_the_finding_path_frees_nothing() {
             install_hint: None,
             freed_note: None,
         },
+        freed_if_deleted: freed,
         ..trash_finding(&target)
     };
-    let plan = plan_removal(&[&cmd("true")], &Config::default());
+
+    // Nothing removed: nothing freed.
+    let plan = plan_removal(&[&cmd("true", 1 << 30)], &Config::default());
     let rep = execute_plan(&plan, &opts(Actor::App, bin.clone()), &paths).unwrap();
     assert!(matches!(rep.results[0].status, StepStatus::Done));
     assert_eq!(
         rep.results[0].reason.as_deref(),
-        Some("command finished; path still present")
+        Some("command finished; nothing freed")
     );
     assert_eq!(rep.freed_total, 0);
     assert_eq!(history::read(&paths, 1).unwrap()[0].freed, 0);
 
-    // The same command that does remove the path (the cwd stays) is credited.
-    let plan = plan_removal(&[&cmd("rmdir target")], &Config::default());
+    // A purge inside the dir: credited what it removed; the dir stays.
+    let plan = plan_removal(&[&cmd("rm -rf target/sub", 1 << 30)], &Config::default());
+    let rep = execute_plan(&plan, &opts(Actor::App, bin.clone()), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done));
+    assert!(target.join("keep").exists() && !target.join("sub").exists());
+    // The parent dir's own blocks may shrink or not: allow one block of slack.
+    let got = rep.freed_total;
+    assert!(got.abs_diff(sub_bytes) <= 4096, "{got} vs {sub_bytes}");
+    let reason = rep.results[0].reason.as_deref().unwrap();
+    assert!(
+        reason.starts_with("command finished; ")
+            && reason.ends_with(&format!(" freed inside {}", target.display())),
+        "{reason}"
+    );
+    assert_eq!(history::read(&paths, 1).unwrap()[0].freed, got);
+
+    // Capped at the planned freed.
+    std::fs::create_dir_all(target.join("sub")).unwrap();
+    std::fs::write(target.join("sub/f"), vec![1u8; 64 * 1024]).unwrap();
+    let plan = plan_removal(&[&cmd("rm -rf target/sub", 10)], &Config::default());
+    let rep = execute_plan(&plan, &opts(Actor::App, bin.clone()), &paths).unwrap();
+    assert_eq!(rep.freed_total, 10);
+
+    // The same kind of command that removes the path (the cwd stays) is credited in full.
+    let plan = plan_removal(&[&cmd("rm -rf target", 4096)], &Config::default());
     let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
     assert!(matches!(rep.results[0].status, StepStatus::Done));
     assert_eq!(rep.results[0].reason, None);

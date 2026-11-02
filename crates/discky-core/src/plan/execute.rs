@@ -44,8 +44,9 @@ pub struct StepResult {
     /// Last 4 KiB of stdout+stderr.
     pub output: String,
     /// The step's planned `freed` when it is `Done` and actually freed it, else 0: an
-    /// "already absent" step, or a command whose finding path is still present
-    /// afterwards, frees nothing.
+    /// "already absent" step frees nothing, and a command whose target path is still
+    /// present afterwards is credited what it measurably freed inside it (at most the
+    /// planned `freed`).
     pub freed: u64,
     pub reason: Option<String>,
 }
@@ -91,6 +92,9 @@ struct Outcome {
     reason: Option<String>,
     /// `Done`, but nothing was freed (already absent, or the path is still there).
     freed_nothing: bool,
+    /// `Done`, crediting this many bytes instead of the step's planned `freed`
+    /// (measured for a command whose target path survives).
+    measured: Option<u64>,
 }
 
 impl Outcome {
@@ -100,6 +104,7 @@ impl Outcome {
             output,
             reason: None,
             freed_nothing: false,
+            measured: None,
         }
     }
     fn failed(output: String, reason: impl Into<String>) -> Outcome {
@@ -108,6 +113,7 @@ impl Outcome {
             output,
             reason: Some(reason.into()),
             freed_nothing: false,
+            measured: None,
         }
     }
     /// `Done` with nothing freed, for `reason`.
@@ -156,7 +162,8 @@ pub fn execute_plan(
         }
         let mut outcome = run_step(step, opts);
         let freed = match outcome.status {
-            StepStatus::Done if !outcome.freed_nothing => step.freed.unwrap_or(0),
+            StepStatus::Done if outcome.freed_nothing => 0,
+            StepStatus::Done => outcome.measured.unwrap_or_else(|| step.freed.unwrap_or(0)),
             _ => 0,
         };
         if outcome.status == StepStatus::Done && matches!(step.kind, StepKind::Trash { .. }) {
@@ -220,6 +227,7 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
             output: String::new(),
             reason: Some(INTERACTIVE_REASON.to_string()),
             freed_nothing: false,
+            measured: None,
         };
     }
     if step.flags.contains(StepFlags::TOOL_MISSING) {
@@ -234,7 +242,13 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
         StepKind::Trash { paths } => verify_gone(paths, run_trash(&opts.trash_bin, paths)),
         StepKind::Remove { paths } => verify_gone(paths, run_remove(paths)),
         StepKind::Command { argv, cwd } => {
-            verify_command(step, cwd.as_deref(), run_command(argv, cwd.as_deref()))
+            let target = command_target(step, cwd.as_deref());
+            let before = target.map(allocated_tree);
+            let outcome = run_command(argv, cwd.as_deref());
+            match (target, before) {
+                (Some(t), Some(before)) => measure_command(step, t, before, outcome),
+                _ => outcome,
+            }
         }
         StepKind::OllamaDelete { url, model } => run_ollama_delete(url, model),
     }
@@ -252,15 +266,66 @@ fn command_target<'a>(step: &'a Step, cwd: Option<&Path>) -> Option<&'a Path> {
         .find(|p| Some(*p) != cwd)
 }
 
-/// A `Done` command whose finding path still exists afterwards stays `Done` but frees
-/// nothing: what it actually removed cannot be measured here.
-fn verify_command(step: &Step, cwd: Option<&Path>, outcome: Outcome) -> Outcome {
-    match command_target(step, cwd) {
-        Some(p) if outcome.status == StepStatus::Done && !is_gone(p) => {
-            Outcome::done_freeing_nothing(outcome.output, "command finished; path still present")
-        }
-        _ => outcome,
+/// A `Done` command whose target path is gone is credited its planned `freed`. One whose
+/// target survives (a cache purge that keeps its top directory) stays `Done` and is
+/// credited what it measurably freed inside it: `before - after`, capped at the planned
+/// `freed`.
+fn measure_command(step: &Step, target: &Path, before: u64, outcome: Outcome) -> Outcome {
+    if outcome.status != StepStatus::Done || is_gone(target) {
+        return outcome;
     }
+    let freed = before
+        .saturating_sub(allocated_tree(target))
+        .min(step.freed.unwrap_or(u64::MAX));
+    let reason = if freed > 0 {
+        format!(
+            "command finished; {} freed inside {}",
+            human_bytes(freed),
+            target.display()
+        )
+    } else {
+        "command finished; nothing freed".to_string()
+    };
+    Outcome {
+        reason: Some(reason),
+        measured: Some(freed),
+        ..outcome
+    }
+}
+
+/// Allocated bytes (`st_blocks * 512`) of `path` and everything below it, by `lstat`
+/// (symlinks are counted as links, never followed). Unreadable entries count as 0.
+fn allocated_tree(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(m) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        total += m.blocks() * 512;
+        if m.is_dir()
+            && let Ok(rd) = std::fs::read_dir(&p)
+        {
+            stack.extend(rd.flatten().map(|e| e.path()));
+        }
+    }
+    total
+}
+
+/// `512 B`, `1.5 KB`, `14.0 GB` (1024-based).
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut v = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    format!("{v:.1} {}", UNITS[unit])
 }
 
 /// Plan paths must be absolute: a relative one would resolve against our cwd, and one
