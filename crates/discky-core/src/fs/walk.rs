@@ -13,6 +13,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use globset::GlobSet;
+use serde::Serialize;
 
 use crate::fs::attr::{EF_MAY_SHARE_BLOCKS, ObjKind, RawEntry, is_sparse, read_dir_bulk_on_dev};
 use crate::fs::dataless::{is_dataless, set_no_materialize};
@@ -37,7 +38,7 @@ pub struct ScanOptions {
     pub exact_private_size: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Progress {
     pub files: u64,
     pub dirs: u64,

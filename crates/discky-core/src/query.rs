@@ -50,6 +50,12 @@ pub struct Overview {
     /// Sum of `freed_if_deleted` over findings labelled `Regenerates`.
     pub safe_to_free: u64,
     pub no_access: usize,
+    /// How the last scan measured `freed_if_deleted`: `Some(false)` = fast mode
+    /// (clone-aware only; blocks also held by APFS local snapshots are counted as freed),
+    /// `Some(true)` = exact mode (the kernel's private size, enabled when Time Machine
+    /// local snapshots exist). `None` when unknown: no snapshot, or a snapshot loaded from
+    /// disk (its format does not record the mode). Set by the `Engine`.
+    pub exact_private_size: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -139,6 +145,7 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
             by_category: CATEGORIES.iter().map(|&c| (c, 0)).collect(),
             safe_to_free: 0,
             no_access: 0,
+            exact_private_size: None,
         };
     };
     let by_category = CATEGORIES
@@ -166,6 +173,7 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
             .map(|f| f.freed_if_deleted)
             .sum(),
         no_access: snap.meta.no_access.len(),
+        exact_private_size: None,
     }
 }
 
