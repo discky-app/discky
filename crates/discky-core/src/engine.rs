@@ -119,6 +119,15 @@ impl Engine {
         Ok(())
     }
 
+    /// Re-read config.toml from disk and make it current, writing nothing. For a
+    /// long-lived process (the MCP server) while Discky.app edits the file. On error the
+    /// current config is kept.
+    pub fn reload_config(&self) -> Result<(), ConfigError> {
+        let c = Config::load(&self.paths)?;
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = c;
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> Option<Arc<Snapshot>> {
         self.read_current().snapshot.clone()
     }

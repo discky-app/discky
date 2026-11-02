@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use discky_core::plan::execute::{ExecuteError, StepStatus};
-use discky_core::plan::{PlanId, StepFlags};
+use discky_core::plan::{PlanId, StepFlags, StepKind};
 use discky_core::query::{QueryError, SearchQuery};
-use discky_core::{Config, DisckyPaths, Engine, EngineError, ScanId, ScanStatus};
+use discky_core::{Config, DisckyPaths, Engine, EngineError, RemovalMode, ScanId, ScanStatus};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
@@ -31,9 +31,10 @@ const URI_CONFIG: &str = "discky://config";
 const URI_LOG: &str = "discky://log/removals";
 
 const NO_SNAPSHOT: &str = "No snapshot yet. Call `scan` first.";
+const MODE_CHANGED: &str = "Removal mode changed since planning. Call plan_removal again.";
 const DELETE_DISABLED: &str = "Agent deletion is disabled. Enable it in Discky → Settings → MCP server (`mcp.allow_agent_delete = true` in config.toml)";
 
-const INSTRUCTIONS: &str = "Discky is a macOS disk-cleanup tool: it scans the disk, finds removable things (caches, build outputs, models, large old files) and removes them safely. Call `disk_overview` first; if it reports `stale: true`, call `scan` (pass `wait_seconds` up to 30, or poll `scan_status`). All sizes are bytes actually allocated on disk, and `freed_if_deleted` is what deleting really frees (clones and hard links shared elsewhere are not counted). Always call `plan_removal` and show the plan to the user before `execute_plan`; `execute_plan` is disabled until the user enables agent deletion in Discky settings. Never guess paths: use `findings`, `tree`, `search` and `inspect`.";
+const INSTRUCTIONS: &str = "Discky is a macOS disk-cleanup tool: it scans the disk, finds removable things (caches, build outputs, models, large old files) and removes them safely. Call `disk_overview` first; if it reports `stale: true`, call `scan` (pass `wait_seconds` up to 60, or poll `scan_status`). All sizes are bytes actually allocated on disk, and `freed_if_deleted` is what deleting really frees (clones and hard links shared elsewhere are not counted). Always call `plan_removal` and show the plan to the user before `execute_plan`; `execute_plan` is disabled until the user enables agent deletion in Discky settings. Never guess paths: use `findings`, `tree`, `search` and `inspect`.";
 
 #[derive(Clone)]
 pub struct DisckyServer {
@@ -41,11 +42,11 @@ pub struct DisckyServer {
     tool_router: ToolRouter<Self>,
 }
 
-/// Run blocking engine work off the async runtime.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+/// Run blocking engine work off the async runtime; a panic becomes a tool error.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
     tokio::task::spawn_blocking(f)
         .await
-        .expect("engine task panicked")
+        .map_err(|_| "internal error: engine task panicked".to_string())
 }
 
 fn engine_error(e: EngineError) -> String {
@@ -77,6 +78,13 @@ impl DisckyServer {
         DisckyServer {
             engine,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Pick up edits Discky.app made to config.toml; on error keep the last good config.
+    fn reload_config(&self) {
+        if let Err(e) = self.engine.reload_config() {
+            tracing::warn!("keeping the previous config: {e}");
         }
     }
 
@@ -116,7 +124,8 @@ impl DisckyServer {
         &self,
         Parameters(p): Parameters<ScanParams>,
         ctx: RequestContext<RoleServer>,
-    ) -> Json<ScanOut> {
+    ) -> Result<Json<ScanOut>, String> {
+        self.reload_config();
         let roots = p
             .roots
             .map(|rs| rs.iter().map(|r| expand_tilde(r)).collect());
@@ -146,12 +155,12 @@ impl DisckyServer {
             if let Some(task) = progress {
                 task.abort();
             }
-            status
+            status?
         };
-        Json(ScanOut {
+        Ok(Json(ScanOut {
             scan_id: id.0,
             status,
-        })
+        }))
     }
 
     #[tool(
@@ -237,7 +246,7 @@ impl DisckyServer {
         };
         let engine = Arc::clone(&self.engine);
         let entries = blocking(move || engine.search(&q))
-            .await
+            .await?
             .map_err(engine_error)?;
         Ok(Json(EntriesOut { entries }))
     }
@@ -269,9 +278,10 @@ impl DisckyServer {
         &self,
         Parameters(p): Parameters<PlanParams>,
     ) -> Result<Json<PlanOut>, String> {
+        self.reload_config();
         let engine = Arc::clone(&self.engine);
         let plan = blocking(move || engine.plan(&p.finding_ids))
-            .await
+            .await?
             .map_err(engine_error)?;
         let mut v = plan.to_json();
         Ok(Json(PlanOut {
@@ -292,18 +302,26 @@ impl DisckyServer {
         &self,
         Parameters(p): Parameters<ExecuteParams>,
     ) -> Result<Json<ExecuteOut>, String> {
-        // Re-read on every call so the user's toggle applies without a restart.
-        let config = Config::load(&DisckyPaths::resolve()).map_err(|e| e.to_string())?;
+        // Re-read on every call so the user's settings apply without a restart.
+        self.reload_config();
+        let config = self.engine.config();
         if !config.mcp.allow_agent_delete {
             return Err(DELETE_DISABLED.to_string());
         }
         let plan = self.engine.get_plan(&PlanId(p.plan_id)).ok_or(
             "Unknown plan id (plans are kept for this server session only). Call plan_removal again.",
         )?;
+        let wrong_kind = |k: &StepKind| match config.removal.mode {
+            RemovalMode::Trash => matches!(k, StepKind::Remove { .. }),
+            RemovalMode::Permanent => matches!(k, StepKind::Trash { .. }),
+        };
+        if plan.steps.iter().any(|s| wrong_kind(&s.kind)) {
+            return Err(MODE_CHANGED.to_string());
+        }
         let engine = Arc::clone(&self.engine);
         let run = plan.clone();
         let report = blocking(move || engine.execute(&run, false, p.only_steps))
-            .await
+            .await?
             .map_err(|e| match e {
                 ExecuteError::PlanStale { path } => format!(
                     "Files changed since planning ({}). Call plan_removal again.",

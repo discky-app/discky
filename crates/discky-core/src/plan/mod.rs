@@ -17,7 +17,10 @@ use crate::tools;
 
 pub mod execute;
 
-/// 16 hex chars of `xxh3_64` over `created_at` and the planned finding ids.
+/// 16 hex chars of `xxh3_64` over `created_at`, a per-process counter and the planned
+/// finding ids. The counter keeps two plans of the same findings made in the same second
+/// apart (e.g. before and after a removal-mode change), so `Engine::get_plan` never
+/// returns the older one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PlanId(pub String);
@@ -373,10 +376,12 @@ pub fn plan_removal(findings: &[&Finding], cfg: &Config) -> Plan {
     for (i, s) in steps.iter_mut().enumerate() {
         s.index = i;
     }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let ids: Vec<&str> = findings.iter().map(|f| f.id.0.as_str()).collect();
     let id = PlanId(format!(
         "{:016x}",
-        xxh3_64(format!("{created_at}:{}", ids.join(",")).as_bytes())
+        xxh3_64(format!("{created_at}:{n}:{}", ids.join(",")).as_bytes())
     ));
     let total_freed = steps.iter().filter_map(|s| s.freed).sum();
     Plan {
@@ -443,6 +448,14 @@ impl Plan {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn plans_of_the_same_findings_in_the_same_second_get_distinct_ids() {
+        let cfg = Config::default();
+        let a = plan_removal(&[], &cfg);
+        let b = plan_removal(&[], &cfg);
+        assert_ne!(a.id, b.id);
+    }
 
     #[test]
     fn fingerprint_of_unreadable_path_is_unknown_not_missing() {

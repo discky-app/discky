@@ -5,14 +5,20 @@ mod fixtures;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::time::Duration;
 
 use serde_json::{Value, json};
+
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct Mcp {
     child: Child,
     stdin: ChildStdin,
-    out: BufReader<ChildStdout>,
+    /// Lines read from the server's stdout by a reader thread, so a hung server fails
+    /// the test after [`READ_TIMEOUT`] instead of blocking forever.
+    lines: Receiver<String>,
     next: u64,
 }
 
@@ -28,10 +34,19 @@ impl Mcp {
             .expect("spawn discky-mcp");
         let stdin = child.stdin.take().unwrap();
         let out = BufReader::new(child.stdout.take().unwrap());
+        let (tx, lines) = channel();
+        std::thread::spawn(move || {
+            for line in out.lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
         Mcp {
             child,
             stdin,
-            out,
+            lines,
             next: 1,
         }
     }
@@ -49,9 +64,13 @@ impl Mcp {
         self.next += 1;
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         let response = loop {
-            let mut line = String::new();
-            let n = self.out.read_line(&mut line).unwrap();
-            assert!(n > 0, "server closed stdout while waiting for {method}");
+            let line = match self.lines.recv_timeout(READ_TIMEOUT) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => panic!("no response to {method} within 60 s"),
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("server closed stdout while waiting for {method}")
+                }
+            };
             let msg: Value = serde_json::from_str(&line)
                 .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
             if msg["id"] == json!(id) && msg.get("method").is_none() {
@@ -187,14 +206,38 @@ fn full_flow_scan_findings_plan_refused_then_allowed() {
             .contains("allow_agent_delete")
     );
 
-    std::fs::write(
-        d.path().join("config.toml"),
-        format!(
-            "[scan]\nroots = [\"{}\"]\n[mcp]\nallow_agent_delete = true\n[removal]\nmode = \"permanent\"\n",
-            tree.display()
-        ),
-    )
-    .unwrap();
+    // The removal mode is re-read while the server runs: a plan made after the switch to
+    // permanent removes, and running it after switching back to the Trash is refused.
+    let config = |extra: &str| {
+        std::fs::write(
+            d.path().join("config.toml"),
+            format!("[scan]\nroots = [\"{}\"]\n{extra}", tree.display()),
+        )
+        .unwrap();
+    };
+    config("[removal]\nmode = \"permanent\"\n");
+    let permanent = m.tool("plan_removal", json!({"finding_ids": [&id]}));
+    let kinds: Vec<_> = permanent["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["kind"].clone())
+        .collect();
+    assert!(kinds.contains(&json!("remove")), "{permanent}");
+    config("[mcp]\nallow_agent_delete = true\n[removal]\nmode = \"trash\"\n");
+    let r = m.call(
+        "tools/call",
+        json!({"name": "execute_plan", "arguments": {"plan_id": permanent["id"]}}),
+    );
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("Removal mode changed since planning"),
+        "{text}"
+    );
+    assert!(tree.join("web/node_modules").exists());
+
+    config("[mcp]\nallow_agent_delete = true\n[removal]\nmode = \"permanent\"\n");
     let mut m = Mcp::start(d.path());
     m.initialize();
     let ov = m.tool("disk_overview", json!({}));

@@ -187,3 +187,24 @@ fn execute_while_a_reader_holds_the_snapshot_shares_the_index() {
         "the held snapshot is unchanged"
     );
 }
+
+#[test]
+fn reload_config_reads_the_file_without_writing_it() {
+    let d = tempfile::tempdir().unwrap();
+    let e = engine_in(&d);
+    assert_eq!(e.config().removal.mode, discky_core::RemovalMode::Trash);
+    let file = d.path().join("config.toml");
+    let text = "[removal]\nmode = \"permanent\"\n";
+    std::fs::write(&file, text).unwrap();
+    e.reload_config().unwrap();
+    assert_eq!(e.config().removal.mode, discky_core::RemovalMode::Permanent);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+
+    std::fs::write(&file, "not toml [").unwrap();
+    assert!(e.reload_config().is_err());
+    assert_eq!(
+        e.config().removal.mode,
+        discky_core::RemovalMode::Permanent,
+        "last good config kept"
+    );
+}
