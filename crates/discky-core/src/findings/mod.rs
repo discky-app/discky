@@ -150,7 +150,7 @@ fn ollama_url() -> String {
 }
 
 /// Whether any argument still holds a `{placeholder}` template.
-fn has_placeholder(argv: &[String]) -> bool {
+pub(crate) fn has_placeholder(argv: &[String]) -> bool {
     argv.iter()
         .any(|a| a.find('{').is_some_and(|i| a[i..].contains('}')))
 }

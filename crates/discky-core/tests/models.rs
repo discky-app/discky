@@ -192,3 +192,69 @@ argv = ["tool", "rm", "{{repo}}"]
         f.removal
     );
 }
+
+fn put_file(p: &Path, kb: usize) {
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, vec![1u8; kb * 1024]).unwrap();
+}
+
+#[test]
+fn hf_datasets_spaces_and_orgless_repos_are_reported() {
+    let d = tempfile::tempdir().unwrap();
+    let hub = d.path().join(".cache/huggingface/hub");
+    put_file(&hub.join("datasets--org--ds/f"), 4);
+    put_file(&hub.join("spaces--org--sp/f"), 4);
+    put_file(&hub.join("models--gpt2/f"), 4);
+    let idx = scan(d.path());
+    let fs = find(
+        &idx,
+        &RuleSet::builtin(),
+        d.path(),
+        DEAD,
+        &mut HashSet::new(),
+    );
+    let titles: Vec<_> = fs.iter().map(|f| f.title.as_str()).collect();
+    for t in ["dataset org/ds", "space org/sp", "gpt2"] {
+        assert!(titles.contains(&t), "{titles:?}");
+    }
+    assert!(fs.iter().all(|f| f.rule_id == "hf-hub"));
+    assert_eq!(fs.len(), 3);
+}
+
+#[test]
+fn residual_is_emitted_only_when_a_store_has_unreported_bytes() {
+    let d = tempfile::tempdir().unwrap();
+    put_file(&d.path().join(".omlx/models/m1/w"), 4);
+    put_file(&d.path().join(".lmstudio/models/pub/m/w"), 4);
+    put_file(&d.path().join(".lmstudio/models/loose.bin"), 2048);
+    let idx = scan(d.path());
+    let mut claimed = HashSet::new();
+    let fs = find(&idx, &RuleSet::builtin(), d.path(), DEAD, &mut claimed);
+    let res: Vec<_> = fs
+        .iter()
+        .filter(|f| f.rule_id.ends_with(":residual"))
+        .collect();
+    assert_eq!(res.len(), 1, "{res:?}");
+    let r = res[0];
+    assert_eq!(r.rule_id, "lmstudio-models:residual");
+    assert_eq!(r.title, "Other data in LM Studio");
+    assert!(r.allocated >= 2048 * 1024 && r.allocated < 2200 * 1024);
+    assert_eq!(r.removal, Removal::None);
+    assert_eq!(r.node, idx.find(&d.path().join(".lmstudio/models")));
+    assert!(claimed.contains(&idx.find(&d.path().join(".omlx/models")).unwrap()));
+}
+
+#[test]
+fn unprocessed_hf_root_is_not_claimed() {
+    let d = tempfile::tempdir().unwrap();
+    put_file(&d.path().join("other/f"), 4);
+    let idx = scan(d.path());
+    let mut claimed = HashSet::new();
+    let fs = find(&idx, &RuleSet::builtin(), d.path(), DEAD, &mut claimed);
+    assert!(fs.is_empty() && claimed.is_empty());
+    let hub = d.path().join(".cache/huggingface/hub");
+    put_file(&hub.join("models--a--b/f"), 4);
+    let idx = scan(d.path());
+    find(&idx, &RuleSet::builtin(), d.path(), DEAD, &mut claimed);
+    assert!(claimed.contains(&idx.find(&hub).unwrap()));
+}

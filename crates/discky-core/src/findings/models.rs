@@ -11,7 +11,8 @@ use crate::fs::attr::ObjKind;
 use crate::index::{Index, NodeId};
 use crate::rules::{Category, Rule, RuleSet, SafetyLabel};
 
-use super::{Finding, FindingId, Removal, finding_for_node, node_finding};
+use super::app_caches::unclaimed_sizes;
+use super::{Finding, FindingId, Removal, finding_for_node, has_placeholder, node_finding};
 
 const OLLAMA_ID: &str = "ollama-models";
 const HF_ID: &str = "hf-hub";
@@ -300,8 +301,18 @@ fn ollama_finding(m: &OllamaModel, manifests: &[Manifest]) -> Finding {
 
 // --- Hugging Face ---
 
-/// Repos in a hub cache: dirs named `models--org--name` give `org/name`.
-pub fn hf_repos(hub_dir: &Path) -> Vec<(String, PathBuf)> {
+/// One repo directory of a hub cache.
+struct HfItem {
+    /// Shown to the user, e.g. `org/name` or `dataset org/name`.
+    title: String,
+    /// Argument for `hf cache rm`, e.g. `org/name` or `datasets/org/name`.
+    repo_arg: String,
+    path: PathBuf,
+}
+
+/// Every `models--`, `datasets--` and `spaces--` dir; `org--name` becomes `org/name`, and a
+/// repo without an org keeps just its name.
+fn hf_items(hub_dir: &Path) -> Vec<HfItem> {
     let Ok(rd) = std::fs::read_dir(hub_dir) else {
         return Vec::new();
     };
@@ -310,13 +321,43 @@ pub fn hf_repos(hub_dir: &Path) -> Vec<(String, PathBuf)> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let rest = name.strip_prefix("models--")?;
-            let (org, repo) = rest.split_once("--")?;
-            Some((format!("{org}/{repo}"), e.path()))
+            let (kind, rest) = [
+                ("models", ""),
+                ("datasets", "dataset "),
+                ("spaces", "space "),
+            ]
+            .into_iter()
+            .find_map(|(k, label)| {
+                name.strip_prefix(&format!("{k}--"))
+                    .map(|r| ((k, label), r))
+            })?;
+            let repo = rest.replacen("--", "/", 1);
+            if repo.is_empty() {
+                return None;
+            }
+            let repo_arg = if kind.0 == "models" {
+                repo.clone()
+            } else {
+                format!("{}/{repo}", kind.0)
+            };
+            Some(HfItem {
+                title: format!("{}{repo}", kind.1),
+                repo_arg,
+                path: e.path(),
+            })
         })
         .collect();
-    out.sort();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Model repos in a hub cache: dirs named `models--org--name` give `org/name`.
+pub fn hf_repos(hub_dir: &Path) -> Vec<(String, PathBuf)> {
+    hf_items(hub_dir)
+        .into_iter()
+        .filter(|i| !i.title.contains(' '))
+        .map(|i| (i.repo_arg, i.path))
+        .collect()
 }
 
 fn hub_dirs(home: &Path) -> Vec<PathBuf> {
@@ -354,30 +395,36 @@ fn tool_on_path(name: &str, home: &Path) -> bool {
 fn hf_finding(
     index: &Index,
     node: NodeId,
-    repo: &str,
-    path: PathBuf,
+    item: &HfItem,
     rule: Option<&Rule>,
     hf_installed: bool,
 ) -> Finding {
     let mut f = node_finding(
         index,
         node,
-        path,
+        item.path.clone(),
         Category::Models,
         SafetyLabel::AppData,
         HF_ID,
     );
-    f.title = repo.to_string();
+    f.title = item.title.clone();
     f.subtitle = Some("Hugging Face hub".to_string());
-    f.explain = "Downloaded Hugging Face model repository. It can be downloaded again.".to_string();
+    f.explain = "Downloaded Hugging Face repository. It can be downloaded again.".to_string();
     if let (Some(cmd), true) = (rule.and_then(|r| r.command.as_ref()), hf_installed) {
-        f.removal = Removal::Command {
-            tool: cmd.tool.clone(),
-            argv: cmd.argv.iter().map(|a| a.replace("{repo}", repo)).collect(),
-            cwd: None,
-            install_hint: cmd.install_hint.clone(),
-            freed_note: None,
-        };
+        let argv: Vec<String> = cmd
+            .argv
+            .iter()
+            .map(|a| a.replace("{repo}", &item.repo_arg))
+            .collect();
+        if !has_placeholder(&argv) {
+            f.removal = Removal::Command {
+                tool: cmd.tool.clone(),
+                argv,
+                cwd: None,
+                install_hint: cmd.install_hint.clone(),
+                freed_note: None,
+            };
+        }
     }
     f
 }
@@ -407,8 +454,57 @@ fn name_of(index: &Index, id: NodeId) -> String {
 
 // --- the pass ---
 
-/// Model findings: per-model Ollama, Hugging Face, oMLX and LM Studio entries. Every store
-/// root found in the index is claimed so the generic rule pass does not report it again.
+const MIB: u64 = 1024 * 1024;
+
+/// "Other data in <store>" for what the per-item findings of store `root` do not cover.
+/// `reported` are the nodes already reported below `root`; `extra` bytes (allocated and
+/// logical) are subtracted on top, for findings that have no node (Ollama). `None` when less
+/// than 1 MiB is left.
+fn residual_finding(
+    index: &Index,
+    root: NodeId,
+    reported: &HashSet<NodeId>,
+    extra: u64,
+    store: &str,
+    rule_id: &str,
+) -> Option<Finding> {
+    let (allocated, logical, private) = unclaimed_sizes(index, reported, root);
+    let (allocated, logical, private) = (
+        allocated.saturating_sub(extra),
+        logical.saturating_sub(extra),
+        private.saturating_sub(extra),
+    );
+    if allocated < MIB {
+        return None;
+    }
+    let path = index.path(root);
+    let mut f = node_finding(
+        index,
+        root,
+        path.clone(),
+        Category::Models,
+        SafetyLabel::AppData,
+        &format!("{rule_id}:residual"),
+    );
+    f.id = FindingId::new("residual", &path.to_string_lossy());
+    f.title = format!("Other data in {store}");
+    f.subtitle = Some(path.to_string_lossy().into_owned());
+    f.allocated = allocated;
+    f.logical = logical;
+    f.freed_if_deleted = private;
+    f.removal = Removal::None;
+    f.explain = "Not attributable to a single model (orphan blobs, lock files, loose files or unreadable manifests). Inspect it in the disk map before removing anything.".to_string();
+    Some(f)
+}
+
+/// Model findings: per-model Ollama, Hugging Face, oMLX and LM Studio entries, plus one
+/// "Other data in <store>" finding per store for what they do not cover (at least 1 MiB).
+/// Each store root found in the index is claimed after it is processed, so the generic rule
+/// pass does not report it again.
+///
+/// For Ollama the findings have no node, so the residual is the root's bytes minus the sum
+/// of the models' `freed_if_deleted` (an approximation: blobs shared between models count
+/// once there).
 pub fn find(
     index: &Index,
     rules: &RuleSet,
@@ -419,8 +515,7 @@ pub fn find(
     let mut out = Vec::new();
 
     let ollama_dir = home.join(".ollama/models");
-    let ollama_node = index.find(&ollama_dir);
-    if let Some(node) = ollama_node {
+    if let Some(node) = index.find(&ollama_dir) {
         let manifests = read_manifests(&ollama_dir);
         let models = ollama_list(ollama_url)
             .ok()
@@ -430,10 +525,24 @@ pub fn find(
             if let Some(rule) = rules.get(OLLAMA_ID) {
                 out.push(finding_for_node(index, node, rule, None));
             }
+            claimed.insert(node);
         } else {
-            out.extend(models.iter().map(|m| ollama_finding(m, &manifests)));
+            let findings: Vec<_> = models
+                .iter()
+                .map(|m| ollama_finding(m, &manifests))
+                .collect();
+            let covered = findings.iter().map(|f| f.freed_if_deleted).sum();
+            out.extend(findings);
+            out.extend(residual_finding(
+                index,
+                node,
+                &HashSet::new(),
+                covered,
+                "Ollama",
+                OLLAMA_ID,
+            ));
+            claimed.insert(node);
         }
-        claimed.insert(node);
     }
 
     let hf_rule = rules.get(HF_ID);
@@ -442,39 +551,100 @@ pub fn find(
         let Some(root) = index.find(&hub) else {
             continue;
         };
-        claimed.insert(root);
-        for (repo, path) in hf_repos(&hub) {
-            if let Some(n) = index.find(&path) {
-                out.push(hf_finding(index, n, &repo, path, hf_rule, hf_installed));
+        let mut reported = HashSet::new();
+        for item in hf_items(&hub) {
+            if let Some(n) = index.find(&item.path) {
+                reported.insert(n);
+                out.push(hf_finding(index, n, &item, hf_rule, hf_installed));
             }
         }
+        out.extend(residual_finding(
+            index,
+            root,
+            &reported,
+            0,
+            "Hugging Face hub",
+            HF_ID,
+        ));
+        claimed.insert(root);
     }
 
     if let (Some(root), Some(rule)) = (index.find(&home.join(".omlx/models")), rules.get(OMLX_ID)) {
-        claimed.insert(root);
+        let mut reported = HashSet::new();
         for n in child_dirs(index, root) {
+            reported.insert(n);
             out.push(dir_finding(index, n, name_of(index, n), rule));
         }
+        out.extend(residual_finding(index, root, &reported, 0, "oMLX", OMLX_ID));
+        claimed.insert(root);
     }
 
     if let (Some(root), Some(rule)) = (
         index.find(&home.join(".lmstudio/models")),
         rules.get(LMSTUDIO_ID),
     ) {
-        claimed.insert(root);
+        let mut reported = HashSet::new();
         for publisher in child_dirs(index, root) {
             for n in child_dirs(index, publisher) {
                 let title = format!("{}/{}", name_of(index, publisher), name_of(index, n));
+                reported.insert(n);
                 out.push(dir_finding(index, n, title, rule));
             }
         }
+        out.extend(residual_finding(
+            index,
+            root,
+            &reported,
+            0,
+            "LM Studio",
+            LMSTUDIO_ID,
+        ));
+        claimed.insert(root);
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rfc3339;
+    use super::*;
+    use crate::fs::walk::{ScanOptions, walk};
+
+    #[test]
+    fn hf_finding_never_carries_a_placeholder() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("models--o--n");
+        std::fs::create_dir_all(&repo).unwrap();
+        let idx = walk(
+            &ScanOptions {
+                roots: vec![d.path().into()],
+                exclude: globset::GlobSet::empty(),
+                threads: 0,
+                exact_private_size: false,
+            },
+            &|_| {},
+        );
+        let toml = |argv: &str| {
+            format!(
+                "[[rule]]\nid = \"hf-hub\"\ncategory = \"models\"\nlabel = \"regenerates\"\ntitle = \"t\"\nexplain = \"x\"\nper_child = true\n[rule.matcher]\nkind = \"path\"\npath = \"/nonexistent\"\n[rule.command]\ntool = \"hf\"\nargv = {argv}\n"
+            )
+        };
+        let item = HfItem {
+            title: "o/n".into(),
+            repo_arg: "o/n".into(),
+            path: repo.clone(),
+        };
+        let node = idx.find(&repo).unwrap();
+        let bad = RuleSet::from_toml(&toml(r#"["hf", "rm", "{repo}", "{other}"]"#)).unwrap();
+        let f = hf_finding(&idx, node, &item, bad.get("hf-hub"), true);
+        assert!(
+            matches!(f.removal, Removal::Trash { .. }),
+            "{:?}",
+            f.removal
+        );
+        let ok = RuleSet::from_toml(&toml(r#"["hf", "rm", "{repo}"]"#)).unwrap();
+        let f = hf_finding(&idx, node, &item, ok.get("hf-hub"), true);
+        assert!(matches!(&f.removal, Removal::Command { argv, .. } if argv[2] == "o/n"));
+    }
 
     #[test]
     fn rfc3339_to_unix_seconds() {

@@ -142,7 +142,11 @@ pub fn find(index: &Index, home: &Path, claimed: &mut HashSet<NodeId>) -> Vec<Fi
 }
 
 /// `(allocated, logical, private)` of directory `id` minus claimed descendants.
-fn unclaimed_sizes(index: &Index, claimed: &HashSet<NodeId>, id: NodeId) -> (u64, u64, u64) {
+pub(super) fn unclaimed_sizes(
+    index: &Index,
+    claimed: &HashSet<NodeId>,
+    id: NodeId,
+) -> (u64, u64, u64) {
     let n = index.node(id);
     let mut sizes = (n.agg_allocated, n.agg_logical, n.agg_private);
     let mut stack = vec![id];
