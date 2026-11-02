@@ -165,6 +165,10 @@ fn full_flow_scan_findings_plan_refused_then_allowed() {
     let ov = m.tool("disk_overview", json!({}));
     assert!(ov["snapshot_at"].is_null());
     assert_eq!(ov["stale"], true);
+    // Without the Tasks extension `scan` answers with a plain result, never a task.
+    let r = m.call("tools/call", json!({"name": "scan", "arguments": {}}));
+    assert_ne!(r["result"]["resultType"], "task", "{r}");
+    assert!(r["result"]["content"].is_array(), "{r}");
     let sc = m.tool("scan", json!({"wait_seconds": 30}));
     assert_eq!(sc["status"]["kind"], "done", "{sc}");
     let st = m.tool("scan_status", json!({"scan_id": sc["scan_id"]}));
@@ -334,4 +338,50 @@ fn tree_outside_snapshot_is_a_helpful_error() {
     assert_eq!(rep["results"][0]["status"], "done", "{rep}");
     assert!(!tree.join("web/node_modules").exists());
     assert!(d.path().join("trashed/node_modules/pkg/index.js").exists());
+}
+
+#[test]
+fn clients_declaring_tasks_get_a_task_handle_for_scan() {
+    let d = tempfile::tempdir().unwrap();
+    fixtures::build_tree(&d.path().join("tree"));
+    std::fs::write(
+        d.path().join("config.toml"),
+        format!(
+            "[scan]\nroots = [\"{}\"]\n",
+            d.path().join("tree").display()
+        ),
+    )
+    .unwrap();
+    let mut m = Mcp::start(d.path());
+    let init = m.call(
+        "initialize",
+        json!({"protocolVersion": "2026-07-28", "capabilities": {"extensions": {"io.modelcontextprotocol/tasks": {}}}, "clientInfo": {"name": "t", "version": "0"}}),
+    );
+    assert!(
+        init["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"].is_object(),
+        "{init}"
+    );
+    let r = m.call("tools/call", json!({"name": "scan", "arguments": {}}));
+    assert_eq!(r["result"]["resultType"], "task", "{r}");
+    // rmcp's `CreateTaskResult` flattens the task: `taskId` sits at the top of `result`.
+    let task_id = r["result"]["taskId"].as_str().unwrap().to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let g = m.call("tasks/get", json!({"taskId": task_id}));
+        if g["result"]["status"] == "completed" {
+            assert_eq!(g["result"]["result"]["content"][0]["type"], "text", "{g}");
+            let text = g["result"]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap();
+            let out: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(out["status"]["kind"], "done", "{out}");
+            assert!(out["scan_id"].is_string(), "{out}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task never completed: {g}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }

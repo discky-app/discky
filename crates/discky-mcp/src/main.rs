@@ -3,6 +3,7 @@
 
 mod params;
 mod server;
+mod tasks;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

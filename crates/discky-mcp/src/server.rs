@@ -9,9 +9,11 @@ use discky_core::plan::{PlanId, StepFlags, StepKind};
 use discky_core::query::{QueryError, SearchQuery};
 use discky_core::{Config, DisckyPaths, Engine, EngineError, RemovalMode, ScanId, ScanStatus};
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::{IntoCallToolResult, schema_for_output};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    Implementation, ListResourcesResult, PaginatedRequestParams, ProgressNotificationParam,
+    CallToolResponse, CancelTaskParams, GetTaskParams, GetTaskResult, Implementation,
+    ListResourcesResult, PaginatedRequestParams, ProgressNotificationParam,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
     ResourceContents, ServerCapabilities, ServerConfig,
 };
@@ -19,6 +21,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 
 use crate::params::*;
+use crate::tasks::ScanTasks;
 
 const STALE_AFTER_SECS: u64 = 3600;
 const MAX_WAIT_SECS: u32 = 60;
@@ -39,6 +42,7 @@ const INSTRUCTIONS: &str = "Discky is a macOS disk-cleanup tool: it scans the di
 #[derive(Clone)]
 pub struct DisckyServer {
     engine: Arc<Engine>,
+    tasks: ScanTasks,
     tool_router: ToolRouter<Self>,
 }
 
@@ -77,6 +81,7 @@ impl DisckyServer {
     pub fn new(engine: Arc<Engine>) -> DisckyServer {
         DisckyServer {
             engine,
+            tasks: ScanTasks::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -118,19 +123,30 @@ impl DisckyServer {
 
     #[tool(
         name = "scan",
-        description = "Starts a scan of the configured roots (or `roots`) in the background and returns its id; with `wait_seconds` it waits for the result. Reads the disk only, never removes anything."
+        description = "Starts a scan of the configured roots (or `roots`) in the background and returns its id; with `wait_seconds` it waits for the result. Reads the disk only, never removes anything.",
+        // Spelled out: the return type is not `Json<T>`, so the macro cannot derive it.
+        output_schema = schema_for_output::<ScanOut>()
     )]
     async fn scan(
         &self,
         Parameters(p): Parameters<ScanParams>,
         ctx: RequestContext<RoleServer>,
-    ) -> Result<Json<ScanOut>, String> {
+    ) -> Result<CallToolResponse, String> {
         self.reload_config();
         let roots = p
             .roots
             .map(|rs| rs.iter().map(|r| expand_tilde(r)).collect());
-        let id = self.engine.start_scan(roots);
         let wait = p.wait_seconds.unwrap_or(0).min(MAX_WAIT_SECS);
+        // Tasks extension: a client that declared it polls `tasks/get` instead of
+        // `scan_status`; an explicit `wait_seconds` keeps the synchronous answer.
+        let declared_tasks = ctx
+            .client_capabilities()
+            .is_some_and(|caps| caps.supports_tasks());
+        if declared_tasks && wait == 0 {
+            let task = self.tasks.spawn(Arc::clone(&self.engine), roots);
+            return Ok(CallToolResponse::Task(task));
+        }
+        let id = self.engine.start_scan(roots);
         let status = if wait == 0 {
             self.engine.scan_status(&id)
         } else {
@@ -157,10 +173,12 @@ impl DisckyServer {
             }
             status?
         };
-        Ok(Json(ScanOut {
+        Json(ScanOut {
             scan_id: id.0,
             status,
-        }))
+        })
+        .into_call_tool_result()
+        .map_err(|e| e.message.to_string())
     }
 
     #[tool(
@@ -392,10 +410,27 @@ impl ServerHandler for DisckyServer {
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_tasks()
                 .build(),
         )
         .with_server_info(Implementation::new("discky", env!("CARGO_PKG_VERSION")))
         .with_instructions(INSTRUCTIONS)
+    }
+
+    async fn get_task(
+        &self,
+        request: GetTaskParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetTaskResult, McpError> {
+        self.tasks.get(&request.task_id)
+    }
+
+    async fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.tasks.cancel(&request.task_id)
     }
 
     async fn list_resources(
