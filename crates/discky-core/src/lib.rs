@@ -3,6 +3,7 @@
 pub mod config;
 pub mod findings;
 pub mod fs;
+pub mod history;
 pub mod index;
 pub mod paths;
 pub mod plan;

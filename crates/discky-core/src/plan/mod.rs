@@ -15,6 +15,8 @@ use crate::config::{Config, RemovalMode};
 use crate::findings::{Finding, FindingId, Removal, ollama_url};
 use crate::tools;
 
+pub mod execute;
+
 /// 16 hex chars of `xxh3_64` over `created_at` and the planned finding ids.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
