@@ -333,9 +333,10 @@ impl Engine {
         })
     }
 
+    /// Publish a snapshot without the findings of `done` steps whose paths are gone. The
+    /// filtering runs without holding the lock; the new snapshot shares the old index.
     fn forget_removed(&self, done: &[&crate::plan::Step]) {
-        let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
-        let Some(snap) = current.snapshot.as_ref() else {
+        let Some(old) = self.snapshot() else {
             return;
         };
         let gone = |f: &Finding| {
@@ -349,21 +350,23 @@ impl Engine {
                 }
             })
         };
-        if !snap.findings.iter().any(gone) {
+        let kept: Vec<&Finding> = old.findings.iter().filter(|f| !gone(f)).collect();
+        if kept.len() == old.findings.len() {
             return;
         }
-        let findings: Vec<Finding> = snap.findings.iter().filter(|f| !gone(f)).cloned().collect();
-        let snap = current.snapshot.as_mut().expect("checked above");
-        match Arc::get_mut(snap) {
-            Some(s) => s.findings = findings,
-            // Readers still hold the old snapshot: publish a copy.
-            None => {
-                *snap = Arc::new(Snapshot {
-                    meta: snap.meta.clone(),
-                    index: snap.index.clone(),
-                    findings,
-                })
-            }
+        let trimmed = Arc::new(Snapshot {
+            meta: old.meta.clone(),
+            index: Arc::clone(&old.index),
+            findings: kept.into_iter().cloned().collect(),
+        });
+        let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
+        // A scan that published meanwhile is fresher: keep it.
+        if current
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| Arc::ptr_eq(s, &old))
+        {
+            current.snapshot = Some(trimmed);
         }
     }
 

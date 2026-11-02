@@ -34,7 +34,7 @@ fn snap(root: &std::path::Path) -> Snapshot {
             no_access: vec![],
             node_count: 0,
         },
-        index,
+        index: index.into(),
         findings,
     }
 }

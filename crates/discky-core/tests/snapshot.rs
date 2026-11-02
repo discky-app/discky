@@ -27,7 +27,7 @@ fn snap(root: &std::path::Path, actor: Actor) -> Snapshot {
             no_access,
             node_count: index.len() as u32,
         },
-        index,
+        index: index.into(),
         findings: vec![],
     }
 }
@@ -110,9 +110,11 @@ fn roundtrip_preserves_findings() {
     .run_with_home(Some(d.path()));
     assert!(!s.findings.is_empty());
     let p = d.path().join("snapshot.bin");
+    // `index` is an `Arc<Index>` in memory but saved as the plain `Index`.
     s.save(&p).unwrap();
     let l = Snapshot::load(&p).unwrap();
     assert_eq!(l.meta, s.meta);
+    assert_eq!(l.index.len(), s.index.len());
     assert_eq!(l.findings.len(), s.findings.len());
     for (a, b) in l.findings.iter().zip(&s.findings) {
         assert_eq!(a.id, b.id);

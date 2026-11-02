@@ -8,6 +8,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
@@ -59,7 +60,9 @@ pub struct SnapshotMeta {
 #[derive(Debug)]
 pub struct Snapshot {
     pub meta: SnapshotMeta,
-    pub index: Index,
+    /// Shared so a snapshot with updated findings can reuse the index without copying it.
+    /// On disk it is the plain `Index` (`Body`), so the wire format does not depend on it.
+    pub index: Arc<Index>,
     pub findings: Vec<Finding>,
 }
 
@@ -145,7 +148,7 @@ impl Snapshot {
             postcard::from_bytes(&rest).map_err(SnapshotError::Decode)?;
         Ok(Snapshot {
             meta,
-            index,
+            index: Arc::new(index),
             findings,
         })
     }

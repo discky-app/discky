@@ -154,7 +154,7 @@ fn run(req: &ScanRequest, progress: &Mutex<Progress>, current: &RwLock<Current>)
             no_access: index.errors.iter().map(|e| e.path.clone()).collect(),
             node_count: index.len() as u32,
         },
-        index,
+        index: Arc::new(index),
         findings,
     };
     let saved = snapshot.save(&req.snapshot_path);

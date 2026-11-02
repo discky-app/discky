@@ -150,3 +150,40 @@ fn scan_status_serializes_with_kind_tag() {
     let v = serde_json::to_value(ScanStatus::Unknown).unwrap();
     assert_eq!(v["kind"], "unknown");
 }
+
+#[test]
+fn execute_while_a_reader_holds_the_snapshot_shares_the_index() {
+    let d = tempfile::tempdir().unwrap();
+    fixtures::build_tree(&d.path().join("tree"));
+    let e = engine_in(&d);
+    let id = e.start_scan(None);
+    e.wait_scan(&id, Duration::from_secs(30));
+    let mut c = e.config();
+    c.removal.mode = discky_core::RemovalMode::Permanent;
+    e.set_config(c).unwrap();
+    let held = e.snapshot().unwrap();
+    let nm = held
+        .findings
+        .iter()
+        .find(|f| f.rule_id == "node-modules")
+        .unwrap()
+        .id
+        .0
+        .clone();
+    let plan = e.plan(std::slice::from_ref(&nm)).unwrap();
+    e.execute(&plan, false, None).unwrap();
+    assert!(e.inspect(&nm).unwrap().finding.is_none());
+    let now = e.snapshot().unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&held, &now),
+        "a new snapshot is published"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&held.index, &now.index),
+        "index shared, not cloned"
+    );
+    assert!(
+        held.findings.iter().any(|f| f.id.0 == nm),
+        "the held snapshot is unchanged"
+    );
+}
