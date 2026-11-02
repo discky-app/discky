@@ -95,7 +95,7 @@ Optional flags: `--home <dir>` (sets `DISCKY_HOME`) and `--log-level <filter>` (
 - **Interactive steps are never run by the agent.** Steps that need an admin prompt are skipped.
 - **Official tools, no `rm` fallback.** Where a tool owns the data (for example `cargo cache --autoclean`), the rule runs that tool. If it is not installed, the step reports an install hint instead of falling back to `rm`.
 - **Honest sizes.** Every size is bytes allocated on disk. `freed_if_deleted` is what removing the item really frees; clones and hard links shared with files that stay are not counted. `disk_overview` reports `exact_private_size`: `true` when `freed_if_deleted` was measured exactly, `false` when it is clone-aware only.
-- Paths labelled `do_not_touch` (Keychains, Mail, Messages, ...) are never offered for removal.
+- Paths labelled `do_not_touch` (Keychains, Mail, Messages, ...) are listed so you know they were seen, but have no removal method and are never removed.
 
 ## Files
 
