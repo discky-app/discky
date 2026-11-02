@@ -43,7 +43,7 @@ impl FindingId {
 
 /// How a finding is removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Removal {
     Trash {
         paths: Vec<PathBuf>,

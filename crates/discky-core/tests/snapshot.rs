@@ -1,7 +1,10 @@
 mod fixtures;
 use discky_core::{
+    config::Thresholds,
+    findings::Categorizer,
     fs::walk::{ScanOptions, walk},
     index::snapshot::{Actor, Snapshot, SnapshotError, SnapshotMeta},
+    rules::RuleSet,
 };
 
 fn snap(root: &std::path::Path, actor: Actor) -> Snapshot {
@@ -38,7 +41,7 @@ fn roundtrip_preserves_nodes_and_meta() {
     s.save(&p).unwrap();
     let l = Snapshot::load(&p).unwrap();
     assert_eq!(l.index.len(), s.index.len());
-    assert!(matches!(l.meta.actor, Actor::Mcp));
+    assert_eq!(l.meta, s.meta);
     assert!(l.meta.no_access.iter().any(|x| x.ends_with("locked")));
     assert!(matches!(Snapshot::peek_meta(&p).unwrap().actor, Actor::Mcp));
     assert!(!p.with_extension("bin.tmp").exists());
@@ -74,4 +77,47 @@ fn wrong_magic_is_incompatible() {
         Snapshot::peek_meta(&p),
         Err(SnapshotError::Incompatible)
     ));
+}
+
+#[test]
+fn corrupt_meta_is_incompatible() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("snapshot.bin");
+    let mut bytes = b"DISCKY01".to_vec();
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&[0xFF; 16]);
+    std::fs::write(&p, &bytes).unwrap();
+    assert!(matches!(
+        Snapshot::load(&p),
+        Err(SnapshotError::Incompatible)
+    ));
+    assert!(matches!(
+        Snapshot::peek_meta(&p),
+        Err(SnapshotError::Incompatible)
+    ));
+}
+
+#[test]
+fn roundtrip_preserves_findings() {
+    let d = tempfile::tempdir().unwrap();
+    fixtures::build_tree(d.path());
+    let mut s = snap(d.path(), Actor::App);
+    s.findings = Categorizer {
+        index: &s.index,
+        rules: &RuleSet::builtin(),
+        thresholds: &Thresholds::default(),
+    }
+    .run_with_home(Some(d.path()));
+    assert!(!s.findings.is_empty());
+    let p = d.path().join("snapshot.bin");
+    s.save(&p).unwrap();
+    let l = Snapshot::load(&p).unwrap();
+    assert_eq!(l.meta, s.meta);
+    assert_eq!(l.findings.len(), s.findings.len());
+    for (a, b) in l.findings.iter().zip(&s.findings) {
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.path, b.path);
+        assert_eq!(a.freed_if_deleted, b.freed_if_deleted);
+        assert_eq!(a.removal, b.removal);
+    }
 }

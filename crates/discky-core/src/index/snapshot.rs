@@ -92,7 +92,7 @@ fn read_header(r: &mut impl Read) -> Result<SnapshotMeta, SnapshotError> {
     if buf.len() != len {
         return Err(SnapshotError::Incompatible);
     }
-    let meta: SnapshotMeta = postcard::from_bytes(&buf).map_err(SnapshotError::Decode)?;
+    let meta: SnapshotMeta = postcard::from_bytes(&buf).map_err(|_| SnapshotError::Incompatible)?;
     if meta.format_version != SNAPSHOT_FORMAT {
         return Err(SnapshotError::Incompatible);
     }
