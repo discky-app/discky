@@ -65,3 +65,11 @@ fn display_names_and_non_matches() {
     // build dirs never match by path
     assert!(rs.match_path(Path::new("/proj/target")).is_none());
 }
+
+#[test]
+fn toolchains_and_gems_are_app_data_not_regenerates() {
+    let rs = RuleSet::builtin();
+    for id in ["rustup-toolchains", "gem-cache"] {
+        assert_eq!(rs.get(id).unwrap().label, SafetyLabel::AppData, "{id}");
+    }
+}

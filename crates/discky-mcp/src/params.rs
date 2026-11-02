@@ -167,10 +167,14 @@ pub struct OverviewOut {
     pub actor: Option<discky_core::index::snapshot::Actor>,
     /// Bytes allocated on disk under the scanned roots.
     pub scanned_allocated: u64,
-    /// `[[category, bytes], ...]`: freed-if-deleted bytes per category.
+    /// `[[category, bytes], ...]`: allocated bytes per category, over findings not
+    /// labelled `do_not_touch`.
     #[schemars(with = "Value")]
     pub by_category: Vec<(Category, u64)>,
-    /// Bytes freed by removing everything labelled `regenerates`.
+    /// Allocated bytes of findings labelled `do_not_touch` (in no category).
+    pub protected_bytes: u64,
+    /// Bytes freed by removing everything labelled `regenerates`, except commands that
+    /// free only part of their finding (those with a `freed_note`).
     pub safe_to_free: u64,
     /// Directories the scan could not read.
     pub no_access: usize,

@@ -15,6 +15,7 @@ path = "~/.cargo/registry"
 tool = "cargo-cache"
 argv = ["cargo", "cache", "--autoclean"]
 install_hint = "cargo install cargo-cache"
+freed_note = "Removes extracted sources and checkouts; downloaded archives and the git database stay"
 
 [[rule]]
 id = "cargo-git"
@@ -29,11 +30,12 @@ path = "~/.cargo/git"
 tool = "cargo-cache"
 argv = ["cargo", "cache", "--autoclean"]
 install_hint = "cargo install cargo-cache"
+freed_note = "Removes extracted sources and checkouts; downloaded archives and the git database stay"
 
 [[rule]]
 id = "rustup-toolchains"
 category = "dev_caches"
-label = "regenerates"
+label = "app_data"
 title = "Rust toolchains"
 explain = "Installed Rust toolchains. Rustup reinstalls them on demand."
 [rule.matcher]
@@ -65,6 +67,7 @@ path = "~/Library/pnpm/store"
 [rule.command]
 tool = "pnpm"
 argv = ["pnpm", "store", "prune"]
+freed_note = "Removes only packages no project references"
 
 [[rule]]
 id = "pnpm-cache"
@@ -131,7 +134,7 @@ argv = ["go", "clean", "-modcache"]
 [[rule]]
 id = "gem-cache"
 category = "dev_caches"
-label = "regenerates"
+label = "app_data"
 title = "RubyGems data"
 explain = "Installed gems and gem caches. Gems can be reinstalled with bundler or gem."
 [rule.matcher]

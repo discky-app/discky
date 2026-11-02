@@ -1,7 +1,7 @@
 mod fixtures;
 use discky_core::{
     config::Thresholds,
-    findings::Categorizer,
+    findings::{Categorizer, Finding, FindingId, Removal},
     fs::attr::ObjKind,
     fs::walk::{ScanOptions, walk},
     index::snapshot::{Actor, Snapshot, SnapshotMeta},
@@ -152,4 +152,87 @@ fn search_limit_keeps_the_largest_matches() {
     );
     assert_eq!(r.len(), 10);
     assert_eq!(r[0].name, "largest.dat");
+}
+
+fn synthetic(id: &str, category: Category, label: SafetyLabel, removal: Removal) -> Finding {
+    Finding {
+        id: FindingId(id.into()),
+        category,
+        title: id.into(),
+        subtitle: None,
+        path: None,
+        node: None,
+        allocated: 1000,
+        logical: 1000,
+        freed_if_deleted: 100,
+        modified: None,
+        label,
+        rule_id: id.into(),
+        explain: String::new(),
+        removal,
+        flags: vec![],
+    }
+}
+
+fn command(freed_note: Option<&str>) -> Removal {
+    Removal::Command {
+        tool: "t".into(),
+        argv: vec!["t".into()],
+        cwd: None,
+        install_hint: None,
+        freed_note: freed_note.map(str::to_string),
+    }
+}
+
+#[test]
+fn overview_excludes_partial_commands_from_safe_and_protected_data_from_categories() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = snap(d.path());
+    s.findings = vec![
+        synthetic(
+            "full",
+            Category::DevCaches,
+            SafetyLabel::Regenerates,
+            command(None),
+        ),
+        synthetic(
+            "partial",
+            Category::DevCaches,
+            SafetyLabel::Regenerates,
+            command(Some("Removes only part")),
+        ),
+        synthetic(
+            "trash",
+            Category::DevCaches,
+            SafetyLabel::Regenerates,
+            Removal::Trash { paths: vec![] },
+        ),
+        synthetic(
+            "keychain",
+            Category::AppCaches,
+            SafetyLabel::DoNotTouch,
+            Removal::None,
+        ),
+        synthetic(
+            "data",
+            Category::AppCaches,
+            SafetyLabel::AppData,
+            Removal::None,
+        ),
+    ];
+    let o = disk_overview(Some(&s));
+    assert_eq!(o.safe_to_free, 200, "the freed_note command is not counted");
+    let bytes = |c: Category| o.by_category.iter().find(|(x, _)| *x == c).unwrap().1;
+    assert_eq!(bytes(Category::DevCaches), 3000);
+    assert_eq!(bytes(Category::AppCaches), 1000, "do-not-touch not counted");
+    assert_eq!(o.protected_bytes, 1000);
+}
+
+#[test]
+fn partial_clean_dev_cache_rules_carry_a_freed_note() {
+    let rs = RuleSet::builtin();
+    for id in ["cargo-registry", "cargo-git", "pnpm-store"] {
+        let cmd = rs.get(id).unwrap().command.as_ref().unwrap();
+        assert!(cmd.freed_note.is_some(), "{id}");
+    }
 }

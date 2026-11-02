@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use globset::GlobBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::findings::{Finding, FindingId};
+use crate::findings::{Finding, FindingId, Removal};
 use crate::fs::attr::ObjKind;
 use crate::index::snapshot::{Actor, Snapshot};
 use crate::index::{Index, NodeFlags, NodeId};
@@ -46,8 +46,12 @@ pub struct Overview {
     pub snapshot_at: Option<i64>,
     pub actor: Option<Actor>,
     pub scanned_allocated: u64,
+    /// `allocated` bytes per category, over every finding not labelled `DoNotTouch`.
     pub by_category: Vec<(Category, u64)>,
-    /// Sum of `freed_if_deleted` over findings labelled `Regenerates`.
+    /// Sum of `allocated` over findings labelled `DoNotTouch` (counted in no category).
+    pub protected_bytes: u64,
+    /// Sum of `freed_if_deleted` over findings labelled `Regenerates`, except those
+    /// removed by a command with a `freed_note` (it frees an unknown part of them).
     pub safe_to_free: u64,
     pub no_access: usize,
     /// How the last scan measured `freed_if_deleted`: `Some(false)` = fast mode
@@ -143,6 +147,7 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
             actor: None,
             scanned_allocated: 0,
             by_category: CATEGORIES.iter().map(|&c| (c, 0)).collect(),
+            protected_bytes: 0,
             safe_to_free: 0,
             no_access: 0,
             exact_private_size: None,
@@ -154,7 +159,7 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
             let sum = snap
                 .findings
                 .iter()
-                .filter(|f| f.category == c)
+                .filter(|f| f.category == c && f.label != SafetyLabel::DoNotTouch)
                 .map(|f| f.allocated)
                 .sum();
             (c, sum)
@@ -166,15 +171,32 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
         actor: Some(snap.meta.actor),
         scanned_allocated: snap.index.total_allocated(),
         by_category,
+        protected_bytes: snap
+            .findings
+            .iter()
+            .filter(|f| f.label == SafetyLabel::DoNotTouch)
+            .map(|f| f.allocated)
+            .sum(),
         safe_to_free: snap
             .findings
             .iter()
-            .filter(|f| f.label == SafetyLabel::Regenerates)
+            .filter(|f| f.label == SafetyLabel::Regenerates && !partial_command(f))
             .map(|f| f.freed_if_deleted)
             .sum(),
         no_access: snap.meta.no_access.len(),
         exact_private_size: None,
     }
+}
+
+/// Removed by a command that frees only part of the finding (it carries a `freed_note`).
+fn partial_command(f: &Finding) -> bool {
+    matches!(
+        &f.removal,
+        Removal::Command {
+            freed_note: Some(_),
+            ..
+        }
+    )
 }
 
 fn finding_ids(snap: &Snapshot) -> HashMap<NodeId, FindingId> {

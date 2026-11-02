@@ -105,6 +105,7 @@ impl DisckyServer {
             actor: o.actor,
             scanned_allocated: o.scanned_allocated,
             by_category: o.by_category,
+            protected_bytes: o.protected_bytes,
             safe_to_free: o.safe_to_free,
             no_access: o.no_access,
             exact_private_size: o.exact_private_size,
