@@ -224,3 +224,74 @@ fn to_json_has_the_documented_shape() {
         serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
     assert_eq!(back.steps[0].flags, plan.steps[0].flags);
 }
+
+#[test]
+fn symlinked_ancestor_is_resolved_for_the_admin_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink("/Library/Logs", &link).unwrap();
+    let target = link.join("X");
+    let mut f = finding(
+        "lnk",
+        Removal::Trash {
+            paths: vec![target.clone()],
+        },
+        1,
+        SafetyLabel::AppData,
+    );
+    f.path = Some(target);
+    let plan = plan_removal(&[&f], &Config::default());
+    assert!(plan.steps[0].flags.contains(StepFlags::INTERACTIVE));
+
+    // A dangling link is skipped: the next ancestor (our temp dir) decides.
+    let dangling = tmp.path().join("dangling");
+    std::os::unix::fs::symlink(tmp.path().join("missing"), &dangling).unwrap();
+    let f2 = finding(
+        "dng",
+        Removal::Trash {
+            paths: vec![dangling.join("X")],
+        },
+        1,
+        SafetyLabel::AppData,
+    );
+    let plan = plan_removal(&[&f2], &Config::default());
+    assert!(!plan.steps[0].flags.contains(StepFlags::INTERACTIVE));
+}
+
+#[test]
+fn cargo_cache_is_checked_by_tool_while_argv_runs_cargo() {
+    let f = finding(
+        "cc",
+        Removal::Command {
+            tool: "cargo-cache".into(),
+            argv: vec!["cargo".into(), "cache".into(), "--autoclean".into()],
+            cwd: None,
+            install_hint: Some("cargo install cargo-cache".into()),
+            freed_note: None,
+        },
+        3,
+        SafetyLabel::Regenerates,
+    );
+    let installed = std::process::Command::new("cargo")
+        .args(["cache", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    let plan = plan_removal(&[&f], &Config::default());
+    let s = &plan.steps[0];
+    if installed {
+        assert!(!s.flags.contains(StepFlags::TOOL_MISSING));
+        assert!(s.warnings.is_empty());
+    } else {
+        assert!(s.flags.contains(StepFlags::TOOL_MISSING));
+        assert_eq!(
+            s.warnings,
+            ["cargo-cache not found. cargo install cargo-cache"]
+        );
+    }
+    // argv[0] is resolved on its own (to cargo), whatever the tool name.
+    let StepKind::Command { argv, .. } = &s.kind else {
+        panic!("not a command step");
+    };
+    assert!(argv[0].ends_with("/cargo"), "{argv:?}");
+    assert_eq!(s.description, "Run `cargo cache --autoclean`");
+}

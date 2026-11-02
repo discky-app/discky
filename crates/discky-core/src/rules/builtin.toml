@@ -12,7 +12,7 @@ explain = "Downloaded crate sources and archives. Cargo re-downloads them on dem
 kind = "path"
 path = "~/.cargo/registry"
 [rule.command]
-tool = "cargo"
+tool = "cargo-cache"
 argv = ["cargo", "cache", "--autoclean"]
 install_hint = "cargo install cargo-cache"
 
@@ -26,7 +26,7 @@ explain = "Git dependencies cloned by Cargo. Cargo fetches them again when neede
 kind = "path"
 path = "~/.cargo/git"
 [rule.command]
-tool = "cargo"
+tool = "cargo-cache"
 argv = ["cargo", "cache", "--autoclean"]
 install_hint = "cargo install cargo-cache"
 

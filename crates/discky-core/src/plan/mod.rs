@@ -105,21 +105,22 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
+    /// `lstat` of `path`. A missing path is `exists = false, mtime = 0, allocated = 0`.
+    /// Any other error (EACCES, ELOOP…) means the state is unknown: `exists = true,
+    /// mtime = -1, allocated = 0`, which compares equal to itself, so a later re-take
+    /// under the same error is not stale — and is never mistaken for "already gone".
     pub fn take(path: &Path) -> Fingerprint {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::symlink_metadata(path) {
-            Ok(m) => Fingerprint {
-                path: path.to_path_buf(),
-                exists: true,
-                mtime: m.mtime(),
-                allocated: m.blocks() * 512,
-            },
-            Err(_) => Fingerprint {
-                path: path.to_path_buf(),
-                exists: false,
-                mtime: 0,
-                allocated: 0,
-            },
+        let (exists, mtime, allocated) = match std::fs::symlink_metadata(path) {
+            Ok(m) => (true, m.mtime(), m.blocks() * 512),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, 0, 0),
+            Err(_) => (true, -1, 0),
+        };
+        Fingerprint {
+            path: path.to_path_buf(),
+            exists,
+            mtime,
+            allocated,
         }
     }
 }
@@ -154,29 +155,32 @@ pub struct Plan {
     pub skipped: Vec<(FindingId, String)>,
 }
 
-/// Whether removing `path` would need an admin prompt: the path (when it exists) or the
-/// nearest existing ancestor of its parent is not writable by us or owned by another uid.
-/// Temp dirs under `/var/folders` are ours; `/Library/Logs/X` is not.
+/// Whether removing `path` would need an admin prompt: the path itself (when it exists,
+/// by `lstat`) or the nearest existing ancestor of its parent — resolved through
+/// symlinks, so `~/link -> /Library/Logs` counts as `/Library/Logs`; a dangling link is
+/// skipped — is not writable by us or is owned by another uid. Temp dirs under
+/// `/var/folders` are ours; `/Library/Logs/X` is not.
 pub fn needs_admin(path: &Path) -> bool {
-    let parent = path
-        .parent()
-        .and_then(|p| p.ancestors().find(|a| std::fs::symlink_metadata(a).is_ok()));
-    let own = std::fs::symlink_metadata(path).is_ok().then_some(path);
-    own.into_iter().chain(parent).any(|p| !writable_and_ours(p))
+    if std::fs::symlink_metadata(path).is_ok_and(|m| !writable_and_ours(path, &m)) {
+        return true;
+    }
+    let ancestor = path.parent().and_then(|p| {
+        p.ancestors()
+            .find_map(|a| std::fs::metadata(a).ok().map(|m| (a, m)))
+    });
+    ancestor.is_some_and(|(a, m)| !writable_and_ours(a, &m))
 }
 
-fn writable_and_ours(path: &Path) -> bool {
+/// Whether `m` (the metadata of `path`) is owned by us and `path` is `access(W_OK)`.
+fn writable_and_ours(path: &Path, m: &std::fs::Metadata) -> bool {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
-    let Ok(m) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
     // SAFETY: `getuid` has no preconditions.
     if m.uid() != unsafe { libc::getuid() } {
         return false;
     }
     if m.file_type().is_symlink() {
-        // `access` follows links; the link itself is ours.
+        // Only for the path itself (lstat): the link is ours; `access` would follow it.
         return true;
     }
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -430,5 +434,31 @@ impl Plan {
             "steps": steps,
             "skipped": skipped,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn fingerprint_of_unreadable_path_is_unknown_not_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("f"), b"x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let fp = Fingerprint::take(&locked.join("f"));
+        let again = Fingerprint::take(&locked.join("f"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // root can stat through mode 000; then the file is simply visible.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(fp.exists);
+            assert_eq!((fp.mtime, fp.allocated), (-1, 0));
+            assert_eq!(fp, again);
+        }
+        let gone = Fingerprint::take(&tmp.path().join("nope"));
+        assert_eq!((gone.exists, gone.mtime, gone.allocated), (false, 0, 0));
     }
 }
