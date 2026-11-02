@@ -86,6 +86,7 @@ fn plan_then_execute_updates_findings() {
     let plan = e.plan(std::slice::from_ref(&nm)).unwrap();
     assert_eq!(plan.steps.len(), 1);
     let mut c = e.config();
+    // Must stay Permanent (or set DISCKY_TRASH_BIN) so this never hits the real Trash.
     c.removal.mode = discky_core::RemovalMode::Permanent;
     e.set_config(c).unwrap();
     let plan = e.plan(std::slice::from_ref(&nm)).unwrap();
@@ -159,6 +160,7 @@ fn execute_while_a_reader_holds_the_snapshot_shares_the_index() {
     let id = e.start_scan(None);
     e.wait_scan(&id, Duration::from_secs(30));
     let mut c = e.config();
+    // Must stay Permanent (or set DISCKY_TRASH_BIN) so this never hits the real Trash.
     c.removal.mode = discky_core::RemovalMode::Permanent;
     e.set_config(c).unwrap();
     let held = e.snapshot().unwrap();

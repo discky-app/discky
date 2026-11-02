@@ -23,10 +23,23 @@ struct Mcp {
 }
 
 impl Mcp {
+    /// Start the server on `home`, with a fake trash binary that `mv`s its arguments into
+    /// `<home>/trashed/`, so tests never touch the real Trash.
     fn start(home: &Path) -> Mcp {
+        let bin = home.join("trash");
+        let trashed = home.join("trashed");
+        std::fs::create_dir_all(&trashed).unwrap();
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\nmv \"$@\" \"{}\"/\n", trashed.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         let mut child = Command::new(assert_cmd::cargo::cargo_bin!("discky-mcp"))
             .arg("--home")
             .arg(home)
+            .env("DISCKY_TRASH_BIN", &bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -297,4 +310,28 @@ fn tree_outside_snapshot_is_a_helpful_error() {
     let text = r["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Path is not in the last snapshot"), "{text}");
     assert!(text.contains(&tree.display().to_string()), "{text}");
+
+    // Trash mode goes through DISCKY_TRASH_BIN: the item lands in <home>/trashed/.
+    std::fs::write(
+        d.path().join("config.toml"),
+        format!(
+            "[scan]\nroots = [\"{}\"]\n[mcp]\nallow_agent_delete = true\n",
+            tree.display()
+        ),
+    )
+    .unwrap();
+    let f = m.tool("findings", json!({"category": "project_builds"}));
+    let nm = f["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["removal_kind"] == "trash")
+        .unwrap()
+        .clone();
+    let plan = m.tool("plan_removal", json!({"finding_ids": [nm["id"]]}));
+    assert_eq!(plan["steps"][0]["kind"], "trash", "{plan}");
+    let rep = m.tool("execute_plan", json!({"plan_id": plan["id"]}));
+    assert_eq!(rep["results"][0]["status"], "done", "{rep}");
+    assert!(!tree.join("web/node_modules").exists());
+    assert!(d.path().join("trashed/node_modules/pkg/index.js").exists());
 }

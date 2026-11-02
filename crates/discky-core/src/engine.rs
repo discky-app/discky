@@ -302,6 +302,10 @@ impl Engine {
     /// Run `plan`, then drop from the in-memory snapshot the findings of `Done` steps
     /// whose paths are gone. The index and the snapshot file are left as they are; the
     /// next scan brings both up to date.
+    ///
+    /// Trash steps run `/usr/bin/trash`, or the program named by the `DISCKY_TRASH_BIN`
+    /// environment variable when set. That override is for tests and development only
+    /// (a fake that keeps test runs out of the real Trash).
     pub fn execute(
         &self,
         plan: &Plan,
@@ -312,7 +316,9 @@ impl Engine {
             allow_interactive,
             only_steps,
             actor: self.actor,
-            trash_bin: PathBuf::from(TRASH_BIN),
+            trash_bin: std::env::var_os("DISCKY_TRASH_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(TRASH_BIN)),
         };
         let report = execute_plan(plan, &opts, &self.paths)?;
         let done: Vec<_> = report
