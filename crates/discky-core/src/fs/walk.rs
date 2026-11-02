@@ -23,13 +23,18 @@ const SKIP_DIRS: [&str; 3] = ["/System", "/private/var/vm", "/Volumes"];
 const PROGRESS_EVERY: Duration = Duration::from_millis(50);
 
 pub struct ScanOptions {
-    /// Absolute paths, stored in the index exactly as given.
+    /// Absolute paths, stored in the index as given; a root that is itself a symlink is
+    /// resolved with `canonicalize` and stored resolved.
     pub roots: Vec<PathBuf>,
     /// Matched against full paths; a match is left out of the index entirely.
     pub exclude: GlobSet,
     /// Worker threads; 0 = twice `available_parallelism`. Listing is I/O-latency bound, so
     /// 2× cores measured ~15 % faster on a 4 M-file home than 1×.
     pub threads: usize,
+    /// `false` (fast mode) is clone-aware only; blocks held by APFS snapshots are not
+    /// subtracted — the Engine enables exact mode when local snapshots exist. `true` asks
+    /// the kernel for PRIVATESIZE on every entry, at about twice the listing cost.
+    pub exact_private_size: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -80,12 +85,13 @@ pub fn walk(opts: &ScanOptions, on_progress: &(dyn Fn(&Progress) + Sync)) -> Ind
         progress: Progress::default(),
         last_progress: Instant::now(),
     };
+    let exact = opts.exact_private_size;
     let (tx, rx) = channel::<Listing>();
     pool.in_place_scope(|s| {
         let mut pending = 0usize;
         for root in &opts.roots {
-            if let Some((id, dev)) = b.add_root(root) {
-                spawn_list(s, &tx, id, root.clone(), dev);
+            if let Some((id, path, dev)) = b.add_root(root) {
+                spawn_list(s, &tx, id, path, dev, exact);
                 pending += 1;
             }
         }
@@ -93,7 +99,7 @@ pub fn walk(opts: &ScanOptions, on_progress: &(dyn Fn(&Progress) + Sync)) -> Ind
             let listing = rx.recv().expect("workers hold a sender until they reply");
             pending -= 1;
             for (id, path, dev) in b.add_listing(listing) {
-                spawn_list(s, &tx, id, path, dev);
+                spawn_list(s, &tx, id, path, dev, exact);
                 pending += 1;
             }
             if b.last_progress.elapsed() >= PROGRESS_EVERY {
@@ -102,6 +108,8 @@ pub fn walk(opts: &ScanOptions, on_progress: &(dyn Fn(&Progress) + Sync)) -> Ind
             }
         }
     });
+    // Final totals, so even a scan shorter than one interval reports once.
+    on_progress(&b.progress);
     b.index.compute_aggregates();
     b.index
 }
@@ -112,12 +120,13 @@ fn spawn_list<'s>(
     dir: NodeId,
     path: PathBuf,
     dev: u64,
+    exact: bool,
 ) {
     let tx = tx.clone();
     s.spawn(move |_| {
         // A panic must still produce a reply, or the builder would wait for it forever.
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            BUF.with_borrow_mut(|buf| read_dir_bulk_on_dev(&path, dev, buf))
+            BUF.with_borrow_mut(|buf| read_dir_bulk_on_dev(&path, dev, exact, buf))
         }))
         .unwrap_or_else(|_| Err(io::Error::other("directory listing panicked")));
         // The builder outlives every worker, so the receiver is still there.
@@ -133,27 +142,37 @@ fn spawn_list<'s>(
 struct Builder<'a> {
     index: Index,
     exclude: &'a GlobSet,
-    /// `file_id`s of multiply-linked files already counted.
-    seen_links: HashSet<u64>,
+    /// `(st_dev, file_id)` of multiply-linked files already counted.
+    seen_links: HashSet<(u64, u64)>,
     progress: Progress,
     last_progress: Instant,
 }
 
 impl Builder<'_> {
-    /// Append a root node; returns its id and device when it is a directory to list.
-    fn add_root(&mut self, root: &Path) -> Option<(NodeId, u64)> {
-        let name = root.file_name().unwrap_or(root.as_os_str()).as_bytes();
+    /// Append a root node; returns its id, path and device when it is a directory to list.
+    /// A root that is itself a symlink is replaced by its `canonicalize`d target.
+    fn add_root(&mut self, root: &Path) -> Option<(NodeId, PathBuf, u64)> {
+        let id = self.next_id();
+        let resolved = match std::fs::symlink_metadata(root) {
+            Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(root),
+            Ok(_) => Ok(root.to_path_buf()),
+            Err(e) => Err(e),
+        };
+        let (path, meta) = match resolved {
+            Ok(p) => {
+                let m = std::fs::symlink_metadata(&p);
+                (p, m)
+            }
+            Err(e) => (root.to_path_buf(), Err(e)),
+        };
+        let name = path.file_name().unwrap_or(path.as_os_str()).as_bytes();
         let mut node = self.new_node(None, name, ObjKind::Dir);
         node.flags = NodeFlags::ROOT;
-        let id = self.next_id();
-        let meta = std::fs::symlink_metadata(root);
-        let result = match &meta {
+        let result = match meta {
             Ok(m) => {
                 let ft = m.file_type();
                 node.kind = if ft.is_dir() {
                     ObjKind::Dir
-                } else if ft.is_symlink() {
-                    ObjKind::Symlink
                 } else if ft.is_file() {
                     ObjKind::File
                 } else {
@@ -165,20 +184,20 @@ impl Builder<'_> {
                     node.allocated = m.blocks() * 512;
                     node.private = node.allocated;
                 }
-                (node.kind == ObjKind::Dir).then_some((id, m.dev()))
+                (node.kind == ObjKind::Dir).then(|| (id, path.clone(), m.dev()))
             }
             Err(e) => {
                 node.flags |= NodeFlags::NO_ACCESS;
                 self.index.errors.push(ScanError {
                     path: root.to_path_buf(),
-                    errno: errno(e),
+                    errno: errno(&e),
                 });
                 None
             }
         };
         self.index.nodes.push(node);
         self.index.roots.push(id);
-        self.index.root_paths.push(root.to_path_buf());
+        self.index.root_paths.push(path);
         result
     }
 
@@ -210,7 +229,7 @@ impl Builder<'_> {
             if id.0 as usize > first {
                 self.index.nodes[id.0 as usize - 1].next_sibling = Some(id);
             }
-            if self.add_entry(l.dir, &e, &path) {
+            if self.add_entry(l.dir, l.dev, &e, &path) {
                 descend.push((id, path.clone(), l.dev));
             }
             path.pop();
@@ -223,7 +242,7 @@ impl Builder<'_> {
     }
 
     /// Append the node for `e` (whose full path is `path`); true when it should be listed.
-    fn add_entry(&mut self, parent: NodeId, e: &RawEntry, path: &Path) -> bool {
+    fn add_entry(&mut self, parent: NodeId, dev: u64, e: &RawEntry, path: &Path) -> bool {
         let mut node = self.new_node(Some(parent), e.name.as_bytes(), e.kind);
         node.mtime = e.mtime;
         if let Some(errno) = e.error {
@@ -238,14 +257,16 @@ impl Builder<'_> {
         node.logical = e.logical;
         node.allocated = e.allocated;
         node.private = e.private.unwrap_or(e.allocated);
-        if is_sparse(e.logical, e.allocated) {
-            node.flags |= NodeFlags::SPARSE;
-        }
+
         if e.ext_flags.is_some_and(|f| f & EF_MAY_SHARE_BLOCKS != 0) {
             node.flags |= NodeFlags::CLONE_SHARED;
         }
         let dataless = is_dataless(e.bsd_flags);
-        let dup = e.kind != ObjKind::Dir && e.link_count > 1 && !self.seen_links.insert(e.file_id);
+        if !dataless && is_sparse(e.logical, e.allocated) {
+            node.flags |= NodeFlags::SPARSE;
+        }
+        let dup =
+            e.kind != ObjKind::Dir && e.link_count > 1 && !self.seen_links.insert((dev, e.file_id));
         if dataless {
             node.flags |= NodeFlags::DATALESS;
         }

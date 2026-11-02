@@ -97,18 +97,25 @@ pub fn read_dir_bulk(dir: &Path, buf: &mut Vec<u8>) -> io::Result<Vec<RawEntry>>
 /// - It first checks the `st_dev` of the opened directory (one `fstat` on the open fd) and
 ///   returns `Ok(None)` without listing when it differs from `dev`, i.e. when `dir` is a
 ///   mount point of another volume.
-/// - It does not request PRIVATESIZE in bulk (that doubles the listing cost). `private` is
-///   fetched per entry, with `getattrlistat` on the open directory, only for non-dataless
-///   files whose `ext_flags` has [`EF_MAY_SHARE_BLOCKS`]; for every other entry it is
-///   `None`, meaning "equal to `allocated`".
+/// - Unless `exact_private` is set, it does not request PRIVATESIZE in bulk (that doubles
+///   the listing cost). `private` is then fetched per entry, with `getattrlistat` on the
+///   open directory, only for non-dataless files whose `ext_flags` has
+///   [`EF_MAY_SHARE_BLOCKS`]; for every other entry it is `None`, meaning "equal to
+///   `allocated`". This is clone-aware only: blocks held by APFS snapshots are not seen.
+///   With `exact_private`, PRIVATESIZE is requested in bulk for every entry, exactly like
+///   [`read_dir_bulk`].
 pub fn read_dir_bulk_on_dev(
     dir: &Path,
     dev: u64,
+    exact_private: bool,
     buf: &mut Vec<u8>,
 ) -> io::Result<Option<Vec<RawEntry>>> {
     let file = open_dir(dir)?;
     if file.metadata()?.dev() != dev {
         return Ok(None);
+    }
+    if exact_private {
+        return list(&file, buf, CMNEXT_ATTRS).map(Some);
     }
     let mut entries = list(&file, buf, CMNEXT_ATTRS_FAST)?;
     for e in &mut entries {
