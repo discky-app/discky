@@ -379,19 +379,6 @@ fn hub_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-// TODO(task-9): replace with tools::tool_path
-fn tool_on_path(name: &str, home: &Path) -> bool {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    dirs.extend([home.join(".local/bin"), PathBuf::from("/opt/homebrew/bin")]);
-    dirs.iter().any(|d| {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(d.join(name))
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    })
-}
-
 fn hf_finding(
     index: &Index,
     node: NodeId,
@@ -546,7 +533,7 @@ pub fn find(
     }
 
     let hf_rule = rules.get(HF_ID);
-    let hf_installed = tool_on_path("hf", home);
+    let hf_installed = crate::tools::tool_path("hf").is_some();
     for hub in hub_dirs(home) {
         let Some(root) = index.find(&hub) else {
             continue;

@@ -135,7 +135,7 @@ impl Categorizer<'_> {
 }
 
 /// Ollama server address: `$OLLAMA_HOST` (scheme optional), else the local default.
-fn ollama_url() -> String {
+pub(crate) fn ollama_url() -> String {
     match std::env::var("OLLAMA_HOST") {
         Ok(h) if !h.trim().is_empty() => {
             let h = h.trim();
