@@ -1,12 +1,13 @@
 //! Findings: removable things with an honest size, a safety label and a removal method.
 //!
-//! [`Categorizer::run`] turns an [`Index`] into findings in three passes — rule
-//! paths/globs, project build dirs ([`builds`]), large & old ([`large_old`]). Each pass
+//! [`Categorizer::run`] turns an [`Index`] into findings in four passes — rule
+//! paths/globs, per-app `~/Library` folders ([`app_caches`]), project build dirs ([`builds`]), large & old ([`large_old`]). Each pass
 //! records the node of every finding it emits in a shared `claimed` set; a node is
 //! claimed when it or any ancestor is in that set (see [`is_claimed`]). Passes walk the
 //! tree top-down with [`walk_unclaimed`] and never enter a claimed subtree, so nothing
 //! is reported twice.
 
+pub mod app_caches;
 pub mod builds;
 pub mod large_old;
 
@@ -107,6 +108,9 @@ impl Categorizer<'_> {
     pub fn run_with_home(&self, home: Option<&Path>) -> Vec<Finding> {
         let mut claimed = HashSet::new();
         let mut out = rule_pass(self.index, self.rules, &mut claimed);
+        if let Some(home) = home {
+            out.extend(app_caches::find(self.index, home, &mut claimed));
+        }
         out.extend(builds::find(self.index, self.rules, home, &mut claimed));
         out.extend(large_old::find(
             self.index,
