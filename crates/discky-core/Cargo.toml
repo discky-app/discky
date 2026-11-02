@@ -13,6 +13,7 @@ libc.workspace = true
 rayon.workspace = true
 bitflags = { workspace = true, features = ["serde"] }
 globset.workspace = true
+xxhash-rust.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
