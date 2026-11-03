@@ -8,7 +8,7 @@ use discky_core::{
     findings::{
         AppSource, Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal,
     },
-    plan::{Plan, PlanItem, PlanTools, Step, StepFlags, StepKind, plan_items_with_tools},
+    plan::{Plan, PlanItem, PlanTools, Step, StepFlags, StepKind, ZapInfo, plan_items_with_tools},
     rules::{Category, SafetyLabel},
 };
 
@@ -124,6 +124,20 @@ fn brew_tools() -> PlanTools {
     }
 }
 
+/// brew plus a cask whose zap stanza names `paths` (and other directives when `other`).
+fn zap_tools(paths: Vec<PathBuf>, other: bool) -> PlanTools {
+    PlanTools {
+        cask_zap: Box::new(move |token| {
+            assert_eq!(token, "raycast");
+            Some(ZapInfo {
+                paths: paths.clone(),
+                non_path_directives: other,
+            })
+        }),
+        ..brew_tools()
+    }
+}
+
 /// Bundle (covered), caches (covered), Application Support, a user settings domain.
 fn cask_app(t: &Path) -> Finding {
     let bundle = dir(t, "Raycast.app");
@@ -154,7 +168,11 @@ fn cask_app(t: &Path) -> Finding {
 fn cask_plan_runs_brew_zap_and_skips_zap_components() {
     let t = tempfile::tempdir().unwrap();
     let f = cask_app(t.path());
-    let p = plan(&f, None, &brew_tools());
+    let p = plan(
+        &f,
+        None,
+        &zap_tools(vec![t.path().join("caches/sub")], false),
+    );
     assert_eq!(p.steps.len(), 3, "{:#?}", p.steps);
     let brew = &p.steps[0];
     assert_eq!(
@@ -188,7 +206,11 @@ fn cask_plan_runs_brew_zap_and_skips_zap_components() {
 
     // A deselected covered leftover would still be zapped: brew runs without --zap and
     // the selected leftovers are trashed by Discky.
-    let p = plan(&f, Some(vec![0, 2]), &brew_tools());
+    let p = plan(
+        &f,
+        Some(vec![0, 2]),
+        &zap_tools(vec![t.path().join("caches")], false),
+    );
     assert_eq!(
         argv(&p.steps[0]),
         ["/fake/bin/brew", "uninstall", "--cask", "raycast"]
@@ -202,6 +224,95 @@ fn cask_plan_runs_brew_zap_and_skips_zap_components() {
     assert!(p.steps[0].flags.contains(StepFlags::TOOL_MISSING));
     assert_eq!(argv(&p.steps[0])[0], "brew");
     assert!(p.steps.iter().all(|s| !matches!(&s.kind, StepKind::Trash { paths } if paths.contains(&t.path().join("Raycast.app")))));
+}
+
+#[test]
+fn unlisted_zap_path_disables_zap() {
+    let t = tempfile::tempdir().unwrap();
+    let f = cask_app(t.path());
+    let unlisted = dir(t.path(), "someone-elses");
+    let p = plan(
+        &f,
+        None,
+        &zap_tools(vec![t.path().join("caches"), unlisted], false),
+    );
+    assert_eq!(
+        argv(&p.steps[0]),
+        ["/fake/bin/brew", "uninstall", "--cask", "raycast"]
+    );
+    assert_eq!(
+        p.steps[0].warnings,
+        ["Homebrew zap skipped: it would also remove 1 paths not listed here"]
+    );
+    // The covered caches are trashed by Discky instead.
+    assert!(p.steps.iter().any(
+        |s| matches!(&s.kind, StepKind::Trash { paths } if paths == &[t.path().join("caches")])
+    ));
+    assert_eq!(p.total_freed, 138);
+    // An unreadable zap stanza never zaps either.
+    let p = plan(&f, None, &brew_tools());
+    assert_eq!(argv(&p.steps[0]).len(), 4);
+}
+
+#[test]
+fn non_path_zap_directive_disables_zap() {
+    let t = tempfile::tempdir().unwrap();
+    let f = cask_app(t.path());
+    let p = plan(&f, None, &zap_tools(vec![t.path().join("caches")], true));
+    assert_eq!(
+        argv(&p.steps[0]),
+        ["/fake/bin/brew", "uninstall", "--cask", "raycast"]
+    );
+    assert!(
+        p.steps[0].warnings[0].starts_with("Homebrew zap skipped"),
+        "{:?}",
+        p.steps[0].warnings
+    );
+}
+
+#[test]
+fn covered_loaded_agent_is_booted_out_before_brew() {
+    let t = tempfile::tempdir().unwrap();
+    let mut f = cask_app(t.path());
+    let plist = file(t.path(), "com.raycast.agent.plist");
+    f.components.push(covered(comp(
+        ComponentKind::LaunchAgent,
+        Some(plist.clone()),
+        2,
+        ComponentRemoval::Bootout {
+            label: "com.raycast.agent".into(),
+            system: false,
+        },
+    )));
+    let tools = PlanTools {
+        launchctl_probe: Box::new(|label, _| label == "com.raycast.agent"),
+        ..zap_tools(vec![t.path().join("caches"), plist.clone()], false)
+    };
+    let p = plan(&f, None, &tools);
+    assert_eq!(argv(&p.steps[0])[..2], ["/bin/launchctl", "bootout"]);
+    assert_eq!(
+        argv(&p.steps[1])[..4],
+        ["/fake/bin/brew", "uninstall", "--cask", "--zap"]
+    );
+    // brew zaps the plist.
+    assert!(
+        p.steps
+            .iter()
+            .all(|s| !matches!(&s.kind, StepKind::Trash { paths } if paths.contains(&plist)))
+    );
+    // Without zap the plist is trashed by Discky, still after the bootout.
+    let tools = PlanTools {
+        launchctl_probe: Box::new(|label, _| label == "com.raycast.agent"),
+        ..brew_tools()
+    };
+    let p = plan(&f, None, &tools);
+    assert_eq!(argv(&p.steps[0])[..2], ["/bin/launchctl", "bootout"]);
+    assert_eq!(argv(&p.steps[1]).len(), 4);
+    assert!(
+        p.steps
+            .iter()
+            .any(|s| matches!(&s.kind, StepKind::Trash { paths } if paths.contains(&plist)))
+    );
 }
 
 #[test]
@@ -509,8 +620,8 @@ fn preferences_use_defaults_delete() {
 
 #[test]
 fn system_preferences_domain_is_interactive() {
-    // Planned only, never executed: `.GlobalPreferences.plist` exists on every Mac.
-    let plist = PathBuf::from("/Library/Preferences/.GlobalPreferences.plist");
+    // Planned only, never executed: this plist exists on every Mac.
+    let plist = PathBuf::from("/Library/Preferences/SystemConfiguration/preferences.plist");
     assert!(plist.exists());
     let t = tempfile::tempdir().unwrap();
     let bundle = dir(t.path(), "X.app");
@@ -525,7 +636,7 @@ fn system_preferences_domain_is_interactive() {
                 Some(plist),
                 3,
                 ComponentRemoval::Defaults {
-                    domain: "/Library/Preferences/.GlobalPreferences".into(),
+                    domain: "/Library/Preferences/SystemConfiguration/preferences".into(),
                 },
             ),
         ],
@@ -537,7 +648,7 @@ fn system_preferences_domain_is_interactive() {
         [
             "/usr/bin/defaults",
             "delete",
-            "/Library/Preferences/.GlobalPreferences"
+            "/Library/Preferences/SystemConfiguration/preferences"
         ]
     );
     assert!(p.steps[0].flags.contains(StepFlags::INTERACTIVE));
@@ -698,6 +809,7 @@ fn own_uninstaller_app_becomes_a_warning() {
         assert_eq!(p.steps.len(), 2);
         assert_eq!(argv(&p.steps[0]), [program, script.to_str().unwrap()]);
         assert_eq!(p.steps[0].component, Some(1));
+        assert_eq!(p.steps[0].fingerprints[0].path, script);
         assert_eq!(p.steps[0].freed, None);
         assert!(!p.steps[0].flags.contains(StepFlags::INTERACTIVE));
         assert!(matches!(p.steps[1].kind, StepKind::Trash { .. }));
@@ -828,7 +940,7 @@ fn buckets_order_steps_across_findings() {
         &items,
         &[&receipts, &first],
         &Config::default(),
-        &brew_tools(),
+        &zap_tools(vec![t.path().join("caches")], false),
     );
     let kinds: Vec<&str> = p
         .steps
@@ -845,4 +957,104 @@ fn buckets_order_steps_across_findings() {
     assert_eq!(kinds, ["quit", "brew", "trash", "defaults", "forget"]);
     let idx: Vec<usize> = p.steps.iter().map(|s| s.index).collect();
     assert_eq!(idx, [0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn shared_pkg_receipt_is_kept() {
+    let t = tempfile::tempdir().unwrap();
+    let home = dir(t.path(), "home");
+    let bundle = dir(t.path(), "Word.app");
+    let other = dir(t.path(), "Excel.app");
+    let shared_file = file(&home, "Library/MS/shared.bin");
+    let own_file = file(&home, "Library/MS/word.bin");
+    let receipt = |id: &str| {
+        comp(
+            ComponentKind::Receipt,
+            Some(file(t.path(), &format!("{id}.plist"))),
+            0,
+            ComponentRemoval::PkgForget { pkg_id: id.into() },
+        )
+    };
+    let files = {
+        let (bundle, other, shared_file, own_file) = (
+            bundle.clone(),
+            other.clone(),
+            shared_file.clone(),
+            own_file.clone(),
+        );
+        move |id: &str| match id {
+            "com.ms.word" => vec![bundle.clone(), own_file.clone()],
+            "com.ms.shared" => vec![
+                bundle.clone(),
+                other.join("Contents"),
+                other.clone(),
+                shared_file.clone(),
+            ],
+            _ => Vec::new(),
+        }
+    };
+    let tools = PlanTools {
+        home: Some(home.clone()),
+        pkg_files: Box::new(files),
+        ..PlanTools::default()
+    };
+    let f = app(
+        "Word",
+        AppSource::Pkg {
+            pkg_ids: vec!["com.ms.word".into(), "com.ms.shared".into()],
+        },
+        &bundle,
+        vec![
+            trash_comp(ComponentKind::AppBundle, bundle.clone(), 100),
+            receipt("com.ms.word"),
+            receipt("com.ms.shared"),
+        ],
+    );
+    let p = plan(&f, None, &tools);
+    assert_eq!(p.steps.len(), 2, "{:#?}", p.steps);
+    assert_eq!(trashed(&p.steps[0]), [bundle, own_file]);
+    assert!(
+        p.steps[0]
+            .warnings
+            .contains(&"Package com.ms.shared also installed Excel.app; receipt kept".to_string()),
+        "{:?}",
+        p.steps[0].warnings
+    );
+    assert_eq!(
+        argv(&p.steps[1]),
+        ["/usr/sbin/pkgutil", "--forget", "com.ms.word"]
+    );
+}
+
+#[test]
+fn global_and_apple_domains_are_never_deleted() {
+    let t = tempfile::tempdir().unwrap();
+    let bundle = dir(t.path(), "X.app");
+    let mut components = vec![trash_comp(ComponentKind::AppBundle, bundle.clone(), 10)];
+    for domain in [
+        "-g",
+        "NSGlobalDomain",
+        ".GlobalPreferences",
+        "com.apple.finder",
+        "/Library/Preferences/.GlobalPreferences",
+        "/Library/Preferences/com.apple.TimeMachine",
+    ] {
+        components.push(comp(
+            ComponentKind::Preferences,
+            None,
+            1,
+            ComponentRemoval::Defaults {
+                domain: domain.into(),
+            },
+        ));
+    }
+    let f = app("X", AppSource::Dragged, &bundle, components);
+    let p = plan(&f, None, &PlanTools::default());
+    assert_eq!(p.steps.len(), 1, "{:#?}", p.steps);
+    assert!(matches!(p.steps[0].kind, StepKind::Trash { .. }));
+    assert_eq!(p.steps[0].warnings.len(), 6, "{:?}", p.steps[0].warnings);
+    assert_eq!(
+        p.steps[0].warnings[3],
+        "Settings domain com.apple.finder is never deleted"
+    );
 }

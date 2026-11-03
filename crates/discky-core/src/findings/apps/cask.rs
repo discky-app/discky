@@ -20,7 +20,7 @@ const BREW_ENV: [(&str, &str); 2] = [
 /// Where the cask apps go unless `--appdir` was used.
 const APPDIR: &str = "/Applications";
 /// Caskroom locations tried when `brew --caskroom` cannot be asked.
-const DEFAULT_CASKROOMS: [&str; 2] = ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"];
+pub(crate) const DEFAULT_CASKROOMS: [&str; 2] = ["/opt/homebrew/Caskroom", "/usr/local/Caskroom"];
 
 /// One installed (or, from a lookup, known) cask.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

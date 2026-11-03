@@ -20,7 +20,7 @@ use crate::tools;
 mod app;
 pub mod execute;
 
-pub use app::{GLOBAL_MISE_VERSION, PlanTools};
+pub use app::{GLOBAL_MISE_VERSION, PlanTools, ZapInfo};
 
 /// 16 hex chars of `xxh3_64` over `created_at`, a per-process counter and the planned
 /// finding ids. The counter keeps two plans of the same findings made in the same second

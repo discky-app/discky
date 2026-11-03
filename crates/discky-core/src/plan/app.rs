@@ -63,6 +63,19 @@ pub type LoadedProbe = Box<dyn Fn(&str, bool) -> bool>;
 /// A key (cask token, package id) → what the system records for it.
 pub type Lookup<T> = Box<dyn Fn(&str) -> Vec<T>>;
 
+/// A cask's `zap` stanza as planning sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZapInfo {
+    /// The existing paths its `trash` and `delete` directives expand to.
+    pub paths: Vec<PathBuf>,
+    /// Whether it also has directives that are not paths (`pkgutil`, `launchctl`,
+    /// `script`, `early_script`, `signal`, `login_item`).
+    pub non_path_directives: bool,
+}
+
+/// A cask's full token → its zap stanza; `None` when it cannot be read.
+pub type ZapLookup = Box<dyn Fn(&str) -> Option<ZapInfo>>;
+
 /// What planning may look up outside the finding. [`PlanTools::detect`] uses the real
 /// system (read-only lookups); tests pass fakes, e.g.
 /// `PlanTools { brew: Some("/fake/brew".into()), ..PlanTools::default() }`.
@@ -77,6 +90,9 @@ pub struct PlanTools {
     pub running: HashSet<String>,
     /// A cask's `uninstall.quit` bundle ids, by short token.
     pub cask_quit: Lookup<String>,
+    /// The zap stanza of a cask, by full token. `--zap` is used only when it is known and
+    /// removes nothing beyond the selected covered components.
+    pub cask_zap: ZapLookup,
     /// Absolute paths of the files package receipt `id` installed.
     pub pkg_files: Lookup<PathBuf>,
     /// The user's home: package files under it are trashed with the app.
@@ -92,6 +108,7 @@ impl Default for PlanTools {
             launchctl_probe: Box::new(|_, _| false),
             running: HashSet::new(),
             cask_quit: Box::new(|_| Vec::new()),
+            cask_zap: Box::new(|_| None),
             pkg_files: Box::new(|_| Vec::new()),
             home: None,
         }
@@ -100,7 +117,7 @@ impl Default for PlanTools {
 
 impl PlanTools {
     /// Real lookups: `brew`/`mise` by [`tools::tool_path`], `launchctl print` for loaded
-    /// jobs, the Caskroom on disk for `uninstall.quit`, `pkgutil --files` for package
+    /// jobs, the Caskroom on disk for `uninstall.quit` and `zap`, `pkgutil --files` for package
     /// files, `$HOME`. The running set is read (once) only when `want_running`.
     pub fn detect(want_running: bool) -> PlanTools {
         PlanTools {
@@ -115,10 +132,47 @@ impl PlanTools {
                 HashSet::new()
             },
             cask_quit: Box::new(cask::caskroom_quit_ids),
+            cask_zap: {
+                let home = crate::paths::home_dir();
+                Box::new(move |full_token| caskroom_zap(full_token, home.as_deref()?))
+            },
             pkg_files: Box::new(|id| pkg::receipt_files(Path::new(PKGUTIL), id)),
             home: crate::paths::home_dir(),
         }
     }
+}
+
+/// The zap stanza of `full_token` from the first default Caskroom (offline; no `brew`
+/// run). `rmdir` directives are left out: they remove empty folders only.
+fn caskroom_zap(full_token: &str, home: &Path) -> Option<ZapInfo> {
+    let token = full_token.rsplit('/').next()?;
+    let room = cask::DEFAULT_CASKROOMS
+        .iter()
+        .map(Path::new)
+        .find(|p| p.is_dir())?;
+    let c = cask::read_caskroom(room, Some(&[token.to_string()]))
+        .into_iter()
+        .next()?;
+    let mut paths: Vec<PathBuf> = c
+        .zap
+        .iter()
+        .flat_map(|d| d.trash.iter().chain(&d.delete))
+        .flat_map(|p| cask::expand_zap_path(p, home))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let non_path_directives = c.zap.iter().any(|d| {
+        !d.pkgutil.is_empty()
+            || !d.launchctl.is_empty()
+            || d.script.is_some()
+            || d.early_script.is_some()
+            || !d.signal.is_empty()
+            || !d.login_item.is_empty()
+    });
+    Some(ZapInfo {
+        paths,
+        non_path_directives,
+    })
 }
 
 /// Whether `f` is planned here rather than by the generic single-step planner: apps, mise
@@ -192,13 +246,15 @@ pub(super) fn plan_finding(
         // Leftover groups and orphan receipts: the selected components only, never the
         // top-level paths as well.
         Removal::Trash { .. } => {
-            component_steps(f, selected, cfg, tools, |_| false, &mut out)?;
+            bootout_steps(f, selected, tools, &mut out);
+            component_steps(f, selected, cfg, |_| false, &mut out)?;
         }
         _ => {
             if let Some(s) = removal_step(f, cfg)? {
                 out.push(Bucket::of(&s), s);
             }
-            component_steps(f, selected, cfg, tools, |_| false, &mut out)?;
+            bootout_steps(f, selected, tools, &mut out);
+            component_steps(f, selected, cfg, |_| false, &mut out)?;
         }
     }
     if out.steps.is_empty() {
@@ -266,6 +322,10 @@ fn plan_app(
         }
     }
 
+    // Loaded jobs first, covered ones too: brew's own `launchctl` stanza tolerates a job
+    // that is already gone, `launchctl bootout` does not.
+    bootout_steps(f, selected, tools, out);
+
     for &i in selected {
         let c = &f.components[i];
         if c.kind == ComponentKind::OwnUninstaller
@@ -275,16 +335,32 @@ fn plan_app(
         }
     }
 
-    // `--zap` only when brew would remove nothing the user left out: no shared zap paths
-    // and every covered leftover selected.
-    let zap = matches!(source, AppSource::Cask { .. })
-        && bundle_on
-        && !has_flag(f, FLAG_ZAP_SHARED)
-        && f.components
-            .iter()
-            .enumerate()
-            .filter(|&(i, c)| c.covered_by_cask && Some(i) != bundle_i)
-            .all(|(i, _)| selected.contains(&i));
+    // Package receipts that also installed another app that still exists are kept, with
+    // their files.
+    let mut pkg_files: Vec<PathBuf> = Vec::new();
+    let mut shared_pkgs: HashSet<&str> = HashSet::new();
+    if let AppSource::Pkg { pkg_ids } = source {
+        for id in pkg_ids {
+            let files = (tools.pkg_files)(id);
+            let others = other_apps(&files, bundle);
+            if others.is_empty() {
+                pkg_files.extend(files);
+            } else {
+                shared_pkgs.insert(id);
+                out.warnings.push(format!(
+                    "Package {id} also installed {}; receipt kept",
+                    others.join(", ")
+                ));
+            }
+        }
+    }
+
+    let (zap, zap_warning) = match source {
+        AppSource::Cask { full_token, .. } if bundle_on => {
+            zap_decision(f, full_token, selected, tools)
+        }
+        _ => (false, None),
+    };
     if bundle_on {
         let bundle_freed =
             bundle_i.map_or(f.freed_if_deleted, |i| f.components[i].freed_if_deleted);
@@ -293,7 +369,7 @@ fn plan_app(
                 Bucket::Vendor,
                 brew_step(f, full_token, zap, bundle, selected, tools),
             ),
-            AppSource::Pkg { pkg_ids } => (Bucket::Trash, pkg_step(f, bundle, pkg_ids, cfg, tools)),
+            AppSource::Pkg { .. } => (Bucket::Trash, pkg_step(f, bundle, &pkg_files, cfg, tools)),
             AppSource::AppStore | AppSource::Dragged => {
                 (Bucket::Trash, path_step(f, &[bundle.to_path_buf()], cfg))
             }
@@ -304,15 +380,112 @@ fn plan_app(
         };
         s.freed = Some(bundle_freed + zapped);
         s.component = bundle_i;
+        s.warnings.extend(zap_warning);
         out.push(bucket, s);
     }
 
     let skip = |i: usize| {
+        let c = &f.components[i];
         Some(i) == bundle_i
-            || f.components[i].kind == ComponentKind::OwnUninstaller
-            || (zap && f.components[i].covered_by_cask)
+            || c.kind == ComponentKind::OwnUninstaller
+            || (zap && c.covered_by_cask)
+            || matches!(&c.removal, ComponentRemoval::PkgForget { pkg_id } if shared_pkgs.contains(pkg_id.as_str()))
     };
-    component_steps(f, selected, cfg, tools, skip, out)
+    component_steps(f, selected, cfg, skip, out)
+}
+
+/// Whether to run brew with `--zap`, and why not: only when the cask's zap stanza is
+/// known, has no non-path directives, every path it removes lies in a selected covered
+/// component, no covered component is left out, and no zap path is shared.
+fn zap_decision(
+    f: &Finding,
+    full_token: &str,
+    selected: &[usize],
+    tools: &PlanTools,
+) -> (bool, Option<String>) {
+    if has_flag(f, FLAG_ZAP_SHARED) {
+        return (
+            false,
+            Some("Homebrew zap skipped: it would also remove files other apps use".to_string()),
+        );
+    }
+    let left_out = f
+        .components
+        .iter()
+        .enumerate()
+        .any(|(i, c)| c.covered_by_cask && !selected.contains(&i));
+    if left_out {
+        return (
+            false,
+            Some("Homebrew zap skipped: it would also remove items you left out".to_string()),
+        );
+    }
+    let Some(info) = (tools.cask_zap)(full_token) else {
+        return (
+            false,
+            Some("Homebrew zap skipped: its zap stanza could not be read".to_string()),
+        );
+    };
+    let covered: Vec<&Path> = selected
+        .iter()
+        .map(|&i| &f.components[i])
+        .filter(|c| c.covered_by_cask)
+        .filter_map(|c| c.path.as_deref())
+        .collect();
+    let unlisted = info
+        .paths
+        .iter()
+        .filter(|p| !covered.iter().any(|c| p.starts_with(c)))
+        .count();
+    if unlisted > 0 {
+        return (
+            false,
+            Some(format!(
+                "Homebrew zap skipped: it would also remove {unlisted} paths not listed here"
+            )),
+        );
+    }
+    if info.non_path_directives {
+        return (
+            false,
+            Some(
+                "Homebrew zap skipped: it would also run steps not listed here (launchctl, \
+                 pkgutil or scripts)"
+                    .to_string(),
+            ),
+        );
+    }
+    (true, None)
+}
+
+/// File names of the app bundles in `files` other than `bundle` that still exist
+/// (outermost bundles only).
+fn other_apps(files: &[PathBuf], bundle: &Path) -> Vec<String> {
+    let is_app = |p: &Path| {
+        p.extension()
+            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("app"))
+    };
+    let mut names: Vec<String> = files
+        .iter()
+        .filter(|p| !p.starts_with(bundle) && is_app(p))
+        .filter(|p| !p.ancestors().skip(1).any(is_app))
+        .filter(|p| std::fs::symlink_metadata(p).is_ok())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// A `launchctl bootout` step per selected `Bootout` component whose job is loaded now.
+fn bootout_steps(f: &Finding, selected: &[usize], tools: &PlanTools, out: &mut Out) {
+    for &i in selected {
+        if let ComponentRemoval::Bootout { label, system } = &f.components[i].removal
+            && (tools.launchctl_probe)(label, *system)
+        {
+            out.push(Bucket::Vendor, bootout_step(f, i, label, *system));
+        }
+    }
 }
 
 fn quit_step(f: &Finding, description: String, bundle_id: &str) -> Step {
@@ -369,6 +542,7 @@ fn own_uninstaller(f: &Finding, i: usize, path: &Path, out: &mut Out) {
     s.freed = None;
     s.freed_note = Some("Optional vendor step".to_string());
     s.component = Some(i);
+    s.fingerprints = vec![Fingerprint::take(path)];
     out.push(Bucket::Vendor, s);
 }
 
@@ -431,21 +605,18 @@ fn brew_step(
     s
 }
 
-/// One trash step for the bundle plus every file the packages installed under
+/// One trash step for the bundle plus every file of `files` (from the packages that are
+/// not shared with another app) installed under
 /// `/Applications` or the home folder that still exists; files under system folders are
 /// listed as left in place.
 fn pkg_step(
     f: &Finding,
     bundle: &Path,
-    pkg_ids: &[String],
+    files: &[PathBuf],
     cfg: &Config,
     tools: &PlanTools,
 ) -> Step {
-    let files: Vec<PathBuf> = pkg_ids
-        .iter()
-        .flat_map(|id| (tools.pkg_files)(id))
-        .collect();
-    let (extra, left) = pkg_paths(&files, bundle, tools.home.as_deref());
+    let (extra, left) = pkg_paths(files, bundle, tools.home.as_deref());
     let mut paths = vec![bundle.to_path_buf()];
     paths.extend(extra);
     let mut s = path_step(f, &paths, cfg);
@@ -547,15 +718,14 @@ fn mise_step(f: &Finding, tool: &str, version: &str, tools: &PlanTools) -> Step 
     s
 }
 
-/// One or two steps per selected component not `skip`ped: Trash → trash step;
-/// Bootout → `launchctl bootout` (only when loaded) then the plist's trash step;
-/// Defaults → `defaults delete`; PkgForget → `pkgutil --forget`; None → nothing.
+/// One step per selected component not `skip`ped: Trash → trash step; Bootout → the
+/// plist's trash step (see [`bootout_steps`]); Defaults → `defaults delete` (never for a
+/// [`protected_domain`], which becomes a warning); PkgForget → `pkgutil --forget`; None → nothing.
 /// Components whose path no longer exists are left out (and counted as missing).
 fn component_steps(
     f: &Finding,
     selected: &[usize],
     cfg: &Config,
-    tools: &PlanTools,
     skip: impl Fn(usize) -> bool,
     out: &mut Out,
 ) -> Result<(), String> {
@@ -577,19 +747,20 @@ fn component_steps(
                     out.missing += 1;
                 }
             }
-            ComponentRemoval::Bootout { label, system } => {
-                if (tools.launchctl_probe)(label, *system) {
-                    out.push(Bucket::Vendor, bootout_step(f, i, label, *system));
+            // The bootout itself comes from `bootout_steps`; here only the plist.
+            ComponentRemoval::Bootout { .. } => match (&c.path, exists) {
+                (Some(path), Some(true)) => {
+                    out.push(Bucket::Trash, component_trash(f, i, c, path, cfg));
                 }
-                match (&c.path, exists) {
-                    (Some(path), Some(true)) => {
-                        out.push(Bucket::Trash, component_trash(f, i, c, path, cfg));
-                    }
-                    (Some(_), _) => out.missing += 1,
-                    _ => {}
-                }
-            }
+                (Some(_), _) => out.missing += 1,
+                _ => {}
+            },
             ComponentRemoval::Defaults { domain } => {
+                if protected_domain(domain) {
+                    out.warnings
+                        .push(format!("Settings domain {domain} is never deleted"));
+                    continue;
+                }
                 if exists == Some(false) {
                     out.missing += 1;
                     continue;
@@ -651,6 +822,20 @@ fn bootout_step(f: &Finding, i: usize, label: &str, system: bool) -> Step {
     s.freed = None;
     s.component = Some(i);
     s
+}
+
+/// Domains Discky never deletes: options (`-g`…), the global domain and Apple's own, in
+/// either the domain or (for a path) its last component, case-insensitively.
+fn protected_domain(domain: &str) -> bool {
+    let leaf = domain.rsplit('/').next().unwrap_or(domain);
+    leaf.is_empty()
+        || [domain, leaf].iter().any(|d| {
+            let d = d.to_lowercase();
+            d.starts_with('-')
+                || d == "nsglobaldomain"
+                || d.starts_with(".globalpreferences")
+                || d.starts_with("com.apple.")
+        })
 }
 
 /// `defaults delete <domain>` as the user; a system domain (its plist under
