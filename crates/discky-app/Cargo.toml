@@ -16,3 +16,6 @@ tracing.workspace = true
 [[bin]]
 name = "discky-app"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

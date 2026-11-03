@@ -8,6 +8,7 @@ pub mod inspector;
 pub mod overview;
 pub mod removal;
 pub mod scan;
+pub mod settings;
 pub mod sidebar;
 
 pub use app::run;
