@@ -1,0 +1,5 @@
+/Applications/Safari.app   kMDItemLastUsedDate = 2026-10-14 15:10:12 +0000
+/Applications/Hex.app   kMDItemLastUsedDate = 2026-11-03 07:45:30 +0000
+/Applications/Google Chrome.app   kMDItemLastUsedDate = 2026-11-03 12:35:10 +0000
+/Applications/Slack.app   kMDItemLastUsedDate = 2026-11-03 12:35:08 +0000
+/Applications/Things3.app   kMDItemLastUsedDate = (null)

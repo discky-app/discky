@@ -1,0 +1,77 @@
+{
+  "formulae": [],
+  "casks": [
+    {
+      "token": "raycast",
+      "full_token": "raycast",
+      "tap": "homebrew/cask",
+      "name": ["Raycast"],
+      "version": "2.10.1.0",
+      "installed": "2.9.0.0",
+      "installed_time": 1793038754,
+      "auto_updates": true,
+      "outdated": false,
+      "artifacts": [
+        {"uninstall": [{"quit": "com.raycast.macos", "login_item": "Raycast"}]},
+        {"app": ["Raycast.app"], "target": "/Applications/Raycast.app"},
+        {"zap": [{"trash": [
+          "~/.config/raycast",
+          "~/Library/Application Scripts/com.raycast.macos.BrowserExtension",
+          "~/Library/Application Support/com.raycast.macos",
+          "~/Library/Caches/com.raycast.macos",
+          "~/Library/Preferences/com.raycast.macos.plist",
+          "~/Library/WebKit/com.raycast.macos"
+        ]}]}
+      ]
+    },
+    {
+      "token": "hex",
+      "full_token": "anomalyco/tap/hex",
+      "tap": "anomalyco/tap",
+      "version": "3.2.0",
+      "installed": "3.2.0",
+      "installed_time": 1793613805,
+      "artifacts": [
+        {"uninstall": [{"quit": "anomaly.hex"}]},
+        {"app": ["Hex.app"], "target": "/Applications/Hex.app"},
+        {"zap": [{"trash": [
+          "~/.config/hex",
+          "~/Library/Application Support/hex",
+          "~/Library/Caches/anomaly.hex",
+          "~/Library/HTTPStorages/anomaly.hex",
+          "~/Library/Preferences/anomaly.hex.plist",
+          "~/Library/Saved Application State/anomaly.hex.savedState"
+        ]}]}
+      ]
+    },
+    {
+      "token": "zoom",
+      "full_token": "zoom",
+      "installed": null,
+      "artifacts": [
+        {"uninstall": [{"launchctl": ["us.zoom.updater", "us.zoom.updater.login.check", "us.zoom.ZoomDaemon"], "signal": ["KILL", "us.zoom.xos"], "pkgutil": "us.zoom.pkg.videomeeting", "delete": ["/Applications/zoom.us.app", "/Library/Internet Plug-Ins/ZoomUsPlugIn.plugin", "/Library/Logs/DiagnosticReports/zoom.us*", "/Library/PrivilegedHelperTools/us.zoom.ZoomDaemon"]}]},
+        {"pkg": ["zoomusInstallerFull.pkg"]},
+        {"zap": [{"delete": "/Library/Logs/zoomusinstall.log", "trash": ["~/.zoomus", "~/Library/Application Scripts/*.ZoomClient3rd", "~/Library/Application Support/zoom.us", "~/Library/Caches/us.zoom.xos", "~/Library/Group Containers/*.ZoomClient3rd", "~/Library/Preferences/us.zoom.*.plist", "~/Library/Preferences/ZoomChat.plist"]}]}
+      ]
+    },
+    {
+      "token": "teamviewer",
+      "full_token": "teamviewer",
+      "installed": null,
+      "artifacts": [
+        {"uninstall": [{"launchctl": ["com.teamviewer.desktop", "com.teamviewer.Helper", "com.teamviewer.service"], "quit": ["com.teamviewer.TeamViewer", "com.teamviewer.TeamViewerUninstaller"], "pkgutil": ["com.teamviewer.AuthorizationPlugin", "com.teamviewer.teamviewer.*", "TeamViewerUninstaller"], "delete": ["/Applications/TeamViewer.app", "/Library/Preferences/com.teamviewer*"]}]},
+        {"pkg": ["TeamViewer.pkg"]},
+        {"zap": [{"trash": ["/Library/Application Support/TeamViewer", "~/Library/Application Support/TeamViewer", "~/Library/Preferences/com.teamviewer*"]}]}
+      ]
+    },
+    {
+      "token": "adobe-creative-cloud",
+      "full_token": "adobe-creative-cloud",
+      "installed": null,
+      "artifacts": [
+        {"uninstall": [{"early_script": {"executable": "/usr/bin/pluginkit", "args": ["-r", "/Applications/Utilities/Adobe Sync/CoreSync/Core Sync.app/Contents/PlugIns/ACCFinderSync.appex"], "must_succeed": false, "print_stderr": false}, "script": {"executable": "/usr/bin/pkill", "args": ["Adobe Desktop Service", "AdobeIPCBroker", "AdobeCRDaemon"], "must_succeed": false}, "rmdir": ["/Applications/Adobe Creative Cloud", "/Library/Application Support/Adobe{/CEP{/extensions,},}"]}]},
+        {"zap": [{"rmdir": "~/Library/Application Support/Adobe"}]}
+      ]
+    }
+  ]
+}

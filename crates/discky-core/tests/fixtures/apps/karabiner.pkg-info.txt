@@ -1,0 +1,5 @@
+package-id: org.pqrs.Karabiner-Elements
+version: 15.9.0
+volume: /
+location: 
+install-time: 1773139518

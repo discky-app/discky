@@ -8,6 +8,7 @@
 //! is reported twice.
 
 pub mod app_caches;
+pub mod apps;
 pub mod builds;
 pub mod large_old;
 pub mod models;
