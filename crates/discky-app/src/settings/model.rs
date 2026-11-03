@@ -71,9 +71,11 @@ pub fn mcp_binary_candidates(home: &Path, exe: Option<&Path>) -> Vec<PathBuf> {
 
 /// The first existing `discky-mcp` candidate.
 pub fn find_mcp_binary(home: &Path, exe: Option<&Path>) -> Option<PathBuf> {
-    mcp_binary_candidates(home, exe)
-        .into_iter()
-        .find(|p| p.exists())
+    first_existing(&mcp_binary_candidates(home, exe))
+}
+
+fn first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|p| p.exists()).cloned()
 }
 
 // ------------------------------------------------------------------ tools
@@ -263,14 +265,23 @@ mod tests {
         assert_eq!(c[0], PathBuf::from("/opt/homebrew/bin/discky-mcp"));
         assert_eq!(c[1], home.path().join(".cargo/bin/discky-mcp"));
         assert_eq!(c[2], exe_dir.path().join("discky-mcp"));
-        fs::write(&c[2], "").unwrap();
-        // /opt/homebrew may exist on the host; only assert when it does not.
-        if !c[0].exists() {
-            assert_eq!(find_mcp_binary(home.path(), Some(&exe)), Some(c[2].clone()));
-            fs::create_dir_all(c[1].parent().unwrap()).unwrap();
-            fs::write(&c[1], "").unwrap();
-            assert_eq!(find_mcp_binary(home.path(), Some(&exe)), Some(c[1].clone()));
+    }
+
+    #[test]
+    fn first_existing_picks_first_present_candidate() {
+        let d = tempfile::tempdir().unwrap();
+        let brew = d.path().join("brew/discky-mcp");
+        let cargo = d.path().join("cargo/discky-mcp");
+        let exe = d.path().join("exe/discky-mcp");
+        let list = [brew.clone(), cargo.clone(), exe.clone()];
+        assert_eq!(first_existing(&list), None);
+        for p in [&cargo, &exe] {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, "").unwrap();
         }
+        assert_eq!(first_existing(&list), Some(cargo.clone()));
+        fs::remove_file(&cargo).unwrap();
+        assert_eq!(first_existing(&list), Some(exe));
     }
 
     #[test]
