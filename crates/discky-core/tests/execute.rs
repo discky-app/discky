@@ -53,6 +53,7 @@ fn trash_finding(p: &std::path::Path) -> Finding {
             paths: vec![p.into()],
         },
         flags: vec![],
+        components: Vec::new(),
     }
 }
 
@@ -684,4 +685,23 @@ fn stale_interactive_step_that_will_be_skipped_does_not_block() {
     plan.steps[0].fingerprints[0].mtime = 1;
     let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
     assert!(matches!(rep.results[0].status, StepStatus::Skipped));
+}
+
+#[test]
+fn interactive_command_is_skipped_without_permission() {
+    let (d, paths, bin) = setup();
+    let marker = d.path().join("ran");
+    let f = command_finding(d.path(), &format!("touch '{}'", marker.display()), None);
+    let mut plan = plan_removal(&[&f], &Config::default());
+    // An admin command (e.g. `pkgutil --forget`) is planned as an interactive step.
+    plan.steps[0].flags |= discky_core::plan::StepFlags::INTERACTIVE;
+    let rep = execute_plan(&plan, &opts(Actor::Mcp, bin), &paths).unwrap();
+    assert!(!marker.exists());
+    assert!(matches!(rep.results[0].status, StepStatus::Skipped));
+    assert_eq!(
+        rep.results[0].reason.as_deref(),
+        Some("Needs an interactive session; run from Discky.app")
+    );
+    assert_eq!(rep.stopped_at, None);
+    assert_eq!(rep.freed_total, 0);
 }

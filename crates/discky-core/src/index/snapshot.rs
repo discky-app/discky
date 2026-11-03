@@ -17,8 +17,9 @@ use crate::findings::Finding;
 use crate::index::Index;
 
 const MAGIC: &[u8; 8] = b"DISCKY01";
-/// Version 2 added [`SnapshotMeta::exact_private_size`]; older files are `Incompatible`.
-pub const SNAPSHOT_FORMAT: u32 = 2;
+/// Version 2 added [`SnapshotMeta::exact_private_size`], version 3 `Finding::components`
+/// and the app/mise removals; older files are `Incompatible`.
+pub const SNAPSHOT_FORMAT: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {

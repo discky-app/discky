@@ -173,6 +173,7 @@ fn synthetic(id: &str, category: Category, label: SafetyLabel, removal: Removal)
         explain: String::new(),
         removal,
         flags: vec![],
+        components: Vec::new(),
     }
 }
 

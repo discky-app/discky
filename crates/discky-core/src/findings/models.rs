@@ -298,6 +298,7 @@ fn ollama_finding(m: &OllamaModel, manifests: &[Manifest]) -> Finding {
             model: m.name.clone(),
         },
         flags,
+        components: Vec::new(),
     }
 }
 

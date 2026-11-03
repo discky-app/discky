@@ -600,6 +600,7 @@ mod tests {
             flags,
             warnings: warnings.iter().map(|w| w.to_string()).collect(),
             fingerprints: Vec::new(),
+            component: None,
         }
     }
 

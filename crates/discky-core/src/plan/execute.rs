@@ -297,7 +297,11 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
         StepKind::Command { argv, cwd } => {
             let target = command_target(step, cwd.as_deref());
             let before = target.map(allocated_tree);
-            let outcome = run_command(argv, cwd.as_deref());
+            let outcome = if interactive {
+                run_admin_command(argv, cwd.as_deref())
+            } else {
+                run_command(argv, cwd.as_deref())
+            };
             match (target, before) {
                 (Some(t), Some(before)) => measure_command(step, t, before, outcome),
                 _ => outcome,
@@ -498,6 +502,62 @@ pub(crate) fn admin_rm_script(paths: &[&str]) -> String {
         "do shell script \"{}\" with administrator privileges",
         applescript_escape(&format!("/bin/rm -rf {}", words.join(" ")))
     )
+}
+
+/// AppleScript running `argv` with administrator privileges (the system prompts for the
+/// password). Each argument is one shell word — bare when it only holds characters the
+/// shell never interprets, else single-quoted — and the line is AppleScript-escaped.
+pub(crate) fn admin_command_script(argv: &[&str]) -> String {
+    let words: Vec<String> = argv.iter().map(|a| shell_word(a)).collect();
+    format!(
+        "do shell script \"{}\" with administrator privileges",
+        applescript_escape(&words.join(" "))
+    )
+}
+
+/// `s` unquoted when it is non-empty and only holds `[A-Za-z0-9_@%+=:,./-]`, else
+/// [`shell_quote`]d.
+fn shell_word(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b));
+    if plain { s.to_string() } else { shell_quote(s) }
+}
+
+/// Run an `INTERACTIVE` command step through `osascript -e <admin_command_script>`, which
+/// shows the administrator prompt. Fails closed before building any script when the
+/// program is not an absolute path (never looked up through `PATH` as root), when an
+/// absolute-path argument ends in `/`, when an argument holds a NUL, or when a working
+/// directory is given (`do shell script` would not honour it).
+fn run_admin_command(argv: &[String], cwd: Option<&Path>) -> Outcome {
+    let Some(program) = argv.first() else {
+        return Outcome::failed(String::new(), "Empty command");
+    };
+    if !Path::new(program).is_absolute() {
+        return Outcome::failed(
+            String::new(),
+            "admin command must use an absolute program path",
+        );
+    }
+    if cwd.is_some() {
+        return Outcome::failed(
+            String::new(),
+            "admin command cannot have a working directory",
+        );
+    }
+    if argv
+        .iter()
+        .any(|a| a.len() > 1 && a.starts_with('/') && a.ends_with('/'))
+    {
+        return Outcome::failed(String::new(), "path ends with a slash");
+    }
+    if argv.iter().any(|a| a.contains('\0')) {
+        return Outcome::failed(String::new(), "argument contains a NUL byte");
+    }
+    let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let mut cmd = Command::new(OSASCRIPT);
+    cmd.arg("-e").arg(admin_command_script(&words));
+    process_outcome(&mut cmd, "osascript")
 }
 
 /// A `Done` trash/remove whose paths still exist (by `lstat`; any error other than
@@ -744,6 +804,28 @@ mod tests {
         assert_eq!(
             s,
             r#"do shell script "/bin/rm -rf '/Library/It'\\''s \"x\"'" with administrator privileges"#
+        );
+    }
+
+    #[test]
+    fn admin_command_script_quotes_argv() {
+        assert_eq!(
+            admin_command_script(&["/usr/sbin/pkgutil", "--forget", "us.zoom.pkg"]),
+            r#"do shell script "/usr/sbin/pkgutil --forget us.zoom.pkg" with administrator privileges"#
+        );
+        assert_eq!(
+            admin_command_script(&["/bin/launchctl", "bootout", "it's \"x\"", ""]),
+            r#"do shell script "/bin/launchctl bootout 'it'\\''s \"x\"' ''" with administrator privileges"#
+        );
+    }
+
+    #[test]
+    fn admin_command_needs_an_absolute_program() {
+        let o = run_admin_command(&["pkgutil".to_string(), "--forget".to_string()], None);
+        assert_eq!(o.status, StepStatus::Failed);
+        assert_eq!(
+            o.reason.as_deref(),
+            Some("admin command must use an absolute program path")
         );
     }
 

@@ -503,6 +503,7 @@ pub(crate) mod fixtures {
             explain: String::new(),
             removal: Removal::Trash { paths: vec![path] },
             flags: Vec::new(),
+            components: Vec::new(),
         }
     }
 }

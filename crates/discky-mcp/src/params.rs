@@ -224,7 +224,8 @@ pub struct FindingOut {
     pub rule_id: String,
     /// Why this is removable and what happens if it is removed.
     pub explain: String,
-    /// `trash`, `command`, `ollama_delete` or `none` (never removed by Discky).
+    /// `trash`, `command`, `ollama_delete`, `app`, `mise_uninstall` or `none` (never
+    /// removed by Discky).
     pub removal_kind: String,
     /// Removal details, e.g. `{"trash": {"paths": [...]}}` or `{"command": {"argv": [...]}}`.
     #[schemars(with = "Value")]
@@ -239,6 +240,8 @@ impl From<Finding> for FindingOut {
             Removal::Trash { .. } => "trash",
             Removal::Command { .. } => "command",
             Removal::OllamaDelete { .. } => "ollama_delete",
+            Removal::App { .. } => "app",
+            Removal::MiseUninstall { .. } => "mise_uninstall",
             Removal::None => "none",
         };
         FindingOut {

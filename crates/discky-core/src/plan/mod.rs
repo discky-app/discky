@@ -1,6 +1,7 @@
 //! Removal plans: what would be done to remove a set of findings, with no side effects.
 //!
-//! [`plan_removal`] turns findings into ordered [`Step`]s; the executor (Task 10) runs
+//! [`plan_items`] (and its shorthand [`plan_removal`]) turns findings — and the selected
+//! [`crate::findings::Component`]s of each — into ordered [`Step`]s; the executor runs
 //! them and uses each step's [`Fingerprint`]s to refuse when the target changed since
 //! planning.
 
@@ -12,7 +13,7 @@ use serde_json::{Map, Value, json};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::config::{Config, RemovalMode};
-use crate::findings::{Finding, FindingId, Removal, ollama_url};
+use crate::findings::{ComponentKind, ComponentRemoval, Finding, FindingId, Removal, ollama_url};
 use crate::paths;
 use crate::tools;
 
@@ -131,6 +132,25 @@ impl Fingerprint {
     }
 }
 
+/// One finding to plan and which of its components to act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanItem {
+    /// The finding's id ([`FindingId`] as a string).
+    pub id: String,
+    /// Component indices to act on; `None` = every `default_on` component.
+    pub components: Option<Vec<usize>>,
+}
+
+impl PlanItem {
+    /// The finding `id` with its default components.
+    pub fn defaults(id: &FindingId) -> PlanItem {
+        PlanItem {
+            id: id.0.clone(),
+            components: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     /// Position in [`Plan::steps`].
@@ -146,6 +166,9 @@ pub struct Step {
     pub flags: StepFlags,
     pub warnings: Vec<String>,
     pub fingerprints: Vec<Fingerprint>,
+    /// Index into the finding's `components` this step acts on, when it acts on one.
+    #[serde(default)]
+    pub component: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,11 +242,18 @@ fn display_paths(paths: &[PathBuf]) -> String {
 }
 
 /// The bundle id of a running app a finding belongs to: the finding's directory name
-/// (app caches and containers are named after it). M1 findings never carry
-/// `"app-running"`; the uninstaller (M3) sets it.
+/// (app caches and containers are named after it), or an app removal's own bundle id.
+/// M1 findings never carry `"app-running"`; the uninstaller (M3) sets it.
 fn running_bundle_id(f: &Finding) -> Option<String> {
     if !f.flags.iter().any(|fl| fl == "app-running") {
         return None;
+    }
+    if let Removal::App {
+        bundle_id: Some(id),
+        ..
+    } = &f.removal
+    {
+        return Some(id.clone());
     }
     let name = f.path.as_deref()?.file_name()?.to_string_lossy();
     Some(name.into_owned())
@@ -240,41 +270,90 @@ fn step(f: &Finding, description: String, kind: StepKind) -> Step {
         flags: StepFlags::empty(),
         warnings: Vec::new(),
         fingerprints: Vec::new(),
+        component: None,
     }
 }
 
-/// The finding's main step, or the reason it is skipped.
-fn removal_step(f: &Finding, cfg: &Config) -> Result<Step, String> {
+/// A step trashing (or, in permanent mode, deleting) `paths`, `INTERACTIVE` when any of
+/// them needs an administrator, with every path fingerprinted.
+fn path_step(f: &Finding, paths: &[PathBuf], cfg: &Config) -> Step {
+    let shown = display_paths(paths);
+    let mut s = match cfg.removal.mode {
+        RemovalMode::Trash => step(
+            f,
+            format!("Move {shown} to the Trash"),
+            StepKind::Trash {
+                paths: paths.to_vec(),
+            },
+        ),
+        RemovalMode::Permanent => {
+            let mut s = step(
+                f,
+                format!("Delete {shown} permanently"),
+                StepKind::Remove {
+                    paths: paths.to_vec(),
+                },
+            );
+            s.flags |= StepFlags::PERMANENT;
+            s
+        }
+    };
+    if paths.iter().any(|p| needs_admin(p)) {
+        s.flags |= StepFlags::INTERACTIVE;
+    }
+    s.fingerprints = paths.iter().map(|p| Fingerprint::take(p)).collect();
+    s
+}
+
+/// Index of the finding's `AppBundle` component, if it has one.
+fn bundle_component(f: &Finding) -> Option<usize> {
+    f.components
+        .iter()
+        .position(|c| c.kind == ComponentKind::AppBundle)
+}
+
+/// The finding's main step (`None` when the selection leaves it out), or the reason the
+/// finding is skipped. `selected` are the chosen component indices.
+fn removal_step(f: &Finding, selected: &[usize], cfg: &Config) -> Result<Option<Step>, String> {
     match &f.removal {
         Removal::None => Err("Marked do-not-touch".to_string()),
         Removal::Trash { paths } if paths.is_empty() => Err("Nothing to remove".to_string()),
-        Removal::Trash { paths } => {
-            let shown = display_paths(paths);
-            let mut s = match cfg.removal.mode {
-                RemovalMode::Trash => step(
-                    f,
-                    format!("Move {shown} to the Trash"),
-                    StepKind::Trash {
-                        paths: paths.clone(),
-                    },
-                ),
-                RemovalMode::Permanent => {
-                    let mut s = step(
-                        f,
-                        format!("Delete {shown} permanently"),
-                        StepKind::Remove {
-                            paths: paths.clone(),
-                        },
-                    );
-                    s.flags |= StepFlags::PERMANENT;
-                    s
-                }
-            };
-            if paths.iter().any(|p| needs_admin(p)) {
-                s.flags |= StepFlags::INTERACTIVE;
+        Removal::Trash { paths } => Ok(Some(path_step(f, paths, cfg))),
+        // The bundle only; the other components are planned by `component_steps`. With an
+        // `AppBundle` component the bundle follows its selection.
+        Removal::App { bundle, .. } => {
+            let component = bundle_component(f);
+            if component.is_some_and(|i| !selected.contains(&i)) {
+                return Ok(None);
             }
-            s.fingerprints = paths.iter().map(|p| Fingerprint::take(p)).collect();
-            Ok(s)
+            let mut s = path_step(f, std::slice::from_ref(bundle), cfg);
+            if let Some(i) = component {
+                s.freed = Some(f.components[i].freed_if_deleted);
+                s.component = Some(i);
+            }
+            Ok(Some(s))
+        }
+        Removal::MiseUninstall { tool, version } => {
+            let spec = format!("{tool}@{version}");
+            let program = tools::tool_path("mise");
+            let argv = vec![
+                program
+                    .as_deref()
+                    .map_or_else(|| "mise".to_string(), |p| p.to_string_lossy().into_owned()),
+                "uninstall".to_string(),
+                spec.clone(),
+            ];
+            let mut s = step(
+                f,
+                format!("Run `mise uninstall {spec}`"),
+                StepKind::Command { argv, cwd: None },
+            );
+            if program.is_none() {
+                s.flags |= StepFlags::TOOL_MISSING;
+                s.warnings.push("mise not found.".to_string());
+            }
+            s.fingerprints = f.path.iter().map(|p| Fingerprint::take(p)).collect();
+            Ok(Some(s))
         }
         Removal::Command {
             tool,
@@ -321,20 +400,69 @@ fn removal_step(f: &Finding, cfg: &Config) -> Result<Step, String> {
                 .chain(cwd)
                 .map(|p| Fingerprint::take(p))
                 .collect();
-            Ok(s)
+            Ok(Some(s))
         }
-        Removal::OllamaDelete { model } => Ok(step(
+        Removal::OllamaDelete { model } => Ok(Some(step(
             f,
             format!("Delete ollama model {model}"),
             StepKind::OllamaDelete {
                 url: ollama_url(),
                 model: model.clone(),
             },
-        )),
+        ))),
     }
 }
 
+/// The component indices `item` selects in `f`, in component order, or why it cannot be
+/// planned.
+fn selected_components(f: &Finding, item: &PlanItem) -> Result<Vec<usize>, String> {
+    match &item.components {
+        None => Ok((0..f.components.len())
+            .filter(|&i| f.components[i].default_on)
+            .collect()),
+        Some(_) if f.components.is_empty() => Err("Finding has no components".to_string()),
+        Some(chosen) => {
+            if let Some(bad) = chosen.iter().find(|&&i| i >= f.components.len()) {
+                return Err(format!("Unknown component index {bad}"));
+            }
+            Ok((0..f.components.len())
+                .filter(|i| chosen.contains(i))
+                .collect())
+        }
+    }
+}
+
+/// One step per selected `Trash` component whose path still exists (an app's bundle is
+/// the main step, not repeated here). `Defaults`, `Bootout` and `PkgForget` components
+/// are composed into the full uninstall sequence by the app uninstaller planner (M3
+/// Task 4) and emit nothing yet; `None` components are shown only.
+fn component_steps(f: &Finding, selected: &[usize], cfg: &Config) -> Result<Vec<Step>, String> {
+    let bundle = matches!(f.removal, Removal::App { .. })
+        .then(|| bundle_component(f))
+        .flatten();
+    let mut out = Vec::new();
+    for &i in selected {
+        let c = &f.components[i];
+        if Some(i) == bundle || c.removal != ComponentRemoval::Trash {
+            continue;
+        }
+        let Some(path) = &c.path else {
+            return Err(format!("Component {i} has no path"));
+        };
+        if !Fingerprint::take(path).exists {
+            continue;
+        }
+        let mut s = path_step(f, std::slice::from_ref(path), cfg);
+        s.freed = Some(c.freed_if_deleted);
+        s.component = Some(i);
+        out.push(s);
+    }
+    Ok(out)
+}
+
 const ALREADY_GONE: &str = "Already gone (rescan to refresh)";
+/// Skip reason for an id that is not among the findings (e.g. not in the snapshot).
+pub const UNKNOWN_ID: &str = "Unknown finding id (rescan?)";
 
 /// Every path the finding's removal acts on is missing now (by [`Fingerprint::take`], so
 /// an unreadable path is never "gone"). Trash removals act on their paths, commands on
@@ -342,7 +470,17 @@ const ALREADY_GONE: &str = "Already gone (rescan to refresh)";
 fn already_gone(f: &Finding) -> bool {
     let paths: Vec<&Path> = match &f.removal {
         Removal::Trash { paths } => paths.iter().map(PathBuf::as_path).collect(),
-        Removal::Command { .. } => f.path.as_deref().into_iter().collect(),
+        Removal::App { bundle, .. } => std::iter::once(bundle.as_path())
+            .chain(
+                f.components
+                    .iter()
+                    .filter(|c| c.removal == ComponentRemoval::Trash)
+                    .filter_map(|c| c.path.as_deref()),
+            )
+            .collect(),
+        Removal::Command { .. } | Removal::MiseUninstall { .. } => {
+            f.path.as_deref().into_iter().collect()
+        }
         Removal::OllamaDelete { .. } | Removal::None => Vec::new(),
     };
     !paths.is_empty() && paths.iter().all(|p| !Fingerprint::take(p).exists)
@@ -354,22 +492,43 @@ fn now_secs() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Plan the removal of `findings` (no side effects beyond `lstat`/`access` and tool
-/// lookup). See [`Plan::steps`] for the order and [`StepFlags`] for the flags.
+/// Plan the removal of `findings`, each with its default components: [`plan_items`] with
+/// `components: None` for every finding.
 pub fn plan_removal(findings: &[&Finding], cfg: &Config) -> Plan {
+    let items: Vec<PlanItem> = findings.iter().map(|f| PlanItem::defaults(&f.id)).collect();
+    plan_items(&items, findings, cfg)
+}
+
+/// Plan `items`, looked up by id in `findings` (no side effects beyond `lstat`/`access`
+/// and tool lookup). An item whose id is not among `findings`, whose selection names a
+/// component the finding does not have, or that selects nothing is listed in
+/// [`Plan::skipped`]. See [`Plan::steps`] for the order and [`StepFlags`] for the flags.
+pub fn plan_items(items: &[PlanItem], findings: &[&Finding], cfg: &Config) -> Plan {
     let created_at = now_secs();
     let mut quits = Vec::new();
     let mut commands = Vec::new();
     let mut trashes = Vec::new();
     let mut skipped = Vec::new();
     let mut quitting = HashSet::new();
-    for f in findings {
-        if already_gone(f) {
-            skipped.push((f.id.clone(), ALREADY_GONE.to_string()));
+    for item in items {
+        let Some(f) = findings.iter().find(|f| f.id.0 == item.id) else {
+            skipped.push((FindingId(item.id.clone()), UNKNOWN_ID.to_string()));
             continue;
-        }
-        let main = match removal_step(f, cfg) {
-            Ok(s) => s,
+        };
+        let planned = selected_components(f, item).and_then(|sel| {
+            if already_gone(f) {
+                return Err(ALREADY_GONE.to_string());
+            }
+            let main = removal_step(f, &sel, cfg)?;
+            let parts = component_steps(f, &sel, cfg)?;
+            let all: Vec<Step> = main.into_iter().chain(parts).collect();
+            if all.is_empty() {
+                return Err("Nothing selected".to_string());
+            }
+            Ok(all)
+        });
+        let planned = match planned {
+            Ok(steps) => steps,
             Err(reason) => {
                 skipped.push((f.id.clone(), reason));
                 continue;
@@ -387,9 +546,11 @@ pub fn plan_removal(findings: &[&Finding], cfg: &Config) -> Plan {
             q.flags |= StepFlags::INTERACTIVE;
             quits.push(q);
         }
-        match main.kind {
-            StepKind::Command { .. } | StepKind::OllamaDelete { .. } => commands.push(main),
-            _ => trashes.push(main),
+        for s in planned {
+            match s.kind {
+                StepKind::Command { .. } | StepKind::OllamaDelete { .. } => commands.push(s),
+                _ => trashes.push(s),
+            }
         }
     }
     let mut steps: Vec<Step> = quits.into_iter().chain(commands).chain(trashes).collect();
@@ -398,7 +559,7 @@ pub fn plan_removal(findings: &[&Finding], cfg: &Config) -> Plan {
     }
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let ids: Vec<&str> = findings.iter().map(|f| f.id.0.as_str()).collect();
+    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
     let id = PlanId(format!(
         "{:016x}",
         xxh3_64(format!("{created_at}:{n}:{}", ids.join(",")).as_bytes())
@@ -415,7 +576,8 @@ pub fn plan_removal(findings: &[&Finding], cfg: &Config) -> Plan {
 
 impl Plan {
     /// Flat JSON for the MCP server and the GUI: each step's `kind` is its name and the
-    /// kind's fields (`argv`, `cwd`, `paths`, `bundle_id`, `url`, `model`) sit beside it.
+    /// kind's fields (`argv`, `cwd`, `paths`, `bundle_id`, `url`, `model`) sit beside it;
+    /// `component` is the finding component index the step acts on, or null.
     pub fn to_json(&self) -> Value {
         let shown =
             |ps: &[PathBuf]| -> Vec<String> { ps.iter().map(|p| paths::display(p)).collect() };
@@ -431,6 +593,7 @@ impl Plan {
                 o.insert("freed_note".into(), s.freed_note.clone().into());
                 o.insert("flags".into(), s.flags.names().into());
                 o.insert("warnings".into(), s.warnings.clone().into());
+                o.insert("component".into(), s.component.into());
                 let kind = match &s.kind {
                     StepKind::Quit { bundle_id } => {
                         o.insert("bundle_id".into(), bundle_id.clone().into());

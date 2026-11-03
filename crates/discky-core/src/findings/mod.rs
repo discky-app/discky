@@ -61,8 +61,96 @@ pub enum Removal {
     OllamaDelete {
         model: String,
     },
+    /// An installed application: the bundle itself; the finding's [`Component`]s carry
+    /// the leftovers chosen alongside it.
+    App {
+        source: AppSource,
+        bundle: PathBuf,
+        bundle_id: Option<String>,
+    },
+    /// One mise-managed tool version, removed with `mise uninstall <tool>@<version>`.
+    MiseUninstall {
+        tool: String,
+        version: String,
+    },
     /// Never removed by Discky (`DoNotTouch`); shown so the user knows it was seen.
     None,
+}
+
+/// How an application got onto the Mac, which decides how it is uninstalled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSource {
+    /// A Homebrew cask (`token` short, `full_token` with its tap).
+    Cask { token: String, full_token: String },
+    /// Installed by one or more installer packages (`pkgutil` receipts).
+    Pkg { pkg_ids: Vec<String> },
+    /// From the Mac App Store.
+    AppStore,
+    /// Copied into `/Applications` by hand.
+    Dragged,
+}
+
+/// What a [`Component`] is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentKind {
+    AppBundle,
+    ApplicationSupport,
+    Caches,
+    Preferences,
+    Container,
+    GroupContainer,
+    SavedState,
+    HttpStorage,
+    WebKit,
+    Cookies,
+    Logs,
+    LaunchAgent,
+    LaunchDaemon,
+    ApplicationScript,
+    PrivilegedHelper,
+    Receipt,
+    OwnUninstaller,
+    /// A project that requests this finding (e.g. a `mise.toml` pinning a version).
+    Project,
+    Other,
+}
+
+/// How a [`Component`] is removed when it is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentRemoval {
+    /// The component's path goes to the Trash.
+    Trash,
+    /// `defaults delete <domain>` (the plist is not trashed).
+    Defaults { domain: String },
+    /// `launchctl bootout gui/<uid>/<label>`, or `system/<label>` (admin) when `system`,
+    /// then the plist is trashed.
+    Bootout { label: String, system: bool },
+    /// `pkgutil --forget <pkg_id>` (admin).
+    PkgForget { pkg_id: String },
+    /// Shown only (projects, an app's own uninstaller, shared folders).
+    None,
+}
+
+/// One part of a finding the user can include in or leave out of its removal: an app's
+/// bundle and leftovers, or the projects requesting a tool version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Component {
+    pub kind: ComponentKind,
+    /// E.g. "Application Support", "LaunchDaemon · active", "requested by mise.toml".
+    pub title: String,
+    pub path: Option<PathBuf>,
+    pub allocated: u64,
+    pub freed_if_deleted: u64,
+    /// Unix seconds.
+    pub modified: Option<i64>,
+    /// Pre-checked in the inspector, and acted on when no selection is given.
+    pub default_on: bool,
+    pub removal: ComponentRemoval,
+    /// E.g. "needs administrator password", "shared with Google Drive".
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +174,10 @@ pub struct Finding {
     pub removal: Removal,
     /// Any of `"sparse"`, `"dataless"`, `"hardlinks"`, `"no_access"`, `"clone_shared"`.
     pub flags: Vec<String>,
+    /// Selectable parts (app bundle, leftovers, requesting projects); empty for most
+    /// findings. Indices are what [`crate::plan::PlanItem::components`] refers to.
+    #[serde(default)]
+    pub components: Vec<Component>,
 }
 
 pub struct Categorizer<'a> {
@@ -234,6 +326,7 @@ pub(crate) fn node_finding(
         label,
         rule_id: rule_id.to_string(),
         explain: String::new(),
+        components: Vec::new(),
     }
 }
 

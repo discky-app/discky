@@ -15,5 +15,7 @@ pub mod tools;
 
 pub use config::{Config, ConfigError, RemovalMode};
 pub use engine::{Engine, EngineError, EngineOptions, ExecuteRequest, Inspection};
+pub use findings::{AppSource, Component, ComponentKind, ComponentRemoval};
 pub use paths::DisckyPaths;
+pub use plan::PlanItem;
 pub use scan::{ScanEvent, ScanId, ScanSink, ScanStatus};

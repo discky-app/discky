@@ -257,6 +257,7 @@ mod tests {
             explain: String::new(),
             removal: Removal::Trash { paths: vec![] },
             flags: vec![],
+            components: Vec::new(),
         }
     }
 

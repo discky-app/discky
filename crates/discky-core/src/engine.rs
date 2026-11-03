@@ -10,14 +10,14 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::config::{Config, ConfigError};
-use crate::findings::{Finding, FindingId};
+use crate::findings::Finding;
 use crate::history::{self, HistoryRecord};
 use crate::index::snapshot::{Actor, Snapshot, SnapshotError, SnapshotMeta};
 use crate::paths::DisckyPaths;
 use crate::plan::execute::{
     self, ExecuteError, ExecuteOptions, ExecutionReport, StepSink, StepStatus,
 };
-use crate::plan::{Fingerprint, Plan, PlanId, StepKind, plan_removal};
+use crate::plan::{Fingerprint, Plan, PlanId, PlanItem, StepKind, plan_items};
 use crate::query::{self, Overview, QueryError, SearchQuery, TreeEntry};
 use crate::rules::{Category, RuleSet, SafetyLabel};
 use crate::scan::{self, Current, ScanId, ScanJob, ScanRequest, ScanSink, ScanStatus, lock};
@@ -386,25 +386,36 @@ impl Engine {
         })
     }
 
-    /// Plan the removal of the findings `ids` (a repeated id counts once, at its first
-    /// position); ids not in the current snapshot are listed in `Plan::skipped`. The plan
-    /// is kept for [`Engine::get_plan`].
+    /// Plan the removal of the findings `ids` with their default components (a repeated
+    /// id counts once, at its first position); see [`Engine::plan_items`].
     pub fn plan(&self, ids: &[String]) -> Result<Plan, EngineError> {
+        let items: Vec<PlanItem> = ids
+            .iter()
+            .map(|id| PlanItem {
+                id: id.clone(),
+                components: None,
+            })
+            .collect();
+        self.plan_items(&items)
+    }
+
+    /// Plan `items` against the current snapshot (a repeated id counts once, at its first
+    /// position); ids not in the snapshot, and selections naming unknown components, are
+    /// listed in `Plan::skipped`. The plan is kept for [`Engine::get_plan`].
+    pub fn plan_items(&self, items: &[PlanItem]) -> Result<Plan, EngineError> {
         let snap = self.snapshot().ok_or(EngineError::NoSnapshot)?;
-        let mut found = Vec::new();
-        let mut unknown = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for id in ids.iter().filter(|id| seen.insert(id.as_str())) {
-            match snap.findings.iter().find(|f| &f.id.0 == id) {
-                Some(f) => found.push(f),
-                None => unknown.push((
-                    FindingId(id.clone()),
-                    "Unknown finding id (rescan?)".to_string(),
-                )),
-            }
-        }
-        let mut plan = plan_removal(&found, &self.config());
-        plan.skipped.extend(unknown);
+        let items: Vec<PlanItem> = items
+            .iter()
+            .filter(|i| seen.insert(i.id.as_str()))
+            .cloned()
+            .collect();
+        let found: Vec<&Finding> = snap
+            .findings
+            .iter()
+            .filter(|f| items.iter().any(|i| i.id == f.id.0))
+            .collect();
+        let plan = plan_items(&items, &found, &self.config());
         let mut plans = lock(&self.plans);
         plans.push_back(plan.clone());
         while plans.len() > PLAN_HISTORY {
@@ -545,7 +556,7 @@ fn tree_entry(snap: &Snapshot, path: &Path) -> Option<TreeEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::findings::Removal;
+    use crate::findings::{FindingId, Removal};
     use crate::fs::walk::{ScanOptions, walk};
     use crate::index::snapshot::{SNAPSHOT_FORMAT, SnapshotMeta};
     use crate::plan::{Step, StepFlags};
@@ -567,6 +578,7 @@ mod tests {
             explain: String::new(),
             removal: Removal::OllamaDelete { model: id.into() },
             flags: vec![],
+            components: Vec::new(),
         }
     }
 
@@ -679,6 +691,7 @@ mod tests {
             flags: StepFlags::empty(),
             warnings: vec![],
             fingerprints: vec![],
+            component: None,
         };
         engine.forget_removed(&[&step]);
         let left: Vec<_> = engine

@@ -1,7 +1,11 @@
 use discky_core::{
     config::{Config, RemovalMode},
-    findings::{Finding, FindingId, Removal},
-    plan::{Plan, PlanId, Step, StepFlags, StepKind, needs_admin, plan_removal},
+    findings::{
+        AppSource, Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal,
+    },
+    plan::{
+        Plan, PlanId, PlanItem, Step, StepFlags, StepKind, needs_admin, plan_items, plan_removal,
+    },
     rules::{Category, SafetyLabel},
 };
 
@@ -30,6 +34,7 @@ fn finding(id: &str, removal: Removal, freed: u64, label: SafetyLabel) -> Findin
         explain: String::new(),
         removal,
         flags: vec![],
+        components: Vec::new(),
     }
 }
 
@@ -303,6 +308,7 @@ fn to_json_survives_non_utf8_paths() {
             flags: StepFlags::empty(),
             warnings: vec![],
             fingerprints: vec![],
+            component: None,
         }],
         total_freed: 1,
         skipped: vec![],
@@ -311,4 +317,136 @@ fn to_json_survives_non_utf8_paths() {
     assert_eq!(v["steps"][0]["kind"], "trash");
     let shown = v["steps"][0]["paths"][0].as_str().unwrap();
     assert!(shown.contains('\u{FFFD}'), "{shown}");
+}
+
+/// A `Trash` component at `path`.
+fn component(
+    kind: ComponentKind,
+    path: std::path::PathBuf,
+    freed: u64,
+    default_on: bool,
+) -> Component {
+    Component {
+        kind,
+        title: path.file_name().unwrap().to_string_lossy().into_owned(),
+        path: Some(path),
+        allocated: freed,
+        freed_if_deleted: freed,
+        modified: None,
+        default_on,
+        removal: ComponentRemoval::Trash,
+        note: None,
+    }
+}
+
+/// An app finding: bundle component (default on) and a caches component (default off).
+fn app_finding(name: &str) -> Finding {
+    let bundle = existing(&format!("{name}.app"));
+    let caches = existing(&format!("{name}-caches"));
+    let mut f = finding(
+        name,
+        Removal::App {
+            source: AppSource::Dragged,
+            bundle: bundle.clone(),
+            bundle_id: Some(format!("com.example.{name}")),
+        },
+        100,
+        SafetyLabel::AppData,
+    );
+    f.path = Some(bundle.clone());
+    f.components = vec![
+        component(ComponentKind::AppBundle, bundle, 100, true),
+        component(ComponentKind::Caches, caches, 30, false),
+    ];
+    f
+}
+
+#[test]
+fn plan_items_with_no_selection_uses_default_on_components() {
+    let f = app_finding("defaults");
+    let items = [PlanItem {
+        id: f.id.0.clone(),
+        components: None,
+    }];
+    let plan = plan_items(&items, &[&f], &Config::default());
+    assert_eq!(plan.steps.len(), 1, "{:?}", plan.steps);
+    assert!(
+        matches!(&plan.steps[0].kind, StepKind::Trash { paths } if paths[0].ends_with("discky-plan-defaults.app"))
+    );
+    assert_eq!(plan.steps[0].component, Some(0));
+    assert_eq!(plan.total_freed, 100);
+    assert!(plan.skipped.is_empty());
+
+    // Selecting both components trashes the leftovers too.
+    let items = [PlanItem {
+        id: f.id.0.clone(),
+        components: Some(vec![0, 1]),
+    }];
+    let plan = plan_items(&items, &[&f], &Config::default());
+    let comps: Vec<Option<usize>> = plan.steps.iter().map(|s| s.component).collect();
+    assert_eq!(comps, [Some(0), Some(1)]);
+    assert_eq!(plan.total_freed, 130);
+    let j = plan.to_json();
+    assert_eq!(j["steps"][1]["component"], 1);
+}
+
+#[test]
+fn plan_items_rejects_bad_component_index() {
+    let f = app_finding("badidx");
+    let items = [PlanItem {
+        id: f.id.0.clone(),
+        components: Some(vec![0, 7]),
+    }];
+    let plan = plan_items(&items, &[&f], &Config::default());
+    assert_eq!(plan.skipped.len(), 1);
+    assert_eq!(plan.skipped[0].0, f.id);
+    assert!(
+        plan.skipped[0].1.contains("Unknown component index 7"),
+        "{:?}",
+        plan.skipped
+    );
+
+    // A finding without components cannot take a component selection.
+    let plain = finding(
+        "plain",
+        Removal::Trash {
+            paths: vec![existing("plain")],
+        },
+        1,
+        SafetyLabel::Regenerates,
+    );
+    let items = [PlanItem {
+        id: plain.id.0.clone(),
+        components: Some(vec![0]),
+    }];
+    let plan = plan_items(&items, &[&plain], &Config::default());
+    assert!(plan.steps.is_empty());
+    assert_eq!(plan.skipped[0].1, "Finding has no components");
+}
+
+#[test]
+fn mise_uninstall_plans_a_mise_command() {
+    let f = finding(
+        "mise-node",
+        Removal::MiseUninstall {
+            tool: "node".into(),
+            version: "20.1.0".into(),
+        },
+        9,
+        SafetyLabel::AppData,
+    );
+    let plan = plan_removal(&[&f], &Config::default());
+    let s = &plan.steps[0];
+    let StepKind::Command { argv, cwd } = &s.kind else {
+        panic!("not a command step");
+    };
+    assert!(argv[0] == "mise" || argv[0].ends_with("/mise"), "{argv:?}");
+    assert_eq!(&argv[1..], ["uninstall", "node@20.1.0"]);
+    assert_eq!(*cwd, None);
+    assert_eq!(s.component, None);
+    assert_eq!(
+        s.flags.contains(StepFlags::TOOL_MISSING),
+        discky_core::tools::tool_path("mise").is_none()
+    );
+    assert!(plan.to_json()["steps"][0]["component"].is_null());
 }

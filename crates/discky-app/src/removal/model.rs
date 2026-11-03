@@ -423,6 +423,7 @@ mod tests {
             flags,
             warnings: Vec::new(),
             fingerprints: Vec::new(),
+            component: None,
         }
     }
 

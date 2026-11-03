@@ -1,10 +1,13 @@
 mod fixtures;
 use discky_core::{
     config::Thresholds,
-    findings::Categorizer,
+    findings::{
+        AppSource, Categorizer, Component, ComponentKind, ComponentRemoval, Finding, FindingId,
+        Removal,
+    },
     fs::walk::{ScanOptions, walk},
     index::snapshot::{Actor, SNAPSHOT_FORMAT, Snapshot, SnapshotError, SnapshotMeta},
-    rules::RuleSet,
+    rules::{Category, RuleSet, SafetyLabel},
 };
 
 fn snap(root: &std::path::Path, actor: Actor) -> Snapshot {
@@ -127,18 +130,88 @@ fn roundtrip_preserves_findings() {
 }
 
 #[test]
-fn format_2_roundtrips_exact_private_size() {
+fn format_3_round_trips_components() {
     let d = tempfile::tempdir().unwrap();
     fixtures::build_tree(d.path());
     let mut s = snap(d.path(), Actor::App);
     s.meta.exact_private_size = true;
+    let bundle = d.path().join("Zoom.app");
+    s.findings = vec![Finding {
+        id: FindingId::for_path(&bundle),
+        category: Category::Apps,
+        title: "Zoom".into(),
+        subtitle: None,
+        path: Some(bundle.clone()),
+        node: None,
+        allocated: 10,
+        logical: 10,
+        freed_if_deleted: 10,
+        modified: Some(1),
+        label: SafetyLabel::AppData,
+        rule_id: "app".into(),
+        explain: String::new(),
+        removal: Removal::App {
+            source: AppSource::Pkg {
+                pkg_ids: vec!["us.zoom.pkg".into()],
+            },
+            bundle: bundle.clone(),
+            bundle_id: Some("us.zoom.xos".into()),
+        },
+        flags: vec![],
+        components: vec![
+            Component {
+                kind: ComponentKind::AppBundle,
+                title: "Zoom.app".into(),
+                path: Some(bundle),
+                allocated: 10,
+                freed_if_deleted: 10,
+                modified: Some(1),
+                default_on: true,
+                removal: ComponentRemoval::Trash,
+                note: None,
+            },
+            Component {
+                kind: ComponentKind::Receipt,
+                title: "Receipt".into(),
+                path: None,
+                allocated: 0,
+                freed_if_deleted: 0,
+                modified: None,
+                default_on: true,
+                removal: ComponentRemoval::PkgForget {
+                    pkg_id: "us.zoom.pkg".into(),
+                },
+                note: Some("needs administrator password".into()),
+            },
+        ],
+    }];
     let p = d.path().join("snapshot.bin");
     s.save(&p).unwrap();
     let meta = Snapshot::peek_meta(&p).unwrap();
-    assert_eq!(SNAPSHOT_FORMAT, 2);
-    assert_eq!(meta.format_version, 2);
+    assert_eq!(SNAPSHOT_FORMAT, 3);
+    assert_eq!(meta.format_version, 3);
     assert!(meta.exact_private_size);
-    assert!(Snapshot::load(&p).unwrap().meta.exact_private_size);
+    let l = Snapshot::load(&p).unwrap();
+    assert_eq!(l.findings[0].removal, s.findings[0].removal);
+    assert_eq!(l.findings[0].components, s.findings[0].components);
+}
+
+#[test]
+fn format_2_header_is_incompatible() {
+    let d = tempfile::tempdir().unwrap();
+    fixtures::build_tree(d.path());
+    let p = d.path().join("snapshot.bin");
+    let mut s = snap(d.path(), Actor::App);
+    s.meta.format_version = 2;
+    s.save(&p).unwrap();
+    assert!(matches!(
+        Snapshot::peek_meta(&p),
+        Err(SnapshotError::Incompatible)
+    ));
+    assert!(matches!(
+        Snapshot::load(&p),
+        Err(SnapshotError::Incompatible)
+    ));
 }
 
 /// The format-1 meta layout, written by Milestone 1 builds.

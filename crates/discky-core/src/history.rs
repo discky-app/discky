@@ -184,6 +184,7 @@ mod tests {
             flags: StepFlags::empty(),
             warnings: vec![],
             fingerprints: vec![],
+            component: None,
         };
         append_interrupted(&paths, &PlanId("p1".into()), &step, Actor::App).unwrap();
         let recs = read(&paths, 10).unwrap();
