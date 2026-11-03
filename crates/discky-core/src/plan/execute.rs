@@ -6,7 +6,11 @@
 //! only ever handed to the Trash or removed when they are listed in the step itself.
 //! A window between the stale check and each action is unavoidable; the last path
 //! component is still protected because every removal decides by `lstat`.
+//! When a finding's `Quit` step does not run (skipped as interactive, or left out of
+//! `only_steps`), every later step of that finding is `Skipped` too: the app is still
+//! running.
 
+use std::collections::HashMap;
 use std::io::{self, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -28,6 +32,9 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 const OLLAMA_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
 const INTERACTIVE_REASON: &str = "Needs an interactive session; run from Discky.app";
+/// Why a step after its finding's `Quit` that did not run is skipped: the app may still be
+/// running and using what the step would remove.
+const QUIT_FIRST_REASON: &str = "Needs the app quit first; run from Discky.app";
 /// Absolute, never looked up through `PATH`: it may show an administrator prompt.
 pub const OSASCRIPT: &str = "/usr/bin/osascript";
 
@@ -150,6 +157,16 @@ impl Outcome {
             measured: None,
         }
     }
+    /// Not run, for `reason`.
+    fn skipped(reason: &str) -> Outcome {
+        Outcome {
+            status: StepStatus::Skipped,
+            output: String::new(),
+            reason: Some(reason.to_string()),
+            freed_nothing: false,
+            measured: None,
+        }
+    }
     /// `Done` with nothing freed, for `reason`.
     fn done_freeing_nothing(output: String, reason: &str) -> Outcome {
         Outcome {
@@ -180,10 +197,25 @@ pub fn execute_plan(
     }
     let selected = |i: usize| opts.only_steps.as_ref().is_none_or(|o| o.contains(&i));
     let skipped = |s: &Step| s.flags.contains(StepFlags::INTERACTIVE) && !opts.allow_interactive;
+    // A finding whose `Quit` will not run (skipped as interactive, or left out of
+    // `only_steps`) keeps its app running: none of its later steps may run either.
+    let mut unquit: HashMap<&str, usize> = HashMap::new();
+    for s in &plan.steps {
+        if matches!(s.kind, StepKind::Quit { .. }) && (!selected(s.index) || skipped(s)) {
+            let first = unquit.entry(s.finding.0.as_str()).or_insert(s.index);
+            *first = (*first).min(s.index);
+        }
+    }
+    let blocked = |s: &Step| {
+        !matches!(s.kind, StepKind::Quit { .. })
+            && unquit
+                .get(s.finding.0.as_str())
+                .is_some_and(|&q| s.index > q)
+    };
     check_fresh(
         plan.steps
             .iter()
-            .filter(|s| selected(s.index) && !skipped(s)),
+            .filter(|s| selected(s.index) && !skipped(s) && !blocked(s)),
     )?;
     history::open_log(paths)?;
 
@@ -196,7 +228,11 @@ pub fn execute_plan(
             continue;
         }
         emit(opts, StepEvent::Started { index: step.index });
-        let mut outcome = run_step(step, opts);
+        let mut outcome = if blocked(step) {
+            Outcome::skipped(QUIT_FIRST_REASON)
+        } else {
+            run_step(step, opts)
+        };
         let freed = match outcome.status {
             StepStatus::Done if outcome.freed_nothing => 0,
             StepStatus::Done => outcome.measured.unwrap_or_else(|| step.freed.unwrap_or(0)),
@@ -269,13 +305,7 @@ fn not_run(index: usize) -> StepResult {
 fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
     let interactive = step.flags.contains(StepFlags::INTERACTIVE);
     if interactive && !opts.allow_interactive {
-        return Outcome {
-            status: StepStatus::Skipped,
-            output: String::new(),
-            reason: Some(INTERACTIVE_REASON.to_string()),
-            freed_nothing: false,
-            measured: None,
-        };
+        return Outcome::skipped(INTERACTIVE_REASON);
     }
     if step.flags.contains(StepFlags::TOOL_MISSING) {
         let reason = step

@@ -132,7 +132,8 @@ pub fn preference_domains(home: &Path, bundle_id: &str) -> Vec<(String, PathBuf)
 }
 
 /// Bundle id → display name of every `.app` in `dirs` (each searched `depth` levels: 1 =
-/// top level only, 2 = also one subfolder), read straight from `Contents/Info.plist`
+/// top level only, 2 = also one subfolder), read straight from the bundle's Info.plist
+/// (`Contents/`, or a wrapped iOS app's, see [`super::inventory::info_plist`])
 /// (symlinked and sealed bundles included — this is about what is installed, not what can
 /// be removed).
 pub fn installed_bundle_ids(dirs: &[(&Path, usize)]) -> HashMap<String, String> {
@@ -154,7 +155,8 @@ fn collect_bundle_ids(dir: &Path, depth: usize, out: &mut HashMap<String, String
             continue;
         }
         if let Some(stem) = name.strip_suffix(".app") {
-            if let Ok(v) = plist::Value::from_file(path.join("Contents/Info.plist"))
+            if let Some(info) = super::inventory::info_plist(&path)
+                && let Ok(v) = plist::Value::from_file(info)
                 && let Some(id) = v
                     .as_dictionary()
                     .and_then(|d| d.get("CFBundleIdentifier"))
@@ -233,6 +235,8 @@ pub(crate) struct Candidates {
     pub launchctl: Option<PathBuf>,
     /// Every searched location folder (`~/Library/Caches`, `/Library/LaunchDaemons`, …).
     pub location_dirs: Vec<PathBuf>,
+    /// `~/Library`: zap paths outside it are listed unchecked.
+    pub user_library: PathBuf,
 }
 
 impl Candidates {
@@ -289,12 +293,13 @@ impl Candidates {
             items,
             launchctl: launchctl.map(Path::to_path_buf),
             location_dirs,
+            user_library: user,
         }
     }
 }
 
 /// Installed (or otherwise in-use) bundle ids, lowercased, with a display name.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Installed {
     by_id: HashMap<String, String>,
     /// Display names, lowercase without spaces.
@@ -506,7 +511,12 @@ pub(crate) fn attach(
             Sharing::With(n) => Some(n),
             Sharing::Mine => None,
         };
-        out.push(other_leftover(index, p, shared));
+        out.push(other_leftover(
+            index,
+            p,
+            shared,
+            p.starts_with(&cands.user_library),
+        ));
     }
     drop_nested(&mut out);
     out.sort_by(|a, b| {
@@ -670,8 +680,14 @@ pub(crate) fn candidate_removal(c: &Candidate) -> ComponentRemoval {
     }
 }
 
-/// A zap path outside the searched locations.
-fn other_leftover(index: &Index, path: &Path, shared: Option<String>) -> Leftover {
+/// A zap path outside the searched locations; checked by default only when it is in
+/// `~/Library` (`in_library`): `~/.config/x` or `/opt/x` may hold the user's own files.
+fn other_leftover(
+    index: &Index,
+    path: &Path,
+    shared: Option<String>,
+    in_library: bool,
+) -> Leftover {
     let (allocated, logical, private, modified) = index
         .find(path)
         .map(|id| node_sizes(index, id))
@@ -685,7 +701,7 @@ fn other_leftover(index: &Index, path: &Path, shared: Option<String>) -> Leftove
             allocated,
             freed_if_deleted: private,
             modified,
-            default_on: shared.is_none(),
+            default_on: shared.is_none() && in_library,
             removal: if shared.is_some() {
                 ComponentRemoval::None
             } else {

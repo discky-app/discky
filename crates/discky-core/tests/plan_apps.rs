@@ -8,7 +8,10 @@ use discky_core::{
     findings::{
         AppSource, Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal,
     },
-    plan::{Plan, PlanItem, PlanTools, Step, StepFlags, StepKind, ZapInfo, plan_items_with_tools},
+    plan::{
+        CaskInfo, Plan, PlanItem, PlanTools, Step, StepFlags, StepKind, ZapInfo,
+        plan_items_with_tools,
+    },
     rules::{Category, SafetyLabel},
 };
 
@@ -127,11 +130,14 @@ fn brew_tools() -> PlanTools {
 /// brew plus a cask whose zap stanza names `paths` (and other directives when `other`).
 fn zap_tools(paths: Vec<PathBuf>, other: bool) -> PlanTools {
     PlanTools {
-        cask_zap: Box::new(move |token| {
+        cask_info: Box::new(move |token| {
             assert_eq!(token, "raycast");
-            Some(ZapInfo {
-                paths: paths.clone(),
-                non_path_directives: other,
+            Some(CaskInfo {
+                zap: ZapInfo {
+                    paths: paths.clone(),
+                    non_path_directives: other,
+                },
+                ..CaskInfo::default()
             })
         }),
         ..brew_tools()
@@ -744,9 +750,10 @@ fn mise_uninstall_step_and_global_skip() {
     );
     assert_eq!(p.steps[0].freed, Some(77));
     assert!(!p.steps[0].flags.contains(StepFlags::TOOL_MISSING));
-    // Selecting a requesting project adds nothing.
+    // A requesting project is shown only: selecting it is refused.
     let p = plan(&f, Some(vec![0]), &tools);
-    assert_eq!(p.steps.len(), 1);
+    assert!(p.steps.is_empty());
+    assert_eq!(p.skipped[0].1, "Component 0 is shown only");
 
     let p = plan(&f, None, &PlanTools::default());
     assert!(p.steps[0].flags.contains(StepFlags::TOOL_MISSING));
@@ -765,14 +772,6 @@ fn mise_uninstall_step_and_global_skip() {
 fn own_uninstaller_app_becomes_a_warning() {
     let t = tempfile::tempdir().unwrap();
     let bundle = dir(t.path(), "Tailscale.app");
-    let own = |p: PathBuf| {
-        off(comp(
-            ComponentKind::OwnUninstaller,
-            Some(p),
-            0,
-            ComponentRemoval::None,
-        ))
-    };
     let app_uninstaller = dir(&bundle, "Contents/Resources/Uninstall Tailscale.app");
     let f = app(
         "Tailscale",
@@ -780,13 +779,16 @@ fn own_uninstaller_app_becomes_a_warning() {
         &bundle,
         vec![
             trash_comp(ComponentKind::AppBundle, bundle.clone(), 10),
-            own(app_uninstaller.clone()),
+            off(comp(
+                ComponentKind::OwnUninstaller,
+                Some(app_uninstaller.clone()),
+                0,
+                ComponentRemoval::None,
+            )),
         ],
     );
-    // Not selected (default off): no warning.
+    // Shown only, so it cannot be selected: the warning comes with the bundle step.
     let p = plan(&f, None, &PlanTools::default());
-    assert!(p.steps[0].warnings.is_empty());
-    let p = plan(&f, Some(vec![0, 1]), &PlanTools::default());
     assert_eq!(p.steps.len(), 1);
     assert_eq!(
         p.steps[0].warnings,
@@ -795,23 +797,84 @@ fn own_uninstaller_app_becomes_a_warning() {
             app_uninstaller.display()
         )]
     );
+    // Without the bundle step there is nothing to warn about.
+    let p = plan(&f, Some(vec![]), &PlanTools::default());
+    assert!(p.steps.is_empty());
+}
 
+#[test]
+fn own_uninstaller_script_is_interactive_and_selectable() {
+    let t = tempfile::tempdir().unwrap();
+    let bundle = dir(t.path(), "Tailscale.app");
     for (name, program) in [
         ("uninstall.sh", "/bin/sh"),
         ("Uninstall.scpt", "/usr/bin/osascript"),
     ] {
         let script = file(&bundle, &format!("Contents/Resources/{name}"));
-        let mut f = f.clone();
-        f.components[1] = own(script.clone());
-        let p = plan(&f, Some(vec![0, 1]), &PlanTools::default());
-        assert_eq!(p.steps.len(), 2);
-        assert_eq!(argv(&p.steps[0]), [program, script.to_str().unwrap()]);
-        assert_eq!(p.steps[0].component, Some(1));
-        assert_eq!(p.steps[0].fingerprints[0].path, script);
-        assert_eq!(p.steps[0].freed, None);
-        assert!(!p.steps[0].flags.contains(StepFlags::INTERACTIVE));
-        assert!(matches!(p.steps[1].kind, StepKind::Trash { .. }));
+        let f = app(
+            "Tailscale",
+            AppSource::Dragged,
+            &bundle,
+            vec![
+                trash_comp(ComponentKind::AppBundle, bundle.clone(), 10),
+                comp(
+                    ComponentKind::OwnUninstaller,
+                    Some(script.clone()),
+                    0,
+                    ComponentRemoval::RunScript,
+                ),
+            ],
+        );
+        // Default on: the default plan runs it, before the bundle step.
+        for selection in [None, Some(vec![0, 1])] {
+            let p = plan(&f, selection, &PlanTools::default());
+            assert_eq!(p.steps.len(), 2, "{:#?}", p.steps);
+            assert_eq!(argv(&p.steps[0]), [program, script.to_str().unwrap()]);
+            assert_eq!(p.steps[0].component, Some(1));
+            assert_eq!(p.steps[0].fingerprints[0].path, script);
+            assert_eq!(p.steps[0].freed, None);
+            assert!(p.steps[0].flags.contains(StepFlags::INTERACTIVE));
+            assert!(p.steps[0].warnings.is_empty());
+            assert!(matches!(p.steps[1].kind, StepKind::Trash { .. }));
+        }
+        // Unchecked: no script step.
+        let p = plan(&f, Some(vec![0]), &PlanTools::default());
+        assert_eq!(p.steps.len(), 1);
+        // Running app: quit, then the script, then the bundle.
+        let mut running = f.clone();
+        running.flags.push("app-running".into());
+        let p = plan(&running, None, &PlanTools::default());
+        assert!(matches!(p.steps[0].kind, StepKind::Quit { .. }));
+        assert_eq!(argv(&p.steps[1])[0], program);
+        assert!(matches!(p.steps[2].kind, StepKind::Trash { .. }));
     }
+}
+
+#[test]
+fn none_components_are_refused_when_selected() {
+    let t = tempfile::tempdir().unwrap();
+    let bundle = dir(t.path(), "Foo.app");
+    let support = dir(t.path(), "support");
+    let f = app(
+        "Foo",
+        AppSource::Dragged,
+        &bundle,
+        vec![
+            trash_comp(ComponentKind::AppBundle, bundle.clone(), 10),
+            trash_comp(ComponentKind::ApplicationSupport, support, 5),
+            off(comp(ComponentKind::Other, None, 0, ComponentRemoval::None)),
+        ],
+    );
+    let p = plan(&f, Some(vec![0, 2]), &PlanTools::default());
+    assert!(p.steps.is_empty(), "{:#?}", p.steps);
+    assert_eq!(
+        p.skipped,
+        [(f.id.clone(), "Component 2 is shown only".to_string())]
+    );
+    // The default selection never includes it.
+    let p = plan(&f, None, &PlanTools::default());
+    assert_eq!(p.steps.len(), 2);
+    assert!(p.skipped.is_empty());
 }
 
 #[test]
@@ -1085,4 +1148,119 @@ fn global_and_apple_domains_are_never_deleted() {
         p.steps[0].warnings,
         ["Settings domain preferences is never deleted"]
     );
+}
+
+#[test]
+fn brew_step_warns_about_uninstall_stanza_and_other_artifacts() {
+    let t = tempfile::tempdir().unwrap();
+    let f = cask_app(t.path());
+    let bundle = t.path().join("Raycast.app");
+    let helper = dir(t.path(), "Raycast Helper.app");
+    let bin = file(t.path(), "bin/ray");
+    let (helper2, bin2, bundle2) = (helper.clone(), bin.clone(), bundle.clone());
+    let tools = PlanTools {
+        cask_info: Box::new(move |_| {
+            Some(CaskInfo {
+                zap: ZapInfo {
+                    paths: Vec::new(),
+                    non_path_directives: false,
+                },
+                uninstall_directives: vec![
+                    "quit com.raycast.macos".into(),
+                    "pkgutil com.raycast.pkg".into(),
+                ],
+                // The bundle itself is not "also" removed.
+                other_app_targets: vec![bundle2.clone(), helper2.clone()],
+                binaries: vec![bin2.clone()],
+                needs_admin: true,
+            })
+        }),
+        ..brew_tools()
+    };
+    let p = plan(&f, None, &tools);
+    let brew = &p.steps[0];
+    assert_eq!(argv(brew)[1], "uninstall");
+    assert_eq!(
+        brew.warnings,
+        [
+            "Homebrew will also: quit com.raycast.macos; pkgutil com.raycast.pkg".to_string(),
+            format!(
+                "Homebrew will also remove: {}, {}",
+                helper.display(),
+                bin.display()
+            ),
+            "This cask's uninstall needs administrator rights; if it fails, run \
+             `brew uninstall --cask raycast` in Terminal"
+                .to_string(),
+        ]
+    );
+    // Nothing known beyond the zap stanza: no extra warnings.
+    let p = plan(&f, None, &zap_tools(Vec::new(), false));
+    assert!(p.steps[0].warnings.is_empty(), "{:?}", p.steps[0].warnings);
+}
+
+#[test]
+fn invalid_pkg_ids_and_apple_launch_jobs_are_never_touched() {
+    let t = tempfile::tempdir().unwrap();
+    let bundle = dir(t.path(), "Foo.app");
+    let receipt = |id: &str| {
+        comp(
+            ComponentKind::Receipt,
+            None,
+            0,
+            ComponentRemoval::PkgForget { pkg_id: id.into() },
+        )
+    };
+    let apple_plist = file(t.path(), "com.apple.foo.plist");
+    let f = app(
+        "Foo",
+        AppSource::Dragged,
+        &bundle,
+        vec![
+            trash_comp(ComponentKind::AppBundle, bundle.clone(), 1),
+            receipt("com.example.foo-pkg_1"),
+            receipt("-rf"),
+            receipt("com.example/../x"),
+            receipt("com.example foo"),
+            receipt(""),
+            comp(
+                ComponentKind::LaunchAgent,
+                Some(apple_plist.clone()),
+                1,
+                ComponentRemoval::Bootout {
+                    label: "com.Apple.foo".into(),
+                    system: false,
+                },
+            ),
+        ],
+    );
+    let tools = PlanTools {
+        launchctl_probe: Box::new(|_, _| true),
+        ..PlanTools::default()
+    };
+    let p = plan(&f, None, &tools);
+    let commands: Vec<Vec<&str>> = p
+        .steps
+        .iter()
+        .filter(|s| matches!(s.kind, StepKind::Command { .. }))
+        .map(argv)
+        .collect();
+    assert_eq!(
+        commands,
+        [["/usr/sbin/pkgutil", "--forget", "com.example.foo-pkg_1"]],
+        "{:#?}",
+        p.steps
+    );
+    assert!(
+        p.steps
+            .iter()
+            .all(|s| !matches!(&s.kind, StepKind::Trash { paths } if paths.contains(&apple_plist)))
+    );
+    let warnings: Vec<&String> = p.steps.iter().flat_map(|s| &s.warnings).collect();
+    for w in [
+        "Package receipt id -rf is not valid; it is never forgotten",
+        "Launch job com.Apple.foo is Apple's; it is never unloaded",
+    ] {
+        assert!(warnings.iter().any(|x| *x == w), "{w}: {warnings:?}");
+    }
 }

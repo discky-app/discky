@@ -8,7 +8,7 @@ use globset::GlobBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::findings::apps::{RULE_APP, UNUSED_DAYS};
-use crate::findings::{Finding, FindingId, Removal};
+use crate::findings::{ComponentKind, Finding, FindingId, Removal};
 use crate::fs::attr::ObjKind;
 use crate::index::snapshot::{Actor, Snapshot};
 use crate::index::{Index, NodeFlags, NodeId};
@@ -143,6 +143,20 @@ fn statfs(mount: &Path) -> Option<VolumeInfo> {
     })
 }
 
+/// A finding's bytes in [`Overview::by_category`]: an app (a finding with an `AppBundle`
+/// component) counts its bundle only — its leftovers are not claimed and may be other
+/// findings too; anything else (leftover groups, receipts, other categories) its
+/// `allocated`.
+fn category_weight(f: &Finding) -> u64 {
+    if f.category != Category::Apps {
+        return f.allocated;
+    }
+    f.components
+        .iter()
+        .find(|c| c.kind == ComponentKind::AppBundle)
+        .map_or(f.allocated, |c| c.allocated)
+}
+
 pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
     let volume = volume_info();
     let Some(snap) = snap else {
@@ -166,7 +180,7 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
                 .findings
                 .iter()
                 .filter(|f| f.category == c && f.label != SafetyLabel::DoNotTouch)
-                .map(|f| f.allocated)
+                .map(category_weight)
                 .sum();
             (c, sum)
         })

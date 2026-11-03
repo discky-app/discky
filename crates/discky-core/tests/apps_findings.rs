@@ -81,6 +81,8 @@ struct Ctx {
     running: HashSet<String>,
     other: HashMap<String, String>,
     system_library: PathBuf,
+    /// Spotlight's bundle ids; `None` = Spotlight could not be asked.
+    spotlight: Option<HashMap<String, String>>,
 }
 
 impl Ctx {
@@ -91,6 +93,7 @@ impl Ctx {
             running: HashSet::new(),
             other: HashMap::new(),
             system_library: root.join("Library"),
+            spotlight: Some(HashMap::new()),
         }
     }
 
@@ -111,6 +114,7 @@ impl Ctx {
                 receipts: &self.receipts,
                 running: &self.running,
                 other_installed: &self.other,
+                spotlight_ids: self.spotlight.as_ref(),
                 launchctl: None,
                 system_library: &self.system_library,
                 now: NOW,
@@ -160,6 +164,7 @@ fn app_finding_lists_bundle_and_leftovers() {
         full_token: "raycast".into(),
         installed: Some("1.0".into()),
         app_targets: vec![bundle.clone()],
+        binaries: Vec::new(),
         uninstall: Vec::new(),
         zap: vec![Directive {
             trash: vec!["~/.config/raycast".into()],
@@ -196,7 +201,14 @@ fn app_finding_lists_bundle_and_leftovers() {
         Removal::App { bundle: b, bundle_id: Some(id), source: AppSource::Cask { .. } }
             if b == &bundle && id == "com.raycast.macos"
     ));
-    assert!(f.explain.contains("brew uninstall --zap"), "{}", f.explain);
+    assert!(
+        f.explain.contains(
+            "Removed with `brew uninstall --cask` (with `--zap` when every zap path is listed \
+             and checked)"
+        ),
+        "{}",
+        f.explain
+    );
 
     // Bundle first, Keychain line last, leftovers in between sorted by size.
     assert_eq!(f.components[0].kind, ComponentKind::AppBundle);
@@ -230,11 +242,20 @@ fn app_finding_lists_bundle_and_leftovers() {
         }
     );
     assert_eq!(component(f, &caches).removal, ComponentRemoval::Trash);
+    // Everything under ~/Library is checked; a zap path outside it is not.
     assert!(
         f.components[..f.components.len() - 1]
             .iter()
+            .filter(|c| c.path.as_deref() != Some(zap.as_path()))
             .all(|c| c.default_on)
     );
+    let z = component(f, &zap);
+    assert_eq!(
+        (z.kind.clone(), z.title.as_str()),
+        (ComponentKind::Other, "Other files")
+    );
+    assert!(!z.default_on, "other files outside ~/Library are unchecked");
+    assert_eq!(z.removal, ComponentRemoval::Trash);
 
     let sum: u64 = f
         .components
@@ -337,6 +358,7 @@ fn shared_leftover_is_attached_to_no_app() {
         full_token: "google-chrome".into(),
         installed: Some("1".into()),
         app_targets: vec![chrome.clone()],
+        binaries: Vec::new(),
         uninstall: Vec::new(),
         zap: vec![Directive {
             trash: vec!["~/Library/Caches/com.google.Keystone".into()],
@@ -838,6 +860,7 @@ fn zap_paths_mark_components_as_covered() {
         full_token: "anomalyco/tap/hex".into(),
         installed: Some("1".into()),
         app_targets: vec![bundle.clone()],
+        binaries: Vec::new(),
         uninstall: Vec::new(),
         zap: vec![Directive {
             trash: vec!["~/Library/Application Support/com.example.hex".into()],
@@ -1018,6 +1041,7 @@ fn cask_launchctl_label_of_a_shared_vendor_is_shared() {
         full_token: "google-chrome".into(),
         installed: Some("1".into()),
         app_targets: vec![chrome.clone()],
+        binaries: Vec::new(),
         uninstall: vec![Directive {
             launchctl: vec!["com.google.keystone.agent".into()],
             ..Default::default()
@@ -1139,4 +1163,72 @@ fn applies_with_home_applications_only() {
     let without = d.path().join("without");
     std::fs::create_dir_all(without.join("Library")).unwrap();
     assert!(!applies(&scan(&without), &without));
+}
+
+/// A removed-looking vendor `com.vendor` with two leftovers, and an installed app.
+fn vendor_tree(root: &Path) -> (PathBuf, Index, Vec<AppInfo>) {
+    let home = root.join("home");
+    let bundle = root.join("Applications/Raycast.app");
+    make_app(&bundle, "com.raycast.macos");
+    blob(&home, "Library/Containers/com.vendor.foo", 2048);
+    blob(&home, "Library/Caches/com.vendor.foo", 8);
+    let idx = scan(root);
+    let apps = vec![app(
+        &idx,
+        &bundle,
+        "com.raycast.macos",
+        AppSource::Dragged,
+        LastUsed::Spotlight(NOW),
+    )];
+    (home, idx, apps)
+}
+
+#[test]
+fn spotlight_ids_exclude_vendor_from_groups() {
+    use discky_core::findings::apps::last_used::parse_bundle_ids;
+    let d = tempfile::tempdir().unwrap();
+    let (home, idx, apps) = vendor_tree(d.path());
+    let groups = |ctx: &Ctx| {
+        ctx.run(&idx, &home, &apps, &mut HashSet::new())
+            .into_iter()
+            .filter(|f| f.rule_id == "app-leftovers")
+            .count()
+    };
+    let mut ctx = Ctx::new(d.path());
+    assert_eq!(groups(&ctx), 1);
+    // An iOS app Spotlight knows (outside the folders walked for bundle ids).
+    ctx.spotlight = Some(parse_bundle_ids(
+        "/Applications/Foo.app/Wrapper/Foo.app   kMDItemCFBundleIdentifier = com.vendor.foo\n",
+    ));
+    assert_eq!(groups(&ctx), 0);
+}
+
+#[test]
+fn groups_default_off_without_spotlight() {
+    let d = tempfile::tempdir().unwrap();
+    let (home, idx, apps) = vendor_tree(d.path());
+    let mut ctx = Ctx::new(d.path());
+    ctx.spotlight = None;
+    let found = ctx.run(&idx, &home, &apps, &mut HashSet::new());
+    let g = found
+        .iter()
+        .find(|f| f.rule_id == "app-leftovers")
+        .expect("group still shown");
+    assert_eq!(g.components.len(), 2);
+    for c in &g.components {
+        assert!(!c.default_on, "{c:?}");
+        assert_eq!(
+            c.note.as_deref(),
+            Some("could not verify no installed app uses this")
+        );
+    }
+    let Removal::Trash { paths } = &g.removal else {
+        panic!("{:?}", g.removal)
+    };
+    assert!(paths.is_empty(), "nothing is removed by default");
+    // The row still shows what is there.
+    assert!(g.allocated >= 2048 * 1024);
+    // The app's own finding is unaffected.
+    let a = found.iter().find(|f| f.rule_id == "apps").unwrap();
+    assert!(a.components[0].default_on);
 }

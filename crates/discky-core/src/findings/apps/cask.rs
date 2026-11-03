@@ -34,6 +34,9 @@ pub struct Cask {
     /// Absolute paths of the app bundles the cask installed (`app` artifacts, plus the
     /// targets of the Caskroom's `<App>.app` symlinks).
     pub app_targets: Vec<PathBuf>,
+    /// `binary` artifact targets as brew records them: a name (linked into
+    /// `<prefix>/bin`) or an absolute path.
+    pub binaries: Vec<String>,
     pub uninstall: Vec<Directive>,
     pub zap: Vec<Directive>,
 }
@@ -67,6 +70,8 @@ pub struct Script {
     pub args: Vec<String>,
     /// brew's default is `true`.
     pub must_succeed: bool,
+    /// Run with `sudo` (needs an administrator).
+    pub sudo: bool,
 }
 
 /// A JSON value that is either one `T` or an array of them.
@@ -100,6 +105,8 @@ enum RawScript {
         args: Option<OneOrMany<String>>,
         #[serde(default)]
         must_succeed: Option<bool>,
+        #[serde(default)]
+        sudo: Option<bool>,
     },
 }
 
@@ -110,15 +117,18 @@ impl From<RawScript> for Script {
                 executable,
                 args: Vec::new(),
                 must_succeed: true,
+                sudo: false,
             },
             RawScript::Full {
                 executable,
                 args,
                 must_succeed,
+                sudo,
             } => Script {
                 executable,
                 args: many(args),
                 must_succeed: must_succeed.unwrap_or(true),
+                sudo: sudo.unwrap_or(false),
             },
         }
     }
@@ -221,10 +231,33 @@ fn artifacts_of(v: &Value) -> &[Value] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// Fill `app_targets`, `uninstall` and `zap` from an artifacts array of single-purpose
-/// objects (`{"app":["X.app"],"target":"/Applications/X.app"}`, `{"uninstall":[{…}]}`, …).
+/// Fill `app_targets`, `binaries`, `uninstall` and `zap` from an artifacts array of
+/// single-purpose objects (`{"app":["X.app"],"target":"/Applications/X.app"}`,
+/// `{"binary":["$APPDIR/X.app/…/x",{"target":"x"}]}`, `{"uninstall":[{…}]}`, …).
 fn apply_artifacts(cask: &mut Cask, artifacts: &[Value]) {
     for a in artifacts {
+        if let Some(bin) = a.get("binary").and_then(Value::as_array) {
+            let target = a
+                .get("target")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    bin.iter()
+                        .find_map(|e| e.get("target").and_then(Value::as_str))
+                })
+                .map(str::to_string)
+                .or_else(|| {
+                    bin.iter().find_map(Value::as_str).and_then(|s| {
+                        Path::new(s)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                    })
+                });
+            if let Some(t) = target.filter(|t| !t.is_empty())
+                && !cask.binaries.contains(&t)
+            {
+                cask.binaries.push(t);
+            }
+        }
         if let Some(app) = a.get("app").and_then(Value::as_array) {
             let names: Vec<&str> = app.iter().filter_map(Value::as_str).collect();
             // The target is a sibling key (v2) or an `{"target": …}` element (older JSON).
@@ -355,6 +388,7 @@ fn read_caskroom_entry(room: &Path, token: String) -> Option<Cask> {
     {
         cask.full_token = c.full_token;
         cask.app_targets = c.app_targets;
+        cask.binaries = c.binaries;
         cask.uninstall = c.uninstall;
         cask.zap = c.zap;
     }
@@ -380,6 +414,13 @@ fn read_caskroom_entry(room: &Path, token: String) -> Option<Cask> {
 /// shadowed by a newer directory, or no metadata at all give `None`. A cask without a
 /// zap stanza gives `Some(vec![])`.
 pub fn installed_zap(room: &Path, token: &str) -> Option<Vec<Directive>> {
+    installed_cask(room, token).map(|c| c.zap)
+}
+
+/// The whole cask record brew will uninstall for installed cask `token` (its `uninstall`
+/// and `zap` stanzas, app targets — with the Caskroom's `<App>.app` symlinks — and
+/// binaries), read the same way and with the same `None` cases as [`installed_zap`].
+pub fn installed_cask(room: &Path, token: &str) -> Option<Cask> {
     let meta = room.join(token).join(".metadata");
     let newest = visible_dirs(&meta)
         .into_iter()
@@ -400,13 +441,25 @@ pub fn installed_zap(room: &Path, token: &str) -> Option<Vec<Directive>> {
         .as_ref()
         .and_then(cask_from_value)
     {
-        return Some(c.zap);
+        return Some(with_caskroom_targets(room, token, c));
     }
     let receipt = read_json(&meta.join("INSTALL_RECEIPT.json"))?;
     let artifacts = receipt.get("uninstall_artifacts")?.as_array()?;
-    let mut c = Cask::default();
+    let mut c = Cask {
+        token: token.to_string(),
+        full_token: token.to_string(),
+        ..Cask::default()
+    };
     apply_artifacts(&mut c, artifacts);
-    Some(c.zap)
+    Some(with_caskroom_targets(room, token, c))
+}
+
+/// `c` with the installed version and the Caskroom's `<App>.app` symlink targets added.
+fn with_caskroom_targets(room: &Path, token: &str, mut c: Cask) -> Cask {
+    c.token = token.to_string();
+    c.installed = visible_dirs(&room.join(token)).pop();
+    add_caskroom_targets(room, &mut c);
+    c
 }
 
 /// `.metadata/*/*/Casks/<token>.json` with the greatest timestamp directory name.

@@ -20,7 +20,7 @@ use crate::tools;
 mod app;
 pub mod execute;
 
-pub use app::{GLOBAL_MISE_VERSION, PlanTools, ZapInfo};
+pub use app::{CaskInfo, GLOBAL_MISE_VERSION, PlanTools, ZapInfo};
 
 /// 16 hex chars of `xxh3_64` over `created_at`, a per-process counter and the planned
 /// finding ids. The counter keeps two plans of the same findings made in the same second
@@ -389,7 +389,8 @@ fn removal_step(f: &Finding, cfg: &Config) -> Result<Option<Step>, String> {
 }
 
 /// The component indices `item` selects in `f`, in component order, or why it cannot be
-/// planned.
+/// planned (an unknown index, or a shown-only component — `ComponentRemoval::None` —
+/// named explicitly).
 fn selected_components(f: &Finding, item: &PlanItem) -> Result<Vec<usize>, String> {
     match &item.components {
         None => Ok((0..f.components.len())
@@ -399,6 +400,12 @@ fn selected_components(f: &Finding, item: &PlanItem) -> Result<Vec<usize>, Strin
         Some(chosen) => {
             if let Some(bad) = chosen.iter().find(|&&i| i >= f.components.len()) {
                 return Err(format!("Unknown component index {bad}"));
+            }
+            if let Some(shown) = chosen
+                .iter()
+                .find(|&&i| f.components[i].removal == ComponentRemoval::None)
+            {
+                return Err(format!("Component {shown} is shown only"));
             }
             Ok((0..f.components.len())
                 .filter(|i| chosen.contains(i))

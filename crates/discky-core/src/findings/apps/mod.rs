@@ -41,6 +41,10 @@ pub const FLAG_APP_RUNNING: &str = "app-running";
 /// must run `brew uninstall --cask <token>` without `--zap` and trash the non-shared
 /// covered components itself.
 pub const FLAG_ZAP_SHARED: &str = "zap-shared";
+/// Note of an own-uninstaller script component.
+pub const NOTE_RUN_SCRIPT: &str = "runs the vendor's uninstaller; may ask for a password";
+/// Note on every leftover-group component when Spotlight could not be asked.
+pub const NOTE_UNVERIFIED: &str = "could not verify no installed app uses this";
 /// `rule_id` of app findings.
 pub const RULE_APP: &str = "apps";
 /// `rule_id` of a leftover group of a removed app.
@@ -186,6 +190,7 @@ pub fn find(
         (user_apps.as_path(), 2),
         (Path::new(SEALED_APPS), 2),
     ]);
+    let spotlight = last_used::spotlight_bundle_ids(tools.mdfind.as_deref());
     let launchctl = Path::new(leftovers::LAUNCHCTL);
     find_with(
         index,
@@ -197,6 +202,7 @@ pub fn find(
             receipts: &g.receipts,
             running,
             other_installed: &other_installed,
+            spotlight_ids: spotlight.as_ref(),
             launchctl: launchctl.exists().then_some(launchctl),
             system_library: Path::new(leftovers::SYSTEM_LIBRARY),
             now: now_secs(),
@@ -214,6 +220,11 @@ pub struct AppsInput<'a> {
     /// Bundle id → name of installed apps beyond `apps` (sealed, symlinked, nested ones);
     /// `apps` and `running` count as installed anyway.
     pub other_installed: &'a HashMap<String, String>,
+    /// Bundle id → name of every app Spotlight knows (see
+    /// [`last_used::spotlight_bundle_ids`]); used only to decide which leftovers belong to
+    /// no installed app. `None` = Spotlight could not be asked: leftover groups are still
+    /// shown, but with nothing checked ([`NOTE_UNVERIFIED`]).
+    pub spotlight_ids: Option<&'a HashMap<String, String>>,
     /// `launchctl` for [`leftovers::is_loaded`]; `None` = no job counts as loaded.
     pub launchctl: Option<&'a Path>,
     /// `/Library` (tests pass a temp dir).
@@ -243,6 +254,12 @@ pub fn find_with(
     for id in input.running {
         installed.insert_running(id, &leftovers::humanise(id));
     }
+    // Leftover groups also count every app Spotlight knows (iOS apps, apps elsewhere).
+    let mut group_installed = installed.clone();
+    for (id, name) in input.spotlight_ids.into_iter().flatten() {
+        group_installed.insert(id, name);
+    }
+    let verified = input.spotlight_ids.is_some();
     let cands = Candidates::gather(index, home, input.system_library, input.launchctl);
     let mut out = Vec::new();
     let mut attached: HashSet<PathBuf> = HashSet::new();
@@ -252,7 +269,12 @@ pub fn find_with(
         out.push(f);
     }
     out.extend(leftover_groups(
-        index, &cands, &installed, &attached, claimed,
+        index,
+        &cands,
+        &group_installed,
+        &attached,
+        verified,
+        claimed,
     ));
     let bundles: HashSet<PathBuf> = input.apps.iter().map(|a| a.bundle.clone()).collect();
     out.extend(orphan_receipts_finding(input.receipts, &bundles));
@@ -355,6 +377,11 @@ fn app_finding(
         covered_by_cask: matches!(app.source, AppSource::Cask { .. }),
     }];
     if let Some(u) = &app.own_uninstaller {
+        // A script is run by the plan (interactive); an uninstaller app is the user's to run.
+        let script = u
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .is_some_and(|e| e == "scpt" || e == "sh");
         components.push(Component {
             kind: ComponentKind::OwnUninstaller,
             title: "Own uninstaller".to_string(),
@@ -362,9 +389,17 @@ fn app_finding(
             allocated: 0,
             freed_if_deleted: 0,
             modified: None,
-            default_on: false,
-            removal: ComponentRemoval::None,
-            note: Some("run first to remove what the vendor installed".to_string()),
+            default_on: script,
+            removal: if script {
+                ComponentRemoval::RunScript
+            } else {
+                ComponentRemoval::None
+            },
+            note: Some(if script {
+                NOTE_RUN_SCRIPT.to_string()
+            } else {
+                "run first to remove what the vendor installed".to_string()
+            }),
             covered_by_cask: false,
         });
     }
@@ -452,8 +487,8 @@ fn source_text(source: &AppSource) -> String {
 fn explain(source: &AppSource) -> String {
     let how = match source {
         AppSource::Cask { full_token, .. } => format!(
-            "Installed with Homebrew. Removed with `brew uninstall --zap {full_token}`, which \
-             also deletes the leftovers the cask lists."
+            "Installed with Homebrew ({full_token}). Removed with `brew uninstall --cask` \
+             (with `--zap` when every zap path is listed and checked)."
         ),
         AppSource::Pkg { pkg_ids } => format!(
             "Installed by an installer package ({}). Its files go to the Trash, then \
@@ -513,12 +548,15 @@ fn receipt_component(id: &str, installed: Option<i64>) -> Component {
 /// entries that no installed app, running app or loaded launchd job uses (by vendor), that
 /// do not name an installed app, and that are not macOS / toolchain / SDK files (see
 /// [`leftovers::bundle_vendor`] and `SYSTEM_VENDORS`). Only groups of at least 1 MiB
-/// allocated or 3 components are emitted; each emitted group claims its entries.
+/// allocated or 3 components are emitted; each emitted group claims its entries. Unless
+/// `verified` (Spotlight's bundle ids are part of `installed`), nothing in a group is
+/// checked.
 fn leftover_groups(
     index: &Index,
     cands: &Candidates,
     installed: &Installed,
     attached: &HashSet<PathBuf>,
+    verified: bool,
     claimed: &mut HashSet<NodeId>,
 ) -> Vec<Finding> {
     let in_use = installed.vendors();
@@ -541,7 +579,7 @@ fn leftover_groups(
         if vendor_job_loaded(cands, &vendor) {
             continue;
         }
-        let f = group_finding(index, &vendor, &items);
+        let f = group_finding(index, &vendor, &items, verified);
         let total: u64 = f.components.iter().map(|c| c.allocated).sum();
         // Noise: one or two tiny files (a stray plist) are not worth a row; dropped groups
         // claim nothing.
@@ -571,7 +609,12 @@ fn vendor_job_loaded(cands: &Candidates, vendor: &str) -> bool {
     })
 }
 
-fn group_finding(index: &Index, vendor: &str, items: &[&leftovers::Candidate]) -> Finding {
+fn group_finding(
+    index: &Index,
+    vendor: &str,
+    items: &[&leftovers::Candidate],
+    verified: bool,
+) -> Finding {
     let mut components: Vec<(Component, u64)> = items
         .iter()
         .map(|c| {
@@ -589,9 +632,13 @@ fn group_finding(index: &Index, vendor: &str, items: &[&leftovers::Candidate]) -
                 allocated,
                 freed_if_deleted: private,
                 modified: Some(modified),
-                default_on: !big,
+                default_on: verified && !big,
                 removal,
-                note: big.then(|| leftovers::NOTE_DOCUMENTS.to_string()),
+                note: if !verified {
+                    Some(NOTE_UNVERIFIED.to_string())
+                } else {
+                    big.then(|| leftovers::NOTE_DOCUMENTS.to_string())
+                },
                 covered_by_cask: false,
             };
             (component, logical)
@@ -602,8 +649,14 @@ fn group_finding(index: &Index, vendor: &str, items: &[&leftovers::Candidate]) -
             .cmp(&a.0.allocated)
             .then_with(|| a.0.path.cmp(&b.0.path))
     });
-    let selected = || components.iter().filter(|(c, _)| c.default_on);
+    // Unverified groups check nothing; their sizes are what is there.
+    let selected = || {
+        components
+            .iter()
+            .filter(move |(c, _)| c.default_on || !verified)
+    };
     let paths: Vec<PathBuf> = selected()
+        .filter(|(c, _)| c.default_on)
         .filter(|(c, _)| c.removal == ComponentRemoval::Trash)
         .filter_map(|(c, _)| c.path.clone())
         .collect();

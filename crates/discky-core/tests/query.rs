@@ -239,3 +239,55 @@ fn partial_clean_dev_cache_rules_carry_a_freed_note() {
         assert!(cmd.freed_note.is_some(), "{id}");
     }
 }
+
+#[test]
+fn apps_weight_counts_bundles_only() {
+    use discky_core::findings::{Component, ComponentKind, ComponentRemoval};
+    let comp = |kind: ComponentKind, allocated: u64| Component {
+        title: format!("{kind:?}"),
+        kind,
+        path: None,
+        allocated,
+        freed_if_deleted: allocated,
+        modified: None,
+        default_on: true,
+        removal: ComponentRemoval::Trash,
+        note: None,
+        covered_by_cask: false,
+    };
+    let d = tempfile::tempdir().unwrap();
+    let mut s = snap(d.path());
+    // An app: bundle 500 + leftovers 300 (the leftovers' nodes may also be other
+    // findings', e.g. app caches).
+    let mut app = synthetic(
+        "app",
+        Category::Apps,
+        SafetyLabel::AppData,
+        Removal::Trash { paths: vec![] },
+    );
+    app.allocated = 800;
+    app.components = vec![
+        comp(ComponentKind::AppBundle, 500),
+        comp(ComponentKind::Caches, 300),
+    ];
+    // A leftover group claims its nodes: it counts fully.
+    let mut group = synthetic(
+        "group",
+        Category::Apps,
+        SafetyLabel::AppData,
+        Removal::Trash { paths: vec![] },
+    );
+    group.allocated = 70;
+    group.components = vec![comp(ComponentKind::Caches, 70)];
+    // No components at all: its own size.
+    let plain = synthetic(
+        "plain",
+        Category::Apps,
+        SafetyLabel::AppData,
+        Removal::Trash { paths: vec![] },
+    );
+    s.findings = vec![app, group, plain];
+    let o = disk_overview(Some(&s));
+    let bytes = |c: Category| o.by_category.iter().find(|(x, _)| *x == c).unwrap().1;
+    assert_eq!(bytes(Category::Apps), 500 + 70 + 1000);
+}

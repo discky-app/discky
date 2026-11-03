@@ -265,7 +265,8 @@ pub struct ComponentOut {
     pub freed_if_deleted: u64,
     /// Included when `plan_removal` gets no `components` for the finding.
     pub default_on: bool,
-    /// `trash`, `defaults`, `bootout`, `pkg_forget` or `none` (shown only).
+    /// `trash`, `defaults`, `bootout`, `pkg_forget`, `run_script` (the vendor's uninstaller,
+    /// interactive) or `none` (shown only; refused when selected).
     pub removal: String,
     /// E.g. "needs administrator password", "shared with Google Drive".
     pub note: Option<String>,
@@ -284,6 +285,7 @@ impl ComponentOut {
             ComponentRemoval::Defaults { .. } => "defaults",
             ComponentRemoval::Bootout { .. } => "bootout",
             ComponentRemoval::PkgForget { .. } => "pkg_forget",
+            ComponentRemoval::RunScript => "run_script",
             ComponentRemoval::None => "none",
         };
         ComponentOut {

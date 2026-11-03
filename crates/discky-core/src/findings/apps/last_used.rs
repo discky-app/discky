@@ -1,5 +1,6 @@
 //! When an app was last used: Spotlight's `kMDItemLastUsedDate`, or an estimate from the
-//! newest leftover when Spotlight has nothing.
+//! newest leftover when Spotlight has nothing. Also every bundle id Spotlight knows
+//! ([`spotlight_bundle_ids`]), which decides what counts as installed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use crate::tools::run_capture;
 
 const MDFIND_TIMEOUT: Duration = Duration::from_secs(5);
 const ATTR: &str = "kMDItemLastUsedDate";
+const ID_ATTR: &str = "kMDItemCFBundleIdentifier";
 const QUERY: &str = "kMDItemContentType == 'com.apple.application-bundle'";
 
 /// Last-used dates of every app bundle Spotlight knows under `roots`: one
@@ -28,6 +30,43 @@ pub fn spotlight_last_used(mdfind: Option<&Path>, roots: &[&Path]) -> HashMap<Pa
         if let Some(text) = run_capture(mdfind, &args, MDFIND_TIMEOUT) {
             out.extend(text.lines().filter_map(parse_mdfind_line));
         }
+    }
+    out
+}
+
+/// Bundle id → display name of every app bundle Spotlight knows, anywhere (iOS apps,
+/// apps deeper than the folders walked, other volumes): one
+/// `mdfind -attr kMDItemCFBundleIdentifier "<app bundles>"` (5 s). `None` when there is no
+/// mdfind or it fails or times out — then what is installed cannot be verified.
+pub fn spotlight_bundle_ids(mdfind: Option<&Path>) -> Option<HashMap<String, String>> {
+    let text = run_capture(mdfind?, &["-attr", ID_ATTR, QUERY], MDFIND_TIMEOUT)?;
+    Some(parse_bundle_ids(&text))
+}
+
+/// Lines `<path>   kMDItemCFBundleIdentifier = <id>` (the id bare or in double quotes)
+/// ⇒ id → the bundle's file stem; `(null)` and other shapes are left out. The first path
+/// of an id names it.
+pub fn parse_bundle_ids(text: &str) -> HashMap<String, String> {
+    let marker = format!(" {ID_ATTR} = ");
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        let Some(i) = line.rfind(&marker) else {
+            continue;
+        };
+        let path = Path::new(line[..i].trim_end());
+        let raw = line[i + marker.len()..].trim();
+        let id = raw
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(raw);
+        if id.is_empty() || id == "(null)" || id.contains(char::is_whitespace) {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| id.to_string());
+        out.entry(id.to_string()).or_insert(name);
     }
     out
 }

@@ -724,3 +724,45 @@ fn command_env_reaches_the_child() {
     assert!(matches!(rep.results[0].status, StepStatus::Done), "{rep:?}");
     assert!(marker.exists());
 }
+
+#[test]
+fn skipped_quit_skips_the_findings_remaining_steps() {
+    let (d, paths, bin) = setup();
+    let live = d.path().join("com.example.live");
+    std::fs::create_dir(&live).unwrap();
+    std::fs::write(live.join("data"), b"x").unwrap();
+    let other = d.path().join("other-cache");
+    std::fs::create_dir(&other).unwrap();
+    let mut running = trash_finding(&live);
+    running.flags.push("app-running".into());
+    let mut idle = trash_finding(&other);
+    idle.id = FindingId("f2".into());
+    let plan = plan_removal(&[&running, &idle], &Config::default());
+    assert_eq!(plan.steps.len(), 3, "{:#?}", plan.steps);
+    assert!(matches!(
+        plan.steps[0].kind,
+        discky_core::plan::StepKind::Quit { .. }
+    ));
+
+    let report = execute_plan(&plan, &opts(Actor::Mcp, bin), &paths).unwrap();
+    let by_finding = |id: &str| {
+        plan.steps
+            .iter()
+            .filter(|s| s.finding.0 == id)
+            .map(|s| &report.results[s.index])
+            .collect::<Vec<_>>()
+    };
+    let live_results = by_finding("f1");
+    assert_eq!(live_results.len(), 2);
+    assert_eq!(live_results[0].status, StepStatus::Skipped);
+    assert_eq!(live_results[1].status, StepStatus::Skipped);
+    assert_eq!(
+        live_results[1].reason.as_deref(),
+        Some("Needs the app quit first; run from Discky.app")
+    );
+    assert!(live.exists(), "the running app's files are never touched");
+    // Another finding's steps still run.
+    assert_eq!(by_finding("f2")[0].status, StepStatus::Done);
+    assert!(!other.exists());
+    assert_eq!(report.stopped_at, None);
+}

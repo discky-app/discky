@@ -96,7 +96,7 @@ fn is_installable_bundle(path: &Path) -> bool {
     }
 }
 
-/// Read `Contents/Info.plist` (tolerating a missing or malformed file), the App Store
+/// Read the [`info_plist`] (tolerating a missing or malformed file), the App Store
 /// receipt and ownership. `own_uninstaller` is the first that exists of: an
 /// `Uninstall*.app|.scpt|.sh` in `Contents/Resources`, an executable (or `.app|.scpt|.sh`)
 /// `Uninstall*` in `Contents/MacOS`, or a sibling `Uninstall <Name>.app` / `<Name> Uninstaller.app` next
@@ -104,7 +104,8 @@ fn is_installable_bundle(path: &Path) -> bool {
 pub fn read_bundle(bundle: &Path) -> BundleMeta {
     let contents = bundle.join("Contents");
     let mut meta = BundleMeta::default();
-    if let Ok(v) = plist::Value::from_file(contents.join("Info.plist"))
+    if let Some(info) = info_plist(bundle)
+        && let Ok(v) = plist::Value::from_file(info)
         && let Some(d) = v.as_dictionary()
     {
         let s = |k: &str| d.get(k).and_then(|v| v.as_string()).map(str::to_string);
@@ -117,6 +118,25 @@ pub fn read_bundle(bundle: &Path) -> BundleMeta {
     meta.root_owned = std::fs::symlink_metadata(bundle).is_ok_and(|m| m.uid() == 0);
     meta.own_uninstaller = own_uninstaller(bundle);
     meta
+}
+
+/// The bundle's `Info.plist`: `Contents/Info.plist`, or for an iOS/iPadOS app wrapped for
+/// macOS (no `Contents/`) the inner bundle's — through the `WrappedBundle` symlink, else
+/// the first `Wrapper/*.app/Info.plist`. `None` when there is none.
+pub fn info_plist(bundle: &Path) -> Option<PathBuf> {
+    let direct = bundle.join("Contents/Info.plist");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let wrapped = bundle.join("WrappedBundle/Info.plist");
+    if wrapped.is_file() {
+        return Some(wrapped);
+    }
+    sorted_entries(&bundle.join("Wrapper"))
+        .into_iter()
+        .filter(|p| lower_name(p).ends_with(".app"))
+        .map(|p| p.join("Info.plist"))
+        .find(|p| p.is_file())
 }
 
 /// `LSUIElement` appears as a boolean, an integer or a string (`"1"`, `"YES"`).

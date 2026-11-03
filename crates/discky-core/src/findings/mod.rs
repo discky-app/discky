@@ -134,7 +134,11 @@ pub enum ComponentRemoval {
     Bootout { label: String, system: bool },
     /// `pkgutil --forget <pkg_id>` (admin).
     PkgForget { pkg_id: String },
-    /// Shown only (projects, an app's own uninstaller, shared folders).
+    /// Run the vendor's own uninstaller script at the component's path (`.scpt` with
+    /// `osascript`, `.sh` with `sh`); interactive, since it may ask for a password or show UI.
+    RunScript,
+    /// Shown only (projects, an uninstaller app, shared folders); the planner refuses
+    /// one that is selected explicitly.
     None,
 }
 

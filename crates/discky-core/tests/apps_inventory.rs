@@ -115,6 +115,7 @@ fn parse_casks_handles_string_or_array_directives() {
                 "AdobeCRDaemon".into()
             ],
             must_succeed: false,
+            sudo: false,
         })
     );
     assert_eq!(
@@ -655,4 +656,67 @@ fn older_json_is_not_used_when_a_newer_dir_exists() {
         r#"{"token":"x","artifacts":[]}"#,
     );
     assert_eq!(installed_zap(room, "x"), Some(Vec::new()));
+}
+
+#[test]
+fn wrapped_ios_bundle_id_is_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    // An iOS/iPadOS app on Apple silicon: no `Contents/`, the real bundle in `Wrapper/`.
+    let outer = tmp.path().join("apps/Foo.app");
+    let inner = outer.join("Wrapper/Foo.app");
+    std::fs::create_dir_all(&inner).unwrap();
+    let mut dict = plist::Dictionary::new();
+    dict.insert("CFBundleIdentifier".into(), "com.vendor.foo".into());
+    dict.insert("CFBundleShortVersionString".into(), "2.0".into());
+    plist::Value::Dictionary(dict)
+        .to_file_xml(inner.join("Info.plist"))
+        .unwrap();
+    let m = read_bundle(&outer);
+    assert_eq!(m.bundle_id.as_deref(), Some("com.vendor.foo"));
+    assert_eq!(m.version.as_deref(), Some("2.0"));
+    let ids = discky_core::findings::apps::leftovers::installed_bundle_ids(&[(
+        &tmp.path().join("apps"),
+        1,
+    )]);
+    assert_eq!(ids.get("com.vendor.foo").map(String::as_str), Some("Foo"));
+
+    // Through the `WrappedBundle` symlink when `Wrapper/` holds no `.app` directly.
+    let bar = tmp.path().join("other/Bar.app");
+    let real = bar.join("Wrapper/Payload/Bar.app");
+    std::fs::create_dir_all(&real).unwrap();
+    let mut dict = plist::Dictionary::new();
+    dict.insert("CFBundleIdentifier".into(), "com.vendor.bar".into());
+    plist::Value::Dictionary(dict)
+        .to_file_xml(real.join("Info.plist"))
+        .unwrap();
+    std::os::unix::fs::symlink("Wrapper/Payload/Bar.app", bar.join("WrappedBundle")).unwrap();
+    assert_eq!(
+        read_bundle(&bar).bundle_id.as_deref(),
+        Some("com.vendor.bar")
+    );
+}
+
+#[test]
+fn spotlight_bundle_id_lines_are_parsed() {
+    use discky_core::findings::apps::last_used::parse_bundle_ids;
+    let text = "/Applications/Safari.app   kMDItemCFBundleIdentifier = com.apple.Safari\n\
+                /Applications/Foo.app/Wrapper/Foo.app   kMDItemCFBundleIdentifier = \"com.vendor.foo\"\n\
+                /Volumes/X/Old Thing.app   kMDItemCFBundleIdentifier = (null)\n\
+                garbage\n";
+    let ids = parse_bundle_ids(text);
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_eq!(ids["com.apple.Safari"], "Safari");
+    assert_eq!(ids["com.vendor.foo"], "Foo");
+}
+
+#[test]
+fn cask_binaries_and_script_sudo_are_parsed() {
+    let json = r#"{"casks":[{"token":"x","artifacts":[
+        {"binary":["$APPDIR/X.app/Contents/MacOS/x-cli",{"target":"x"}]},
+        {"binary":["$APPDIR/X.app/Contents/Resources/y"]},
+        {"uninstall":[{"script":{"executable":"/usr/bin/true","sudo":true}}]}
+    ]}]}"#;
+    let casks = parse_casks(json).unwrap();
+    assert_eq!(casks[0].binaries, ["x", "y"]);
+    assert!(casks[0].uninstall[0].script.as_ref().unwrap().sudo);
 }
