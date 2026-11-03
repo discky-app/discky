@@ -1,11 +1,13 @@
 //! Application state, routes, actions and menus; the main window shell and the startup
 //! error window.
 
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use discky_core::findings::Finding;
 use discky_core::index::snapshot::Actor;
 use discky_core::paths::display;
 use discky_core::rules::Category;
@@ -21,6 +23,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
 use crate::overview::OverviewView;
 use crate::scan::{ScanController, ScanMsg};
@@ -95,10 +98,15 @@ pub struct AppView {
     /// `Overview::by_category`, shown as sidebar weights.
     weights: Vec<(Category, u64)>,
     overview: Entity<OverviewView>,
+    /// One screen per category visited so far, created on first visit.
+    categories: HashMap<Category, Entity<CategoryView>>,
+    /// The finding last selected in a category table.
+    inspected: Option<Finding>,
     scan: Entity<ScanController>,
     focus: FocusHandle,
     _appearance: Subscription,
     _scan_events: Subscription,
+    _category_events: Vec<Subscription>,
 }
 
 impl AppView {
@@ -116,14 +124,17 @@ impl AppView {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         AppView {
-            route: Route::Overview,
+            route: start_route(),
             sidebar_collapsed: false,
             weights,
             overview,
+            categories: HashMap::new(),
+            inspected: None,
             scan,
             focus,
             _appearance: appearance,
             _scan_events: scan_events,
+            _category_events: Vec::new(),
         }
     }
 
@@ -141,7 +152,9 @@ impl AppView {
             ScanMsg::Finished(ScanStatus::Done { .. }) | ScanMsg::Refreshed => {
                 self.refresh_data(cx)
             }
+            // The engine publishes the new snapshot in memory even when saving it failed.
             ScanMsg::Finished(ScanStatus::Failed { error }) => {
+                self.refresh_data(cx);
                 window.push_notification(Notification::error(error.clone()), cx);
             }
             ScanMsg::Finished(ScanStatus::Cancelled { .. }) => {
@@ -155,12 +168,53 @@ impl AppView {
         }
     }
 
-    /// Re-read the engine's snapshot everywhere it is shown: sidebar weights and Overview.
+    /// Re-read the engine's snapshot everywhere it is shown: sidebar weights, Overview
+    /// and every category screen created so far.
     fn refresh_data(&mut self, cx: &mut Context<Self>) {
         self.weights = cx.global::<AppState>().engine.overview().by_category;
         self.overview.update(cx, |o, cx| o.refresh(cx));
-        // Task 9: refresh category views
+        for view in self.categories.values() {
+            view.update(cx, |v, cx| v.reload(cx));
+        }
         cx.notify();
+    }
+
+    /// The screen of `category`, created (and subscribed to) on first use.
+    fn category_view(
+        &mut self,
+        category: Category,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<CategoryView> {
+        if let Some(view) = self.categories.get(&category) {
+            return view.clone();
+        }
+        let view = cx.new(|cx| CategoryView::new(category, window, cx));
+        self._category_events
+            .push(cx.subscribe_in(&view, window, Self::on_category_event));
+        self.categories.insert(category, view.clone());
+        view
+    }
+
+    /// Route a category screen's request: inspector or removal.
+    fn on_category_event(
+        &mut self,
+        _: &Entity<CategoryView>,
+        event: &CategoryEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            CategoryEvent::Inspect(finding) => {
+                self.inspected = Some(finding.clone());
+                // Task 10: open inspector
+                cx.notify();
+            }
+            CategoryEvent::RemoveRequested(ids) => {
+                // Task 11: removal dialog
+                tracing::debug!(?ids, "removal requested");
+            }
+        }
     }
 
     /// "Snapshot updated by discky-mcp at <when> · Reload", above the route content.
@@ -201,8 +255,14 @@ impl AppView {
     pub fn navigate(&mut self, r: Route, cx: &mut Context<Self>) {
         if self.route != r {
             self.route = r;
-            if r == Route::Overview {
-                self.overview.update(cx, |o, cx| o.refresh(cx));
+            match r {
+                Route::Overview => self.overview.update(cx, |o, cx| o.refresh(cx)),
+                Route::Category(c) => {
+                    if let Some(view) = self.categories.get(&c) {
+                        view.update(cx, |v, cx| v.request_focus(cx));
+                    }
+                }
+                Route::Settings => {}
             }
             cx.notify();
         }
@@ -210,13 +270,14 @@ impl AppView {
 }
 
 impl Render for AppView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.route.title();
         let muted = cx.theme().muted_foreground;
         let content = match self.route {
             Route::Overview => self.overview.clone().into_any_element(),
-            // Placeholders until the Category and Settings screens exist.
-            Route::Category(_) | Route::Settings => v_flex()
+            Route::Category(c) => self.category_view(c, window, cx).into_any_element(),
+            // Placeholder until the Settings screen exists.
+            Route::Settings => v_flex()
                 .flex_1()
                 .h_full()
                 .items_center()
@@ -276,6 +337,26 @@ impl Render for AppView {
                 // The inspector slot (Task 10) goes here, right of the content.
             )
     }
+}
+
+/// The first screen: the Overview, or in debug builds the route named by
+/// `DISCKY_START_ROUTE` (`overview`, `settings` or a category such as `app_caches`), so a
+/// screen can be looked at without clicking to it.
+fn start_route() -> Route {
+    #[cfg(debug_assertions)]
+    if let Ok(name) = std::env::var("DISCKY_START_ROUTE") {
+        match name.as_str() {
+            "overview" => return Route::Overview,
+            "settings" => return Route::Settings,
+            other => {
+                match serde_json::from_value::<Category>(serde_json::Value::String(other.into())) {
+                    Ok(c) => return Route::Category(c),
+                    Err(_) => eprintln!("DISCKY_START_ROUTE: unknown route `{other}`"),
+                }
+            }
+        }
+    }
+    Route::Overview
 }
 
 /// Run Discky.app. With `self_check`, quit one second after the window opened and print
