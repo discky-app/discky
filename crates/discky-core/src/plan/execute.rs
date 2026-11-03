@@ -6,9 +6,10 @@
 //! only ever handed to the Trash or removed when they are listed in the step itself.
 //! A window between the stale check and each action is unavoidable; the last path
 //! component is still protected because every removal decides by `lstat`.
-//! When a finding's `Quit` step does not run (skipped as interactive, or left out of
-//! `only_steps`), every later step of that finding is `Skipped` too: the app is still
-//! running.
+//! When a finding's `GATE` step (a `Quit`, a vendor uninstaller script) does not run
+//! (skipped as interactive, or left out of `only_steps`), every later step of that
+//! finding is `Skipped` too. `GUI_ONLY` steps are skipped like `INTERACTIVE` ones without
+//! permission and otherwise run as the user, never through the administrator route.
 
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -35,6 +36,8 @@ const INTERACTIVE_REASON: &str = "Needs an interactive session; run from Discky.
 /// Why a step after its finding's `Quit` that did not run is skipped: the app may still be
 /// running and using what the step would remove.
 const QUIT_FIRST_REASON: &str = "Needs the app quit first; run from Discky.app";
+/// Why a step after another `GATE` step (a vendor script) that did not run is skipped.
+const EARLIER_STEP_REASON: &str = "Needs an earlier interactive step; run from Discky.app";
 /// Absolute, never looked up through `PATH`: it may show an administrator prompt.
 pub const OSASCRIPT: &str = "/usr/bin/osascript";
 
@@ -77,7 +80,8 @@ pub struct ExecutionReport {
 /// No `Default`: the caller must choose `actor` and `allow_interactive` deliberately.
 #[derive(Clone)]
 pub struct ExecuteOptions {
-    /// Run `INTERACTIVE` steps (quitting apps, Finder/administrator prompts) instead of
+    /// Run `INTERACTIVE` and `GUI_ONLY` steps (quitting apps, Finder/administrator prompts,
+    /// vendor scripts as the user) instead of
     /// skipping them.
     pub allow_interactive: bool,
     /// Run only these step indices; the rest are `NotRun`.
@@ -196,26 +200,40 @@ pub fn execute_plan(
         return Err(ExecuteError::BadStepIndex(bad));
     }
     let selected = |i: usize| opts.only_steps.as_ref().is_none_or(|o| o.contains(&i));
-    let skipped = |s: &Step| s.flags.contains(StepFlags::INTERACTIVE) && !opts.allow_interactive;
-    // A finding whose `Quit` will not run (skipped as interactive, or left out of
-    // `only_steps`) keeps its app running: none of its later steps may run either.
-    let mut unquit: HashMap<&str, usize> = HashMap::new();
+    let skipped = |s: &Step| needs_session(s) && !opts.allow_interactive;
+    // A `GATE` step (a `Quit`, a vendor script) that will not run — skipped as
+    // interactive, or left out of `only_steps` — stops every later step of its finding:
+    // the app is still running, or the vendor's uninstall has not happened.
+    let mut gates: HashMap<&str, (usize, &'static str)> = HashMap::new();
     for s in &plan.steps {
-        if matches!(s.kind, StepKind::Quit { .. }) && (!selected(s.index) || skipped(s)) {
-            let first = unquit.entry(s.finding.0.as_str()).or_insert(s.index);
-            *first = (*first).min(s.index);
+        if s.flags.contains(StepFlags::GATE) && (!selected(s.index) || skipped(s)) {
+            let reason = if matches!(s.kind, StepKind::Quit { .. }) {
+                QUIT_FIRST_REASON
+            } else {
+                EARLIER_STEP_REASON
+            };
+            let first = gates
+                .entry(s.finding.0.as_str())
+                .or_insert((s.index, reason));
+            if s.index < first.0 {
+                *first = (s.index, reason);
+            }
         }
     }
-    let blocked = |s: &Step| {
-        !matches!(s.kind, StepKind::Quit { .. })
-            && unquit
-                .get(s.finding.0.as_str())
-                .is_some_and(|&q| s.index > q)
+    // Further quits stay allowed: quitting an app removes nothing.
+    let blocked = |s: &Step| -> Option<&'static str> {
+        if matches!(s.kind, StepKind::Quit { .. }) {
+            return None;
+        }
+        gates
+            .get(s.finding.0.as_str())
+            .filter(|&&(g, _)| s.index > g)
+            .map(|&(_, reason)| reason)
     };
     check_fresh(
         plan.steps
             .iter()
-            .filter(|s| selected(s.index) && !skipped(s) && !blocked(s)),
+            .filter(|s| selected(s.index) && !skipped(s) && blocked(s).is_none()),
     )?;
     history::open_log(paths)?;
 
@@ -228,10 +246,9 @@ pub fn execute_plan(
             continue;
         }
         emit(opts, StepEvent::Started { index: step.index });
-        let mut outcome = if blocked(step) {
-            Outcome::skipped(QUIT_FIRST_REASON)
-        } else {
-            run_step(step, opts)
+        let mut outcome = match blocked(step) {
+            Some(reason) => Outcome::skipped(reason),
+            None => run_step(step, opts),
         };
         let freed = match outcome.status {
             StepStatus::Done if outcome.freed_nothing => 0,
@@ -303,8 +320,10 @@ fn not_run(index: usize) -> StepResult {
 }
 
 fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
+    // `GUI_ONLY` needs the session too, but runs as the user: only `INTERACTIVE` takes the
+    // Finder / administrator routes below.
     let interactive = step.flags.contains(StepFlags::INTERACTIVE);
-    if interactive && !opts.allow_interactive {
+    if needs_session(step) && !opts.allow_interactive {
         return Outcome::skipped(INTERACTIVE_REASON);
     }
     if step.flags.contains(StepFlags::TOOL_MISSING) {
@@ -344,6 +363,12 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
         }
         StepKind::OllamaDelete { url, model } => run_ollama_delete(url, model),
     }
+}
+
+/// The step needs an interactive session (`INTERACTIVE` or `GUI_ONLY`).
+fn needs_session(step: &Step) -> bool {
+    step.flags
+        .intersects(StepFlags::INTERACTIVE | StepFlags::GUI_ONLY)
 }
 
 fn already_absent(output: String) -> Outcome {

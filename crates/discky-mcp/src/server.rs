@@ -394,7 +394,10 @@ impl DisckyServer {
             .iter()
             .filter(|r| r.status == StepStatus::Skipped)
             .filter_map(|r| plan.steps.iter().find(|s| s.index == r.index))
-            .filter(|s| s.flags.contains(StepFlags::INTERACTIVE))
+            .filter(|s| {
+                s.flags
+                    .intersects(StepFlags::INTERACTIVE | StepFlags::GUI_ONLY)
+            })
             .map(|s| SkippedStep {
                 index: s.index,
                 description: s.description.clone(),

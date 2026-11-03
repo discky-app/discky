@@ -766,3 +766,100 @@ fn skipped_quit_skips_the_findings_remaining_steps() {
     assert!(!other.exists());
     assert_eq!(report.stopped_at, None);
 }
+
+#[test]
+fn gui_only_command_runs_as_the_user_only_when_interactive_is_allowed() {
+    let (d, paths, bin) = setup();
+    let marker = d.path().join("ran");
+    let f = command_finding(d.path(), &format!("touch '{}'", marker.display()), None);
+    let mut plan = plan_removal(&[&f], &Config::default());
+    plan.steps[0].flags |= discky_core::plan::StepFlags::GUI_ONLY;
+    let rep = execute_plan(&plan, &opts(Actor::Mcp, bin.clone()), &paths).unwrap();
+    assert!(!marker.exists());
+    assert_eq!(rep.results[0].status, StepStatus::Skipped);
+    assert_eq!(
+        rep.results[0].reason.as_deref(),
+        Some("Needs an interactive session; run from Discky.app")
+    );
+    // Allowed: a plain child process as us (the admin route would prompt via osascript).
+    let mut allowed = opts(Actor::App, bin);
+    allowed.allow_interactive = true;
+    let rep = execute_plan(&plan, &allowed, &paths).unwrap();
+    assert_eq!(
+        rep.results[0].status,
+        StepStatus::Done,
+        "{:?}",
+        rep.results[0]
+    );
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(std::fs::metadata(&marker).unwrap().uid(), unsafe {
+        libc::getuid()
+    });
+}
+
+#[test]
+fn skipped_script_skips_the_findings_remaining_steps() {
+    use discky_core::findings::{AppSource, Component, ComponentKind, ComponentRemoval};
+    use discky_core::plan::{PlanItem, PlanTools, StepFlags, plan_items_with_tools};
+    let (d, paths, bin) = setup();
+    let bundle = d.path().join("Foo.app");
+    std::fs::create_dir(&bundle).unwrap();
+    let script = d.path().join("uninstall.sh");
+    let marker = d.path().join("script-ran");
+    std::fs::write(&script, format!("touch '{}'\n", marker.display())).unwrap();
+    let comp = |kind, path: &std::path::Path, removal| Component {
+        title: "x".into(),
+        kind,
+        path: Some(path.into()),
+        allocated: 1,
+        freed_if_deleted: 1,
+        modified: None,
+        default_on: true,
+        removal,
+        note: None,
+        covered_by_cask: false,
+    };
+    let f = Finding {
+        id: FindingId("app".into()),
+        category: Category::Apps,
+        removal: Removal::App {
+            source: AppSource::Dragged,
+            bundle: bundle.clone(),
+            bundle_id: Some("com.example.foo".into()),
+        },
+        components: vec![
+            comp(ComponentKind::AppBundle, &bundle, ComponentRemoval::Trash),
+            comp(
+                ComponentKind::OwnUninstaller,
+                &script,
+                ComponentRemoval::RunScript,
+            ),
+        ],
+        ..trash_finding(&bundle)
+    };
+    let items = [PlanItem {
+        id: "app".into(),
+        components: Some(vec![0, 1]),
+    }];
+    let plan = plan_items_with_tools(&items, &[&f], &Config::default(), &PlanTools::default());
+    assert_eq!(plan.steps.len(), 2, "{:#?}", plan.steps);
+    assert!(plan.steps[0].flags.contains(StepFlags::GATE));
+
+    // MCP: the script is skipped, so the bundle stays.
+    let rep = execute_plan(&plan, &opts(Actor::Mcp, bin.clone()), &paths).unwrap();
+    assert_eq!(rep.results[0].status, StepStatus::Skipped);
+    assert_eq!(rep.results[1].status, StepStatus::Skipped);
+    assert_eq!(
+        rep.results[1].reason.as_deref(),
+        Some("Needs an earlier interactive step; run from Discky.app")
+    );
+    assert!(bundle.exists() && !marker.exists());
+
+    // Left out of `only_steps`: the same.
+    let mut only = opts(Actor::Mcp, bin);
+    only.allow_interactive = true;
+    only.only_steps = Some(vec![1]);
+    let rep = execute_plan(&plan, &only, &paths).unwrap();
+    assert_eq!(rep.results[1].status, StepStatus::Skipped);
+    assert!(bundle.exists() && !marker.exists());
+}

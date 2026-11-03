@@ -618,7 +618,7 @@ fn quit_step(f: &Finding, description: String, bundle_id: &str) -> Step {
         },
     );
     q.freed = None;
-    q.flags |= StepFlags::INTERACTIVE;
+    q.flags |= StepFlags::INTERACTIVE | StepFlags::GATE;
     q
 }
 
@@ -636,7 +636,9 @@ fn command(f: &Finding, description: String, argv: Vec<String>) -> Step {
 }
 
 /// A selected `RunScript` component: `.scpt` → `osascript <path>`, `.sh` → `sh <path>`,
-/// `INTERACTIVE` (vendor scripts may ask for a password or show UI; spec §12c). Any other
+/// run as the user (`GUI_ONLY`: vendor scripts may show UI or ask for a password
+/// themselves; spec §12c — never through the administrator route, the script usually
+/// lives in a user-writable bundle) and a `GATE` for the finding's later steps. Any other
 /// path cannot be run here and refuses the finding.
 fn own_uninstaller(f: &Finding, i: usize, path: &Path, out: &mut Out) -> Result<(), String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
@@ -656,7 +658,7 @@ fn own_uninstaller(f: &Finding, i: usize, path: &Path, out: &mut Out) -> Result<
     );
     s.freed = None;
     s.freed_note = Some("Optional vendor step".to_string());
-    s.flags |= StepFlags::INTERACTIVE;
+    s.flags |= StepFlags::GUI_ONLY | StepFlags::GATE;
     s.component = Some(i);
     s.fingerprints = vec![Fingerprint::take(path)];
     out.push(Bucket::Vendor, s);

@@ -817,33 +817,42 @@ fn own_uninstaller_script_is_interactive_and_selectable() {
             &bundle,
             vec![
                 trash_comp(ComponentKind::AppBundle, bundle.clone(), 10),
-                comp(
+                // Opt-in, as the finding builder makes it.
+                off(comp(
                     ComponentKind::OwnUninstaller,
                     Some(script.clone()),
                     0,
                     ComponentRemoval::RunScript,
-                ),
+                )),
             ],
         );
-        // Default on: the default plan runs it, before the bundle step.
-        for selection in [None, Some(vec![0, 1])] {
+        // Checked: it runs as the user (GUI only, never the admin route), before the
+        // bundle step, and gates the finding's later steps.
+        let p = plan(&f, Some(vec![0, 1]), &PlanTools::default());
+        assert_eq!(p.steps.len(), 2, "{:#?}", p.steps);
+        assert_eq!(argv(&p.steps[0]), [program, script.to_str().unwrap()]);
+        assert_eq!(p.steps[0].component, Some(1));
+        assert_eq!(p.steps[0].fingerprints[0].path, script);
+        assert_eq!(p.steps[0].freed, None);
+        assert!(p.steps[0].flags.contains(StepFlags::GUI_ONLY));
+        assert!(p.steps[0].flags.contains(StepFlags::GATE));
+        assert!(!p.steps[0].flags.contains(StepFlags::INTERACTIVE));
+        assert!(p.steps[0].warnings.is_empty());
+        assert!(matches!(p.steps[1].kind, StepKind::Trash { .. }));
+        assert_eq!(
+            p.to_json()["steps"][0]["flags"],
+            serde_json::json!(["gui_only", "gate"])
+        );
+        // Default selection (unchecked): no script step.
+        for selection in [None, Some(vec![0])] {
             let p = plan(&f, selection, &PlanTools::default());
-            assert_eq!(p.steps.len(), 2, "{:#?}", p.steps);
-            assert_eq!(argv(&p.steps[0]), [program, script.to_str().unwrap()]);
-            assert_eq!(p.steps[0].component, Some(1));
-            assert_eq!(p.steps[0].fingerprints[0].path, script);
-            assert_eq!(p.steps[0].freed, None);
-            assert!(p.steps[0].flags.contains(StepFlags::INTERACTIVE));
-            assert!(p.steps[0].warnings.is_empty());
-            assert!(matches!(p.steps[1].kind, StepKind::Trash { .. }));
+            assert_eq!(p.steps.len(), 1);
         }
-        // Unchecked: no script step.
-        let p = plan(&f, Some(vec![0]), &PlanTools::default());
-        assert_eq!(p.steps.len(), 1);
         // Running app: quit, then the script, then the bundle.
         let mut running = f.clone();
         running.flags.push("app-running".into());
-        let p = plan(&running, None, &PlanTools::default());
+        let p = plan(&running, Some(vec![0, 1]), &PlanTools::default());
+        assert!(p.steps[0].flags.contains(StepFlags::GATE));
         assert!(matches!(p.steps[0].kind, StepKind::Quit { .. }));
         assert_eq!(argv(&p.steps[1])[0], program);
         assert!(matches!(p.steps[2].kind, StepKind::Trash { .. }));

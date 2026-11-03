@@ -37,10 +37,11 @@ pub fn spotlight_last_used(mdfind: Option<&Path>, roots: &[&Path]) -> HashMap<Pa
 /// Bundle id → display name of every app bundle Spotlight knows, anywhere (iOS apps,
 /// apps deeper than the folders walked, other volumes): one
 /// `mdfind -attr kMDItemCFBundleIdentifier "<app bundles>"` (5 s). `None` when there is no
-/// mdfind or it fails or times out — then what is installed cannot be verified.
+/// mdfind, it fails or times out, or it knows no app at all (Spotlight indexing off) —
+/// then what is installed cannot be verified.
 pub fn spotlight_bundle_ids(mdfind: Option<&Path>) -> Option<HashMap<String, String>> {
     let text = run_capture(mdfind?, &["-attr", ID_ATTR, QUERY], MDFIND_TIMEOUT)?;
-    Some(parse_bundle_ids(&text))
+    Some(parse_bundle_ids(&text)).filter(|ids| !ids.is_empty())
 }
 
 /// Lines `<path>   kMDItemCFBundleIdentifier = <id>` (the id bare or in double quotes)

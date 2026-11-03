@@ -42,7 +42,8 @@ pub const FLAG_APP_RUNNING: &str = "app-running";
 /// covered components itself.
 pub const FLAG_ZAP_SHARED: &str = "zap-shared";
 /// Note of an own-uninstaller script component.
-pub const NOTE_RUN_SCRIPT: &str = "runs the vendor's uninstaller; may ask for a password";
+pub const NOTE_RUN_SCRIPT: &str =
+    "runs the vendor's uninstaller as you; it may ask for a password itself";
 /// Note on every leftover-group component when Spotlight could not be asked.
 pub const NOTE_UNVERIFIED: &str = "could not verify no installed app uses this";
 /// `rule_id` of app findings.
@@ -377,7 +378,8 @@ fn app_finding(
         covered_by_cask: matches!(app.source, AppSource::Cask { .. }),
     }];
     if let Some(u) = &app.own_uninstaller {
-        // A script is run by the plan (interactive); an uninstaller app is the user's to run.
+        // A script is run by the plan (as the user, when checked); an uninstaller app is the
+        // user's to run.
         let script = u
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
@@ -389,7 +391,8 @@ fn app_finding(
             allocated: 0,
             freed_if_deleted: 0,
             modified: None,
-            default_on: script,
+            // Opt-in: a vendor script runs code Discky cannot inspect.
+            default_on: false,
             removal: if script {
                 ComponentRemoval::RunScript
             } else {

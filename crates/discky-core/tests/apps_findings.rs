@@ -1232,3 +1232,34 @@ fn groups_default_off_without_spotlight() {
     let a = found.iter().find(|f| f.rule_id == "apps").unwrap();
     assert!(a.components[0].default_on);
 }
+
+#[test]
+fn own_uninstaller_script_is_opt_in() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let home = root.join("home");
+    let bundle = root.join("Applications/Tailscale.app");
+    make_app(&bundle, "io.tailscale.ipn.macos");
+    let script = bundle.join("Contents/Resources/uninstall.sh");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+    let idx = scan(root);
+    let mut a = app(
+        &idx,
+        &bundle,
+        "io.tailscale.ipn.macos",
+        AppSource::Dragged,
+        LastUsed::Spotlight(NOW),
+    );
+    a.own_uninstaller = Some(script.clone());
+    let found = Ctx::new(root).run(&idx, &home, &[a], &mut HashSet::new());
+    let f = found.iter().find(|f| f.rule_id == "apps").unwrap();
+    let c = component(f, &script);
+    assert_eq!(c.kind, ComponentKind::OwnUninstaller);
+    assert_eq!(c.removal, ComponentRemoval::RunScript);
+    assert!(!c.default_on, "the vendor script is opt-in");
+    assert_eq!(
+        c.note.as_deref(),
+        Some("runs the vendor's uninstaller as you; it may ask for a password itself")
+    );
+}

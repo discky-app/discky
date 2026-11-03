@@ -42,13 +42,22 @@ bitflags::bitflags! {
         const PERMANENT = 1 << 1;
         /// The command's tool is not installed; the step carries an install hint.
         const TOOL_MISSING = 1 << 2;
+        /// Needs an interactive session but no privileges (a vendor uninstaller script):
+        /// skipped like `INTERACTIVE` without permission, otherwise run as the user —
+        /// never through the administrator route.
+        const GUI_ONLY = 1 << 3;
+        /// Must run before the finding's later steps (a `Quit`, a vendor script): when it
+        /// does not run, the executor skips every later step of the same finding.
+        const GATE = 1 << 4;
     }
 }
 
-const FLAG_NAMES: [(StepFlags, &str); 3] = [
+const FLAG_NAMES: [(StepFlags, &str); 5] = [
     (StepFlags::INTERACTIVE, "interactive"),
     (StepFlags::PERMANENT, "permanent"),
     (StepFlags::TOOL_MISSING, "tool_missing"),
+    (StepFlags::GUI_ONLY, "gui_only"),
+    (StepFlags::GATE, "gate"),
 ];
 
 impl StepFlags {
@@ -523,7 +532,7 @@ pub fn plan_items_with_tools(
                     StepKind::Quit { bundle_id },
                 );
                 q.freed = None;
-                q.flags |= StepFlags::INTERACTIVE;
+                q.flags |= StepFlags::INTERACTIVE | StepFlags::GATE;
                 steps.push((Bucket::Quit, q));
             }
             match removal_step(f, cfg)? {

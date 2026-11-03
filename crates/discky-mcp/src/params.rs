@@ -266,7 +266,7 @@ pub struct ComponentOut {
     /// Included when `plan_removal` gets no `components` for the finding.
     pub default_on: bool,
     /// `trash`, `defaults`, `bootout`, `pkg_forget`, `run_script` (the vendor's uninstaller,
-    /// interactive) or `none` (shown only; refused when selected).
+    /// run as the user from Discky.app only) or `none` (shown only; refused when selected).
     pub removal: String,
     /// E.g. "needs administrator password", "shared with Google Drive".
     pub note: Option<String>,

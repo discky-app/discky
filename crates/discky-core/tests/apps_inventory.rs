@@ -720,3 +720,26 @@ fn cask_binaries_and_script_sudo_are_parsed() {
     assert_eq!(casks[0].binaries, ["x", "y"]);
     assert!(casks[0].uninstall[0].script.as_ref().unwrap().sudo);
 }
+
+#[test]
+fn empty_spotlight_answer_counts_as_unverified() {
+    use discky_core::findings::apps::last_used::spotlight_bundle_ids;
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = |name: &str, body: &str| {
+        let p = tmp.path().join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    // Spotlight indexing off: mdfind succeeds and prints nothing.
+    let silent = fake("mdfind-silent", "exit 0");
+    assert_eq!(spotlight_bundle_ids(Some(&silent)), None);
+    let one = fake(
+        "mdfind-one",
+        "echo '/Applications/A.app   kMDItemCFBundleIdentifier = com.a.app'",
+    );
+    let ids = spotlight_bundle_ids(Some(&one)).unwrap();
+    assert_eq!(ids["com.a.app"], "A");
+    assert_eq!(spotlight_bundle_ids(None), None);
+}
