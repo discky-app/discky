@@ -36,3 +36,10 @@ impl DisckyPaths {
 pub fn display(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
+
+/// The user's home directory from `HOME`; `None` when it is unset or empty.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}

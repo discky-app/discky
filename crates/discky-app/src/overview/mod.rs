@@ -2,11 +2,10 @@
 
 pub mod model;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use discky_core::rules::Category;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
@@ -16,8 +15,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app::{AppState, AppView, Rescan, Route};
+use crate::duck::{DuckScene, logo_element};
 use crate::format;
-use crate::scan::ScanController;
+use crate::scan::{ScanController, ScanMsg};
 use model::{BarSegment, CategoryCard, OverviewModel};
 
 /// The Overview screen. It never changes the route itself: clicks go to
@@ -27,7 +27,13 @@ pub struct OverviewView {
     app: WeakEntity<AppView>,
     /// Shown instead of the hero while it runs.
     scan: Entity<ScanController>,
+    /// The duck scene of the current (or last) scan; replaced when a scan starts.
+    scene: Entity<DuckScene>,
+    /// `started_at` of the scan `scene` belongs to.
+    scene_scan: Option<Instant>,
     _scan_changed: Subscription,
+    _scan_events: Subscription,
+    _scene_changed: Subscription,
 }
 
 impl OverviewView {
@@ -38,13 +44,36 @@ impl OverviewView {
         scan: Entity<ScanController>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let scan_changed = cx.observe(&scan, |_, _, cx| cx.notify());
+        let scan_changed = cx.observe(&scan, |this, scan, cx| {
+            let started = scan.read(cx).started_at;
+            if started.is_some() && started != this.scene_scan {
+                // A new scan starts hidden again, with fresh trip bookkeeping.
+                this.scene_scan = started;
+                this.set_scene(cx.new(|_| DuckScene::new()), cx);
+            }
+            cx.notify();
+        });
+        let scan_events = cx.subscribe(&scan, |this, _, msg: &ScanMsg, cx| {
+            this.scene.update(cx, |s, cx| s.apply(msg, cx));
+        });
+        let scene = cx.new(|_| DuckScene::new());
+        let scene_changed = cx.observe(&scene, |_, _, cx| cx.notify());
         OverviewView {
             model: current_model(cx),
             app,
+            scene_scan: scan.read(cx).started_at,
             scan,
+            scene,
             _scan_changed: scan_changed,
+            _scan_events: scan_events,
+            _scene_changed: scene_changed,
         }
+    }
+
+    /// Show `scene` from now on and re-render when it changes.
+    fn set_scene(&mut self, scene: Entity<DuckScene>, cx: &mut Context<Self>) {
+        self._scene_changed = cx.observe(&scene, |_, _, cx| cx.notify());
+        self.scene = scene;
     }
 
     /// Rebuild the model from the engine's current snapshot (route shown, scan finished).
@@ -140,28 +169,34 @@ impl OverviewView {
             })
     }
 
-    /// The running scan: an indeterminate bar, live totals and "Cancel".
-    fn scan_progress(&self, cx: &App) -> impl IntoElement {
-        let p = &self.scan.read(cx).progress;
+    /// The running scan (or its scene playing out): the duck scene once it shows,
+    /// "Scanning… N files · X" before that, and "Cancel" while the scan runs.
+    ///
+    /// The scene is always in the tree here, even while hidden: its render advances it.
+    fn scan_progress(&self, scene_visible: bool, cx: &App) -> impl IntoElement {
+        let controller = self.scan.read(cx);
+        let p = &controller.progress;
+        let running = controller.is_running();
         let scan = self.scan.clone();
-        v_flex()
-            .gap_3()
-            .child(Progress::new("scan-progress").loading(true))
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(div().text_lg().child(format!(
+        v_flex().gap_3().child(self.scene.clone()).child(
+            h_flex()
+                .gap_3()
+                .when(!scene_visible, |this| {
+                    this.child(div().text_lg().child(format!(
                         "Scanning… {} files · {}",
-                        p.files,
+                        format::count(p.files),
                         format::bytes(p.allocated)
                     )))
-                    .child(
+                })
+                .when(running, |this| {
+                    this.child(
                         Button::new("cancel-scan")
                             .small()
                             .label("Cancel")
                             .on_click(move |_, _, cx| scan.update(cx, |s, cx| s.cancel(cx))),
-                    ),
-            )
+                    )
+                }),
+        )
     }
 
     fn disk_bar(&self, cx: &App) -> impl IntoElement {
@@ -259,20 +294,14 @@ impl OverviewView {
             })
     }
 
-    fn empty_state(&self, cx: &App) -> impl IntoElement {
-        let theme = cx.theme();
+    fn empty_state(&self) -> impl IntoElement {
         v_flex()
             .flex_1()
             .items_center()
             .justify_center()
             .gap_4()
             .py_16()
-            // Task 8: logo_element(128.)
-            .child(
-                Icon::new(IconName::HardDrive)
-                    .size(px(128.))
-                    .text_color(theme.muted_foreground),
-            )
+            .child(logo_element(128.))
             .child(div().text_xl().font_semibold().child("No scan yet"))
             .child(rescan_button("scan-now", "Scan now").primary())
     }
@@ -283,6 +312,9 @@ impl Render for OverviewView {
         let theme = cx.theme();
         let has_snapshot = self.model.scanned_line.is_some();
         let running = self.scan.read(cx).is_running();
+        let scene_visible = self.scene.read(cx).visible();
+        // The scene plays out after the scan ends; the hero number appears when it is done.
+        let busy = running || scene_visible;
         let cards = self
             .model
             .cards
@@ -313,15 +345,16 @@ impl Render for OverviewView {
                         )
                     })
                     .child(self.toolbar(cx))
-                    // Task 8: DuckScene replaces the progress bar here.
-                    .when(running, |this| this.child(self.scan_progress(cx)))
+                    .when(busy, |this| {
+                        this.child(self.scan_progress(scene_visible, cx))
+                    })
                     .when(has_snapshot, |this| {
-                        this.when(!running, |this| this.child(self.hero(cx)))
+                        this.when(!busy, |this| this.child(self.hero(cx)))
                             .child(self.disk_bar(cx))
                             .child(div().grid().grid_cols(2).gap_4().children(cards))
                     })
-                    .when(!has_snapshot && !running, |this| {
-                        this.child(self.empty_state(cx))
+                    .when(!has_snapshot && !busy, |this| {
+                        this.child(self.empty_state())
                     }),
             )
     }

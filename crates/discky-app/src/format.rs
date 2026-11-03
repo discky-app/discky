@@ -87,6 +87,31 @@ pub fn home_relative(p: &Path, home: &Path) -> String {
     }
 }
 
+/// `n` with thousands separators ("1,234,567").
+pub fn count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    out
+}
+
+/// `s` cut from the left to at most `max` characters, the cut marked by a leading "…"
+/// ("…/Caches/foo"); `s` itself when it fits.
+pub fn shorten_left(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let tail: String = s.chars().skip(len - keep).collect();
+    format!("…{tail}")
+}
+
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -129,6 +154,25 @@ fn format_when(t: &Tm, current_year: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_groups_thousands() {
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1_000), "1,000");
+        assert_eq!(count(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn shorten_left_keeps_the_tail() {
+        assert_eq!(shorten_left("~/Library", 60), "~/Library");
+        let long = format!("~/{}", "a".repeat(80));
+        let s = shorten_left(&long, 60);
+        assert_eq!(s.chars().count(), 60);
+        assert!(s.starts_with('…'));
+        assert!(long.ends_with(&s[s.char_indices().nth(1).map_or(0, |(i, _)| i)..]));
+        assert_eq!(shorten_left("абвгд", 3), "…гд");
+    }
 
     #[test]
     fn bytes_decimal_like_finder() {

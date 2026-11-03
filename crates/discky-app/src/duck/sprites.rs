@@ -72,6 +72,24 @@ pub fn color(ch: char) -> Option<[u8; 4]> {
         .map(|(_, rgba)| *rgba)
 }
 
+/// `sprite` as RGBA pixels, each sprite pixel repeated `scale` x `scale` times:
+/// `(w * scale) * (h * scale)` entries, row-major, `None` where transparent.
+/// At scale 1 this is the colour grid the renderer paints one quad per entry from.
+pub fn rasterize(sprite: &Sprite, scale: usize) -> Vec<Option<[u8; 4]>> {
+    let w = sprite.w * scale;
+    let mut out = Vec::with_capacity(w * sprite.h * scale);
+    for row in sprite.rows {
+        let line: Vec<Option<[u8; 4]>> = row
+            .chars()
+            .flat_map(|c| std::iter::repeat_n(color(c), scale))
+            .collect();
+        for _ in 0..scale {
+            out.extend_from_slice(&line);
+        }
+    }
+    out
+}
+
 /// Idle: eyes open, then a blink with a one-pixel bob.
 static IDLE: [Sprite; 2] = [
     Sprite {
@@ -678,6 +696,31 @@ pub const LOGO: Sprite = Sprite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rasterize_walk_frame_at_scale_two() {
+        let walk = &frames(Pose::Walk)[0];
+        let px = rasterize(walk, 2);
+        assert_eq!(px.len(), walk.w * 2 * walk.h * 2);
+        let opaque = walk
+            .rows
+            .iter()
+            .flat_map(|r| r.chars())
+            .filter(|&c| color(c).is_some())
+            .count();
+        assert!(opaque > 0);
+        assert_eq!(px.iter().filter(|p| p.is_some()).count(), 4 * opaque);
+        // Row-major and scaled: the top-left 2x2 block is sprite pixel (0, 0).
+        let w2 = walk.w * 2;
+        let first = walk.rows[0].chars().next().and_then(color);
+        assert_eq!(px[0], first);
+        assert_eq!(px[1], first);
+        assert_eq!(px[w2], first);
+        assert_eq!(px[w2 + 1], first);
+        // Sprite pixel (10, 0) is the antenna tip 'c'.
+        assert_eq!(px[20], color('c'));
+        assert_eq!(px[w2 + 21], color('c'));
+    }
 
     fn all_sprites() -> Vec<(&'static str, &'static Sprite)> {
         let mut out = Vec::new();
