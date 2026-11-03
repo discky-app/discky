@@ -319,13 +319,16 @@ impl RemovalModel {
 }
 
 /// The row for a planned step, with its notes: flags ("Needs an administrator password"
-/// — not for a Quit step, which only asks the app —, "Permanent", "Tool not installed:
+/// — not for a Quit step, which only asks the app —, [`GUI_ONLY_NOTE`], "Permanent", "Tool not installed:
 /// <hint>"), then the freed note, then the remaining warnings.
 fn row(step: &Step, titles: &FindingTitles) -> StepRow {
     let mut notes = Vec::new();
     let quit = matches!(step.kind, StepKind::Quit { .. });
     if step.flags.contains(StepFlags::INTERACTIVE) && !quit {
         notes.push("Needs an administrator password".to_string());
+    }
+    if step.flags.contains(StepFlags::GUI_ONLY) {
+        notes.push(GUI_ONLY_NOTE.to_string());
     }
     if step.flags.contains(StepFlags::PERMANENT) {
         notes.push("Permanent".to_string());
@@ -414,6 +417,10 @@ pub fn run_only_steps(plan: &Plan, trash_overridden: bool) -> Option<Vec<usize>>
 /// Shown in the dialog when the trash binary is overridden.
 pub const OVERRIDE_NOTE: &str =
     "Trash bin overridden (DISCKY_TRASH_BIN): command steps are skipped";
+
+/// The note on a `GUI_ONLY` step (a vendor uninstaller script).
+pub const GUI_ONLY_NOTE: &str =
+    "Runs the vendor's uninstaller as you; it may ask for a password itself";
 
 /// The reason on the row of a step the dev override left out.
 pub const OVERRIDE_SKIPPED_REASON: &str = "skipped (dev override)";

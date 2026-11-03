@@ -27,6 +27,12 @@ pub fn command_lines(plan: &Plan) -> Vec<CommandLine> {
         if step.flags.contains(StepFlags::INTERACTIVE) {
             notes.push("needs administrator password".to_string());
         }
+        if step.flags.contains(StepFlags::GUI_ONLY) {
+            notes.push(
+                "runs the vendor's uninstaller as you; it may ask for a password itself"
+                    .to_string(),
+            );
+        }
         if step.flags.contains(StepFlags::PERMANENT) {
             notes.push("permanent".to_string());
         }

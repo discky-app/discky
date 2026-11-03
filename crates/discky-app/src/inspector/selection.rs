@@ -292,24 +292,26 @@ mod tests {
 
     #[test]
     fn own_uninstaller_script_is_checkable() {
+        // Opt-in: not pre-checked.
         let mut script = comp(
             ComponentKind::OwnUninstaller,
             0,
-            true,
+            false,
             ComponentRemoval::RunScript,
         );
-        script.note = Some("runs the vendor's uninstaller; may ask for a password".into());
+        script.note =
+            Some("runs the vendor's uninstaller as you; it may ask for a password itself".into());
         let parts = vec![
             comp(ComponentKind::AppBundle, 100, true, ComponentRemoval::Trash),
             script,
         ];
         let mut s = ComponentSelection::from_components(&parts);
-        assert!(s.is_on(1));
-        assert!(s.toggle(1, &parts));
         assert!(!s.is_on(1));
+        assert!(s.toggle(1, &parts));
+        assert!(s.is_on(1));
         assert_eq!(
             component_note(&parts[1]).as_deref(),
-            Some("runs the vendor's uninstaller; may ask for a password")
+            Some("runs the vendor's uninstaller as you; it may ask for a password itself")
         );
     }
 
