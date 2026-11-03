@@ -5,10 +5,11 @@ use discky_core::{
     Config, RemovalMode,
     findings::{Finding, FindingId, Removal},
     fs::walk::{ScanOptions, walk},
+    index::NodeFlags,
     index::snapshot::{Actor, SNAPSHOT_FORMAT, Snapshot, SnapshotMeta},
     plan::{
-        NOT_IN_SNAPSHOT, PATH_ID_PREFIX, PROTECTED_REFUSED, ROOT_REFUSED, StepFlags, StepKind,
-        is_protected, managed_by, plan_paths_in,
+        CLOUD_REFUSED, NOT_IN_SNAPSHOT, PATH_ID_PREFIX, PROTECTED_REFUSED, ROOT_REFUSED, StepFlags,
+        StepKind, is_protected, managed_by, plan_paths_in,
     },
     rules::{Category, SafetyLabel},
 };
@@ -226,4 +227,158 @@ fn is_protected_matches_exact_and_descendants_only() {
     assert!(is_protected(Path::new("/System/Library"), h));
     assert!(is_protected(Path::new("/Library/Keychains/x"), h));
     assert!(!is_protected(Path::new("/Library/Caches"), h));
+}
+
+#[test]
+fn unknown_home_protects_everything() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("a");
+    touch(&a, 10);
+    let s = snap(d.path());
+    for home in [Path::new(""), Path::new("rel")] {
+        assert!(is_protected(&a, home));
+        let plan = plan_paths_in(std::slice::from_ref(&a), &s, &Config::default(), home);
+        assert!(plan.steps.is_empty());
+        assert_eq!(skipped_reason(&plan, &a), PROTECTED_REFUSED);
+    }
+}
+
+/// Snapshot of `root` with `flag` set on the node of every path in `marked`.
+fn snap_flagged(root: &Path, marked: &[&Path], flag: NodeFlags) -> Snapshot {
+    let mut s = snap(root);
+    let ids: Vec<_> = marked.iter().map(|p| s.index.find(p).unwrap()).collect();
+    let index = std::sync::Arc::get_mut(&mut s.index).unwrap();
+    for id in ids {
+        index.nodes[id.0 as usize].flags |= flag;
+    }
+    s
+}
+
+#[test]
+fn dataless_is_refused_and_beats_protected() {
+    let d = tempfile::tempdir().unwrap();
+    let cloud = d.path().join("docs/big.bin");
+    let kc = d.path().join("Library/Keychains/k");
+    touch(&cloud, 10);
+    touch(&kc, 10);
+    let s = snap_flagged(d.path(), &[&cloud, &kc], NodeFlags::DATALESS);
+    let plan = plan_paths_in(
+        &[cloud.clone(), kc.clone()],
+        &s,
+        &Config::default(),
+        d.path(),
+    );
+    assert!(plan.steps.is_empty());
+    assert_eq!(skipped_reason(&plan, &cloud), CLOUD_REFUSED);
+    assert_eq!(skipped_reason(&plan, &kc), CLOUD_REFUSED);
+}
+
+#[test]
+fn root_beats_protected() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Library");
+    touch(&lib.join("x"), 10);
+    let s = snap(&lib);
+    let plan = plan_paths_in(std::slice::from_ref(&lib), &s, &Config::default(), d.path());
+    assert_eq!(skipped_reason(&plan, &lib), ROOT_REFUSED);
+}
+
+#[test]
+fn protected_beats_managed() {
+    let d = tempfile::tempdir().unwrap();
+    let lib = d.path().join("Library");
+    let inner = lib.join("Keychains/k");
+    touch(&inner, 10);
+    let mut s = snap(d.path());
+    let f = finding(&s, Category::DevCaches, &lib, command());
+    s.findings.push(f);
+    let plan = plan_paths_in(
+        std::slice::from_ref(&inner),
+        &s,
+        &Config::default(),
+        d.path(),
+    );
+    assert_eq!(skipped_reason(&plan, &inner), PROTECTED_REFUSED);
+}
+
+#[test]
+fn refuses_ancestors_of_managed_findings() {
+    let d = tempfile::tempdir().unwrap();
+    let reg = d.path().join(".cargo/registry");
+    touch(&reg.join("cache/x"), 10);
+    let mut s = snap(d.path());
+    let f = finding(&s, Category::DevCaches, &reg, command());
+    s.findings.push(f);
+    let cargo = d.path().join(".cargo");
+    let plan = plan_paths_in(
+        std::slice::from_ref(&cargo),
+        &s,
+        &Config::default(),
+        d.path(),
+    );
+    assert_eq!(
+        skipped_reason(&plan, &cargo),
+        managed_by(Category::DevCaches)
+    );
+}
+
+#[test]
+fn refuses_ancestors_of_protected_locations() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("Users/me");
+    touch(&home.join("Library/Caches/x"), 10);
+    touch(&d.path().join("Other/y"), 10);
+    let s = snap(d.path());
+    let users = d.path().join("Users");
+    let other = d.path().join("Other");
+    let plan = plan_paths_in(
+        &[users.clone(), other.clone()],
+        &s,
+        &Config::default(),
+        &home,
+    );
+    assert_eq!(skipped_reason(&plan, &users), PROTECTED_REFUSED);
+    assert_eq!(plan.steps.len(), 1);
+    assert!(matches!(&plan.steps[0].kind, StepKind::Trash { paths } if paths == &[other]));
+}
+
+#[test]
+fn directory_step_credits_agg_private() {
+    let d = tempfile::tempdir().unwrap();
+    touch(&d.path().join("dir/a"), 5000);
+    touch(&d.path().join("dir/b"), 5000);
+    let s = snap(d.path());
+    let dir = d.path().join("dir");
+    let plan = plan_paths_in(std::slice::from_ref(&dir), &s, &Config::default(), d.path());
+    let want = s.index.node(s.index.find(&dir).unwrap()).agg_private;
+    assert!(want >= 10000);
+    assert_eq!(plan.steps[0].freed, Some(want));
+}
+
+#[test]
+fn admin_path_step_is_interactive() {
+    // The system log dir is root-owned on macOS, so removing a child needs an admin.
+    let sys = Path::new("/Library/Logs");
+    let Some(child) = fs::read_dir(sys)
+        .ok()
+        .and_then(|mut it| it.find_map(|e| e.ok()))
+        .map(|e| e.path())
+    else {
+        return;
+    };
+    let s = snap(sys);
+    let home = tempfile::tempdir().unwrap();
+    let plan = plan_paths_in(&[child], &s, &Config::default(), home.path());
+    assert_eq!(plan.steps.len(), 1, "{:?}", plan.skipped);
+    assert!(plan.steps[0].flags.contains(StepFlags::INTERACTIVE));
+}
+
+fn command() -> Removal {
+    Removal::Command {
+        tool: "tool".into(),
+        argv: vec!["tool".into(), "clean".into()],
+        cwd: None,
+        install_hint: None,
+        freed_note: None,
+    }
 }

@@ -653,8 +653,12 @@ pub fn managed_by(category: Category) -> String {
 
 /// Whether `path` is a location the disk map never removes: `home/Library` itself,
 /// anything under `home/Library/{Keychains, Mobile Documents, CloudStorage, Preferences}`,
-/// `/Library/Keychains` or `/System`.
+/// `/Library/Keychains` or `/System`. Fails closed: a `home` that is not absolute (unknown)
+/// protects everything.
 pub fn is_protected(path: &Path, home: &Path) -> bool {
+    if !home.is_absolute() {
+        return true;
+    }
     let lib = home.join("Library");
     path == lib
         || [
@@ -669,10 +673,23 @@ pub fn is_protected(path: &Path, home: &Path) -> bool {
         || path.starts_with("/System")
 }
 
+/// Whether `path` strictly contains a protected location (removing it would take that
+/// location with it): `home/Library`, `/Library/Keychains` or `/System`.
+fn contains_protected(path: &Path, home: &Path) -> bool {
+    [
+        home.join("Library"),
+        PathBuf::from("/Library/Keychains"),
+        PathBuf::from("/System"),
+    ]
+    .iter()
+    .any(|prot| prot != path && prot.starts_with(path))
+}
+
 /// Plan the removal of arbitrary `paths` of the snapshot (disk map tiles), one step each
 /// by `cfg.removal.mode`. A path is refused, with the reason in [`Plan::skipped`], when it
-/// is not in the snapshot, is a scan root, is dataless, is protected ([`is_protected`]),
-/// or lies in a finding whose removal is not a plain trash (first failing rule wins).
+/// is not in the snapshot, is a scan root, is dataless, is protected ([`is_protected`]) or
+/// contains a protected location, or lies in or contains a finding whose removal is not a
+/// plain trash (first failing rule wins).
 /// Repeated paths count once, at the first position.
 pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Path) -> Plan {
     let nf = NodeFindings::build(snap);
@@ -698,7 +715,7 @@ pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Pa
             if n.flags.contains(NodeFlags::DATALESS) {
                 return Err(CLOUD_REFUSED.to_string());
             }
-            if is_protected(p, home) {
+            if is_protected(p, home) || contains_protected(p, home) {
                 return Err(PROTECTED_REFUSED.to_string());
             }
             if let Some(i) = nf.owner(index, node) {
@@ -706,6 +723,16 @@ pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Pa
                 if !matches!(f.removal, Removal::Trash { .. }) {
                     return Err(managed_by(f.category));
                 }
+            }
+            let contained = snap.findings.iter().find(|f| {
+                !matches!(f.removal, Removal::Trash { .. })
+                    && f.node.is_some_and(|fnode| {
+                        std::iter::successors(index.node(fnode).parent, |&a| index.node(a).parent)
+                            .any(|a| a == node)
+                    })
+            });
+            if let Some(f) = contained {
+                return Err(managed_by(f.category));
             }
             Ok(if n.kind == ObjKind::Dir {
                 n.agg_private

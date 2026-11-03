@@ -33,6 +33,8 @@ pub const TRASH_BIN: &str = "/usr/bin/trash";
 pub enum EngineError {
     #[error("no snapshot yet: run a scan first")]
     NoSnapshot,
+    #[error("the home directory is unknown (HOME is not set)")]
+    NoHome,
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
@@ -466,7 +468,9 @@ impl Engine {
         paths: &[PathBuf],
     ) -> Result<(Plan, Arc<Snapshot>), EngineError> {
         let snap = self.snapshot().ok_or(EngineError::NoSnapshot)?;
-        let home = crate::paths::home_dir().unwrap_or_default();
+        let home = crate::paths::home_dir()
+            .filter(|h| h.is_absolute())
+            .ok_or(EngineError::NoHome)?;
         let plan = plan::plan_paths_in(paths, &snap, &self.config(), &home);
         let mut plans = lock(&self.plans);
         plans.push_back(plan.clone());

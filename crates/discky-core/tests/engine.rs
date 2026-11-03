@@ -476,3 +476,45 @@ fn joining_running_scan_delivers_current_progress() {
         Some(ScanEvent::Finished(ScanStatus::Done { .. }))
     ));
 }
+
+#[test]
+fn plan_paths_needs_a_snapshot_and_a_home() {
+    let d = tempfile::tempdir().unwrap();
+    let e = temp_engine(&d);
+    let p = d.path().join("tree/x");
+    assert!(matches!(
+        e.plan_paths(std::slice::from_ref(&p)),
+        Err(discky_core::EngineError::NoSnapshot)
+    ));
+    let id = e.start_scan(None);
+    e.wait_scan(&id, Duration::from_secs(30));
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let saved = std::env::var_os("HOME");
+    unsafe { std::env::remove_var("HOME") };
+    let r = e.plan_paths(std::slice::from_ref(&p));
+    if let Some(h) = saved {
+        unsafe { std::env::set_var("HOME", h) };
+    }
+    assert!(matches!(r, Err(discky_core::EngineError::NoHome)));
+}
+
+#[test]
+fn plan_paths_keeps_the_plan_and_bounds_history() {
+    let d = tempfile::tempdir().unwrap();
+    let e = temp_engine(&d);
+    let id = e.start_scan(None);
+    e.wait_scan(&id, Duration::from_secs(30));
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe { std::env::set_var("HOME", std::env::temp_dir()) };
+    let p = d.path().join("tree/proj/Cargo.toml");
+    let (first, snap) = e
+        .plan_paths_with_snapshot(std::slice::from_ref(&p))
+        .unwrap();
+    assert_eq!(first.steps.len(), 1, "{:?}", first.skipped);
+    assert!(snap.index.find(&p).is_some());
+    assert_eq!(e.get_plan(&first.id).unwrap().id, first.id);
+    for _ in 0..25 {
+        e.plan_paths(std::slice::from_ref(&p)).unwrap();
+    }
+    assert!(e.get_plan(&first.id).is_none());
+}
