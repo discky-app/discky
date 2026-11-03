@@ -177,6 +177,16 @@ mod tests {
     }
 
     #[test]
+    fn plist_explains_apple_events() {
+        let text = render_plist(PLIST_TEMPLATE, "1.2.3");
+        assert!(text.contains(
+            "<key>NSAppleEventsUsageDescription</key>\n\t<string>Discky asks Finder to move \
+             admin-owned items to the Trash and asks apps to quit before their caches are \
+             removed.</string>"
+        ));
+    }
+
+    #[test]
     fn picks_first_stable_identity_by_hash() {
         let listing = "  1) AAAA \"Apple Distribution: X (T)\"\n  2) BBBB \"Apple Development: me@x (KYV)\"\n  3) CCCC \"Developer ID Application: Me (T)\"\n     3 valid identities found\n";
         assert_eq!(

@@ -20,6 +20,12 @@ Signing needs a stable identity, so that Full Disk Access survives rebuilds (mac
 
 **Full Disk Access.** Without it macOS hides parts of `~/Library` (Mail, Safari, other apps' containers) from the scan. Grant it in System Settings → Privacy & Security → Full Disk Access (add Discky with `+`), then rescan.
 
+**Automation prompt.** Some removals go through Apple Events: Finder moves admin-owned items to the Trash, apps are asked to quit before their caches are removed, and Empty Trash asks Finder. The first time, macOS asks whether Discky may control Finder (or that app); allow it, or those steps fail. The choice can be changed in System Settings → Privacy & Security → Automation.
+
+**Quitting during a removal.** ⌘Q and closing the window wait until a running removal finishes. Quitting from the Dock or logging out during a removal interrupts it; the removal log records the interrupted step (`"kind": "interrupted"`), and the next scan shows what is left.
+
+**Upgrading from Milestone 1.** The snapshot format changed: an old `snapshot.bin` (format 1) is ignored, so the first launch shows "No scan yet" until you rescan. Build `discky-mcp` and Discky.app from the same milestone; they share the snapshot file, and each ignores a snapshot in the other's format.
+
 ## Install the MCP server
 
 From source (Rust toolchain required):
@@ -199,6 +205,8 @@ Debug builds of the app read a few `DISCKY_START_*` variables so a screen can be
 ```sh
 DISCKY_START_ROUTE=dev_caches cargo run -p discky-app
 ```
+
+Three removal routes use Apple Events from child `osascript` processes: the Finder Trash route for admin-owned items, Quit steps, and Empty Trash. macOS grants Automation to the signed bundle, not to `cargo run`, so check all three on the signed `Discky.app` (`cargo xtask bundle`) after changing them or `packaging/macos/Info.plist` (`NSAppleEventsUsageDescription`).
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty.
 
