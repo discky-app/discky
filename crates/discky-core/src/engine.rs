@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::config::{Config, ConfigError};
-use crate::findings::Finding;
+use crate::findings::{Finding, app_caches};
 use crate::history::{self, HistoryRecord};
 use crate::index::snapshot::{Actor, Snapshot, SnapshotError, SnapshotMeta};
 use crate::paths::DisckyPaths;
@@ -101,6 +101,20 @@ pub struct Engine {
 
 fn _assert_send_sync<T: Send + Sync>() {}
 const _: fn() = _assert_send_sync::<Engine>;
+
+/// App name for `~/Library/<container>/<dir>` (a container known to `app_caches`).
+fn library_owner(path: &Path) -> Option<String> {
+    let dir = path.file_name()?.to_str()?;
+    let parent = path.parent()?;
+    let container = parent.file_name()?.to_str()?;
+    if parent.parent()?.file_name()? != "Library" {
+        return None;
+    }
+    app_caches::PARENTS
+        .iter()
+        .any(|p| p.0 == container)
+        .then(|| app_caches::owner_of(container, dir).app_name)
+}
 
 impl Engine {
     /// [`Engine::open_with`] with [`EngineOptions::resolve`] (reads `DISCKY_HOME` and
@@ -378,7 +392,8 @@ impl Engine {
         });
         let owner_app = finding
             .filter(|f| f.category == Category::AppCaches)
-            .map(|f| f.title.clone());
+            .map(|f| f.title.clone())
+            .or_else(|| library_owner(path.as_deref()?));
         Some(Inspection {
             finding: finding.cloned(),
             entry,

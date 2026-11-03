@@ -240,6 +240,58 @@ fn finding_ids(snap: &Snapshot) -> HashMap<NodeId, FindingId> {
         .collect()
 }
 
+/// Node → owning finding (index into `Snapshot::findings`), for colouring and linking
+/// disk-map tiles.
+#[derive(Debug, Clone, Default)]
+pub struct NodeFindings {
+    by_node: HashMap<NodeId, usize>,
+}
+
+impl NodeFindings {
+    /// Every finding with `node` → that node; every component with a `path` (leftover
+    /// groups, app leftovers, receipts) → `index.find(path)` when it resolves. Earlier
+    /// findings win on a collision.
+    pub fn build(snap: &Snapshot) -> NodeFindings {
+        let mut by_node = HashMap::new();
+        for (i, f) in snap.findings.iter().enumerate() {
+            if let Some(n) = f.node {
+                by_node.entry(n).or_insert(i);
+            }
+            for p in f.components.iter().filter_map(|c| c.path.as_deref()) {
+                if let Some(n) = snap.index.find(p) {
+                    by_node.entry(n).or_insert(i);
+                }
+            }
+        }
+        NodeFindings { by_node }
+    }
+
+    /// The finding owning `id`: its own entry, else the nearest ancestor's.
+    pub fn owner(&self, index: &Index, id: NodeId) -> Option<usize> {
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            if let Some(&i) = self.by_node.get(&n) {
+                return Some(i);
+            }
+            cur = index.node(n).parent;
+        }
+        None
+    }
+
+    /// Direct entry only (the tile *is* the finding's node).
+    pub fn direct(&self, id: NodeId) -> Option<usize> {
+        self.by_node.get(&id).copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_node.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_node.is_empty()
+    }
+}
+
 fn flag_names(flags: NodeFlags) -> Vec<String> {
     [
         (NodeFlags::SPARSE, "sparse"),

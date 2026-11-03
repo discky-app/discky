@@ -12,7 +12,7 @@ use super::{Finding, node_finding};
 const MIB: u64 = 1024 * 1024;
 
 /// `(parent dir under ~/Library, label, explanation)`.
-const PARENTS: [(&str, SafetyLabel, &str); 8] = [
+pub const PARENTS: [(&str, SafetyLabel, &str); 8] = [
     (
         "Caches",
         SafetyLabel::Regenerates,
