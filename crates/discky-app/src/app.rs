@@ -27,6 +27,7 @@ use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
 use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent};
 use crate::overview::OverviewView;
+use crate::removal::model::{BUSY_MESSAGE, RunFlag};
 use crate::removal::{self, RemovalDialog, RemovalEvent};
 use crate::scan::{ScanController, ScanMsg};
 use crate::sidebar;
@@ -59,6 +60,8 @@ pub const CATEGORY_TABLE_CONTEXT: &str = "CategoryTable";
 /// Global application state shared by every view.
 pub struct AppState {
     pub engine: Arc<Engine>,
+    /// Set while a removal plan executes; closing the window and quitting wait for it.
+    pub removal_running: RunFlag,
 }
 
 impl Global for AppState {}
@@ -570,7 +573,7 @@ fn install_actions(cx: &mut App) {
         KeyBinding::new("backspace", RemoveSelected, Some(CATEGORY_TABLE_CONTEXT)),
         KeyBinding::new("escape", CloseInspector, Some(INSPECTOR_CONTEXT)),
     ]);
-    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    cx.on_action(|_: &Quit, cx: &mut App| quit(cx));
     // Also handled on the main view's root; this one serves the menu with nothing focused.
     cx.on_action(|_: &Rescan, cx: &mut App| start_scan(cx));
     cx.set_menus([
@@ -594,6 +597,26 @@ fn install_actions(cx: &mut App) {
         // AppKit fills a menu named "Window" with the standard window items.
         Menu::new("Window"),
     ]);
+}
+
+/// Whether a removal plan is executing right now.
+fn removal_running(cx: &App) -> bool {
+    cx.try_global::<AppState>()
+        .is_some_and(|s| s.removal_running.is_running())
+}
+
+/// Quit, unless a removal is running: then say so in the active window and stay, so a
+/// step (a permanent delete, a cross-volume move, a tool) is never cut off part-way.
+fn quit(cx: &mut App) {
+    if !removal_running(cx) {
+        cx.quit();
+        return;
+    }
+    if let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) {
+        let _ = window.update(cx, |_, window, cx| {
+            window.push_notification(Notification::warning(BUSY_MESSAGE), cx);
+        });
+    }
 }
 
 /// How Discky was started.
@@ -630,7 +653,10 @@ fn window_options(
 
 /// Make `engine` the global state and open the main window.
 fn open_main_window(engine: Arc<Engine>, launch: Launch, cx: &mut App) {
-    cx.set_global(AppState { engine });
+    cx.set_global(AppState {
+        engine,
+        removal_running: RunFlag::default(),
+    });
     let scan = cx.new(ScanController::new);
     cx.set_global(MainScan(scan));
     let options = window_options(
@@ -643,9 +669,23 @@ fn open_main_window(engine: Arc<Engine>, launch: Launch, cx: &mut App) {
         Theme::sync_system_appearance(Some(window), cx);
         cx.new(|cx| AppView::new(window, cx))
     });
-    if let Err(e) = opened {
-        eprintln!("Discky cannot open its window: {e}");
-        cx.quit();
+    match opened {
+        // Closing the window quits the app; refuse while a removal is running.
+        Ok((handle, _)) => {
+            let _ = handle.update(cx, |_, window, cx| {
+                window.on_window_should_close(cx, |window, cx| {
+                    if removal_running(cx) {
+                        window.push_notification(Notification::warning(BUSY_MESSAGE), cx);
+                        return false;
+                    }
+                    true
+                });
+            });
+        }
+        Err(e) => {
+            eprintln!("Discky cannot open its window: {e}");
+            cx.quit();
+        }
     }
 }
 

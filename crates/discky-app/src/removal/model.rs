@@ -2,6 +2,8 @@
 //! statuses while the plan runs, and the result.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use discky_core::plan::execute::{
     ExecuteError, ExecutionReport, StepEvent, StepResult, StepStatus,
@@ -298,9 +300,51 @@ fn row(step: &Step) -> StepRow {
     }
 }
 
+/// Whether "Empty Trash" is offered after a run: something went to the Trash, the
+/// reminder is on, and Trash steps used the real Trash (with `DISCKY_TRASH_BIN` set the
+/// items are elsewhere, and emptying the real Trash would touch the user's data).
+pub fn show_empty_trash(trashed: u64, remind_trash: bool, trash_overridden: bool) -> bool {
+    trashed > 0 && remind_trash && !trash_overridden
+}
+
+/// Shown instead of "Empty Trash" when the trash binary is overridden.
+pub const TRASH_OVERRIDDEN_NOTE: &str =
+    "Trash bin overridden (DISCKY_TRASH_BIN); Empty Trash disabled";
+
+/// Why closing the window or quitting is refused while a plan runs.
+pub const BUSY_MESSAGE: &str = "A removal is running; wait for it to finish before closing";
+
+/// App-wide "a removal is running" flag; quitting and closing the window are refused
+/// while it is set, so a step is never cut off part-way.
+#[derive(Clone, Debug, Default)]
+pub struct RunFlag(Arc<AtomicBool>);
+
+impl RunFlag {
+    /// A plan is executing.
+    pub fn is_running(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// Mark a run as started; the flag clears when the returned token is dropped.
+    pub fn start(&self) -> RunToken {
+        self.0.store(true, Ordering::SeqCst);
+        RunToken(self.0.clone())
+    }
+}
+
+/// Held for the length of a run; dropping it clears its [`RunFlag`].
+#[derive(Debug)]
+pub struct RunToken(Arc<AtomicBool>);
+
+impl Drop for RunToken {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Phase, RemovalModel, RowStatus, Summary};
+    use super::{Phase, RemovalModel, RowStatus, RunFlag, Summary, show_empty_trash};
     use discky_core::findings::FindingId;
     use discky_core::plan::execute::{
         ExecuteError, ExecutionReport, StepEvent, StepResult, StepStatus,
@@ -577,5 +621,25 @@ mod tests {
             m.stop_message().as_deref(),
             Some("Stopped at step 2: Finder refused")
         );
+    }
+
+    #[test]
+    fn empty_trash_hidden_when_trash_bin_overridden() {
+        assert!(show_empty_trash(5, true, false));
+        assert!(!show_empty_trash(5, true, true));
+        assert!(!show_empty_trash(0, true, false));
+        assert!(!show_empty_trash(5, false, false));
+    }
+
+    #[test]
+    fn run_flag_clears_when_token_drops() {
+        let flag = RunFlag::default();
+        assert!(!flag.is_running());
+        let token = flag.start();
+        let shared = flag.clone();
+        assert!(shared.is_running());
+        drop(token);
+        assert!(!flag.is_running());
+        assert!(!shared.is_running());
     }
 }

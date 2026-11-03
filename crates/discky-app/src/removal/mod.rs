@@ -22,7 +22,9 @@ use gpui_kit::*;
 
 use crate::app::AppState;
 use crate::format;
-use model::{Phase, RemovalModel, RowStatus, StepRow};
+use model::{
+    Phase, RemovalModel, RowStatus, RunToken, StepRow, TRASH_OVERRIDDEN_NOTE, show_empty_trash,
+};
 
 /// Width of the dialog.
 const DIALOG_WIDTH: f32 = 640.;
@@ -46,6 +48,11 @@ pub struct RemovalDialog {
     home: PathBuf,
     /// "Empty Trash" is running.
     emptying: bool,
+    /// Trash steps run a `DISCKY_TRASH_BIN` override, not the system `trash`: no
+    /// "Empty Trash".
+    trash_overridden: bool,
+    /// Held while the plan executes; sets the app-wide [`model::RunFlag`].
+    running: Option<RunToken>,
     /// The running plan request; replacing it drops a stale result.
     _plan: Task<()>,
     /// Feeds step events and the result of a run into `model`.
@@ -76,11 +83,16 @@ pub fn open(ids: Vec<String>, window: &mut Window, cx: &mut App) -> Entity<Remov
 
 impl RemovalDialog {
     fn new(ids: Vec<String>, cx: &mut Context<Self>) -> Self {
-        let cfg = cx.global::<AppState>().engine.config();
+        let engine = cx.global::<AppState>().engine.clone();
+        let cfg = engine.config();
+        let trash_overridden =
+            engine.trash_bin() != std::path::Path::new(discky_core::engine::TRASH_BIN);
         let mut dialog = RemovalDialog {
             model: RemovalModel::planning(ids, &cfg),
             home: discky_core::paths::home_dir().unwrap_or_default(),
             emptying: false,
+            trash_overridden,
+            running: None,
             _plan: Task::ready(()),
             _pump: Task::ready(()),
             _empty_trash: Task::ready(()),
@@ -165,6 +177,7 @@ impl RemovalDialog {
             return;
         }
         self.model.start();
+        self.running = Some(cx.global::<AppState>().removal_running.start());
         self._pump = cx.spawn_in(window, async move |this, cx| {
             // The event channel closes when the run ends and drops the sink.
             while let Ok(ev) = ev_rx.recv().await {
@@ -200,6 +213,7 @@ impl RemovalDialog {
         cx: &mut Context<Self>,
     ) {
         self.model.finish(result);
+        self.running = None;
         if let Some(msg) = self.model.freed_message() {
             window.push_notification(Notification::success(msg), cx);
         }
@@ -244,6 +258,7 @@ impl RemovalDialog {
     /// The footer for the current phase: a muted log note and the phase's buttons.
     fn footer(&self, view: &Entity<Self>, cx: &App) -> impl IntoElement + use<> {
         let muted = cx.theme().muted_foreground;
+        let mut note = "Command output is written to the log";
         let close = || {
             Button::new("removal-close")
                 .label("Close")
@@ -277,7 +292,15 @@ impl RemovalDialog {
                         .on_click(move |_, _, cx| cx.reveal_path(&log))
                         .into_any_element(),
                 ];
-                if summary.trashed > 0 && self.model.remind_trash {
+                let offer = summary.trashed > 0 && self.model.remind_trash;
+                if offer && self.trash_overridden {
+                    note = TRASH_OVERRIDDEN_NOTE;
+                }
+                if show_empty_trash(
+                    summary.trashed,
+                    self.model.remind_trash,
+                    self.trash_overridden,
+                ) {
                     let v = view.clone();
                     buttons.push(
                         Button::new("removal-empty-trash")
@@ -309,13 +332,7 @@ impl RemovalDialog {
             .w_full()
             .gap_2()
             .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("Command output is written to the log"),
-            )
+            .child(div().flex_1().text_xs().text_color(muted).child(note))
             .children(buttons)
     }
 
