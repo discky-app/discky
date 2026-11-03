@@ -422,7 +422,8 @@ pub fn find_with(
     out
 }
 
-/// A `Project` component shown with the version, never acted on.
+/// A `Project` component shown with the version, never acted on. Titles name the file
+/// (`requested by .node-version`, `requested by ~/.config/mise/config.toml (global)`).
 fn project(title: String, path: &Path, note: Option<&str>) -> Component {
     Component {
         kind: ComponentKind::Project,
@@ -454,10 +455,18 @@ fn version_finding(
     node: Option<NodeId>,
     home: &Path,
 ) -> Finding {
+    let global = home.join(GLOBAL_CONFIG);
     let mut components: Vec<Component> = v
         .sources
         .iter()
-        .map(|s| project(format!("requested by {}", s.kind), &s.path, None))
+        .map(|s| {
+            let title = if s.path == global {
+                format!("requested by ~/{GLOBAL_CONFIG} (global)")
+            } else {
+                format!("requested by {}", file_label(&s.path))
+            };
+            project(title, &s.path, None)
+        })
         .collect();
     let mut n_untracked = 0;
     for (path, tool, req) in untracked {

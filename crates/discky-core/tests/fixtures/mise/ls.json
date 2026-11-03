@@ -2,36 +2,36 @@
   "node": [
     {
       "version": "19.9.0",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/node/19.9.0",
+      "install_path": "/Users/me/.local/share/mise/installs/node/19.9.0",
       "installed": true,
       "active": false
     },
     {
       "version": "20.11.0",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/node/20.11.0",
+      "install_path": "/Users/me/.local/share/mise/installs/node/20.11.0",
       "installed": true,
       "active": false
     },
     {
       "version": "22.16.0",
       "requested_version": "22.16.0",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/node/22.16.0",
+      "install_path": "/Users/me/.local/share/mise/installs/node/22.16.0",
       "source": {
         "type": "mise.toml",
-        "path": "/Users/alxgol/.config/mise/config.toml"
+        "path": "/Users/me/.config/mise/config.toml"
       },
       "installed": true,
       "active": true
     },
     {
       "version": "24.18.1",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/node/24.18.1",
+      "install_path": "/Users/me/.local/share/mise/installs/node/24.18.1",
       "installed": true,
       "active": false
     },
     {
       "version": "25.8.2",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/node/25.8.2",
+      "install_path": "/Users/me/.local/share/mise/installs/node/25.8.2",
       "installed": true,
       "active": false
     }
@@ -40,10 +40,10 @@
     {
       "version": "12.15.0",
       "requested_version": "latest",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/pnpm/12.15.0",
+      "install_path": "/Users/me/.local/share/mise/installs/pnpm/12.15.0",
       "source": {
         "type": "mise.toml",
-        "path": "/Users/alxgol/.config/mise/config.toml"
+        "path": "/Users/me/.config/mise/config.toml"
       },
       "installed": true,
       "active": true
@@ -53,10 +53,10 @@
     {
       "version": "3.12.15",
       "requested_version": "3.12",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/python/3.12.15",
+      "install_path": "/Users/me/.local/share/mise/installs/python/3.12.15",
       "source": {
         "type": "mise.toml",
-        "path": "/Users/alxgol/.config/mise/config.toml"
+        "path": "/Users/me/.config/mise/config.toml"
       },
       "installed": true,
       "active": true
@@ -66,10 +66,10 @@
     {
       "version": "3.4.12",
       "requested_version": "3.4.12",
-      "install_path": "/Users/alxgol/.local/share/mise/installs/ruby/3.4.12",
+      "install_path": "/Users/me/.local/share/mise/installs/ruby/3.4.12",
       "source": {
         "type": "mise.toml",
-        "path": "/Users/alxgol/.config/mise/config.toml"
+        "path": "/Users/me/.config/mise/config.toml"
       },
       "installed": true,
       "active": true

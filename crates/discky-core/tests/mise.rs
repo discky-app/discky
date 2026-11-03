@@ -16,7 +16,7 @@ use discky_core::rules::{Category, SafetyLabel};
 
 const LS: &str = include_str!("fixtures/mise/ls.json");
 const ALL: &str = include_str!("fixtures/mise/all_sources.json");
-const HOME: &str = "/Users/alxgol";
+const HOME: &str = "/Users/me";
 
 fn scan(root: &Path) -> Index {
     walk(
@@ -63,7 +63,7 @@ fn parse_ls_reads_versions_and_single_source() {
     assert!(old.sources.is_empty());
     assert_eq!(
         old.install_path,
-        PathBuf::from("/Users/alxgol/.local/share/mise/installs/node/19.9.0")
+        PathBuf::from("/Users/me/.local/share/mise/installs/node/19.9.0")
     );
     let g = get(&vs, "node", "22.16.0");
     assert!(g.active);
@@ -71,7 +71,7 @@ fn parse_ls_reads_versions_and_single_source() {
         g.sources,
         vec![MiseSource {
             kind: "mise.toml".into(),
-            path: "/Users/alxgol/.config/mise/config.toml".into(),
+            path: "/Users/me/.config/mise/config.toml".into(),
             requested: "22.16.0".into(),
         }]
     );
@@ -98,7 +98,7 @@ fn merge_sources_keeps_unreferenced_and_drops_missing() {
     assert_eq!(kinds, ["mise.toml", "idiomatic-version-file"]);
     assert_eq!(
         g.sources[1].path,
-        PathBuf::from("/Users/alxgol/OneDrive/Projects/dfuture.co/.node-version")
+        PathBuf::from("/Users/me/Projects/project-b/.node-version")
     );
     let t = get(&vs, "node", "20.11.0");
     assert_eq!(t.sources.len(), 1);
@@ -271,8 +271,8 @@ fn global_version_is_not_removable() {
     assert_eq!(
         titles,
         [
-            "requested by mise.toml",
-            "requested by idiomatic-version-file"
+            "requested by ~/.config/mise/config.toml (global)",
+            "requested by .node-version"
         ]
     );
     assert!(g.components.iter().all(|c| c.kind == ComponentKind::Project
@@ -281,9 +281,7 @@ fn global_version_is_not_removable() {
         && c.note.is_none()));
     assert_eq!(
         g.components[1].path.as_deref(),
-        Some(Path::new(
-            "/Users/alxgol/OneDrive/Projects/dfuture.co/.node-version"
-        ))
+        Some(Path::new("/Users/me/Projects/project-b/.node-version"))
     );
 
     let old = f.iter().find(|f| f.title == "node 19.9.0").unwrap();
@@ -298,7 +296,7 @@ fn global_version_is_not_removable() {
     assert_eq!(
         old.path.as_deref(),
         Some(Path::new(
-            "/Users/alxgol/.local/share/mise/installs/node/19.9.0"
+            "/Users/me/.local/share/mise/installs/node/19.9.0"
         ))
     );
     assert_eq!(
@@ -313,6 +311,9 @@ fn global_version_is_not_removable() {
 
     let pinned = f.iter().find(|f| f.title == "node 24.18.1").unwrap();
     assert_eq!(pinned.subtitle.as_deref(), Some("pinned in 1 project"));
+    assert_eq!(pinned.components[0].title, "requested by .node-version");
+    let t = f.iter().find(|f| f.title == "node 20.11.0").unwrap();
+    assert_eq!(t.components[0].title, "requested by .tool-versions");
     assert!(matches!(pinned.removal, Removal::MiseUninstall { .. }));
 
     // The planner recognises the global version by the shared rule id.
@@ -403,9 +404,13 @@ fn real_mise_counts() {
     for v in &vs {
         println!("  {} {} {:?}", v.tool, v.version, status_of(v, &home));
     }
-    // Untracked version files in the projects folder only (a full home walk is slow).
-    let projects = home.join("OneDrive/Projects");
-    if projects.is_dir() {
+    // Untracked version files in one projects folder only (a full home walk is slow).
+    // The first of a few usual projects folders that exists.
+    let projects = ["Projects", "Developer", "src", "code"]
+        .iter()
+        .map(|p| home.join(p))
+        .find(|p| p.is_dir());
+    if let Some(projects) = projects {
         let tracked: HashSet<PathBuf> = parse_ls(&all)
             .unwrap_or_default()
             .into_iter()
