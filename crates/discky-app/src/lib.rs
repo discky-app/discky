@@ -6,6 +6,7 @@ pub mod duck;
 pub mod format;
 pub mod inspector;
 pub mod overview;
+pub mod removal;
 pub mod scan;
 pub mod sidebar;
 

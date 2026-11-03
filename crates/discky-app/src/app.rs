@@ -27,6 +27,7 @@ use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
 use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent};
 use crate::overview::OverviewView;
+use crate::removal::{self, RemovalDialog, RemovalEvent};
 use crate::scan::{ScanController, ScanMsg};
 use crate::sidebar;
 
@@ -105,12 +106,16 @@ pub struct AppView {
     categories: HashMap<Category, Entity<CategoryView>>,
     /// The right column showing the finding last selected in a category table.
     inspector: Option<Entity<Inspector>>,
+    /// The removal dialog opened last, kept so its run finishes and reports back even
+    /// after the dialog was closed.
+    removal: Option<Entity<RemovalDialog>>,
     scan: Entity<ScanController>,
     focus: FocusHandle,
     _appearance: Subscription,
     _scan_events: Subscription,
     _category_events: Vec<Subscription>,
     _inspector_events: Option<Subscription>,
+    _removal_events: Option<Subscription>,
 }
 
 impl AppView {
@@ -134,21 +139,25 @@ impl AppView {
             overview,
             categories: HashMap::new(),
             inspector: None,
+            removal: None,
             scan,
             focus,
             _appearance: appearance,
             _scan_events: scan_events,
             _category_events: Vec::new(),
             _inspector_events: None,
+            _removal_events: None,
         };
-        view.start_inspect(cx);
+        view.start_inspect(window, cx);
+        // The dialog layer exists only once the window's root wraps this view.
+        cx.defer_in(window, Self::start_remove);
         view
     }
 
     /// In debug builds, open the inspector on the finding named by `DISCKY_START_INSPECT`
     /// (an id, absolute path or title, as `Engine::inspect` resolves it), so the panel can
     /// be looked at without clicking a row.
-    fn start_inspect(&mut self, cx: &mut Context<Self>) {
+    fn start_inspect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(debug_assertions)]
         if let Ok(target) = std::env::var("DISCKY_START_INSPECT") {
             let found = cx
@@ -157,18 +166,77 @@ impl AppView {
                 .inspect(&target)
                 .and_then(|i| i.finding);
             match found {
-                Some(f) => self.inspect(f, cx),
+                Some(f) => self.inspect(f, window, cx),
                 None => eprintln!("DISCKY_START_INSPECT: no finding `{target}`"),
             }
         }
         #[cfg(not(debug_assertions))]
-        let _ = cx;
+        let _ = (window, cx);
+    }
+
+    /// In debug builds, open the removal dialog for the comma-separated findings in
+    /// `DISCKY_START_REMOVE` (ids, absolute paths or titles, resolved like
+    /// `DISCKY_START_INSPECT`; an unresolved token is passed on as an id), so the dialog can be looked at without clicking. It only
+    /// plans; nothing runs until Run is pressed.
+    fn start_remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        if let Ok(list) = std::env::var("DISCKY_START_REMOVE") {
+            let engine = cx.global::<AppState>().engine.clone();
+            let ids: Vec<String> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|t| match engine.inspect(t).and_then(|i| i.finding) {
+                    Some(f) => f.id.0,
+                    None => t.to_string(),
+                })
+                .collect();
+            if !ids.is_empty() {
+                self.open_removal(ids, window, cx);
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = (window, cx);
+    }
+
+    /// Open the removal dialog for `ids` (it plans them afresh).
+    fn open_removal(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = removal::open(ids, window, cx);
+        self._removal_events = Some(cx.subscribe(&dialog, Self::on_removal_event));
+        self.removal = Some(dialog);
+    }
+
+    /// A removal run ended: close the inspector when its finding is gone, then re-read
+    /// the snapshot everywhere, as after a scan.
+    fn on_removal_event(
+        &mut self,
+        _: Entity<RemovalDialog>,
+        event: &RemovalEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            RemovalEvent::Ran => {
+                if let Some(inspector) = &self.inspector {
+                    let id = inspector.read(cx).finding_id().0.clone();
+                    let present = cx
+                        .global::<AppState>()
+                        .engine
+                        .inspect(&id)
+                        .and_then(|i| i.finding)
+                        .is_some_and(|f| f.id.0 == id);
+                    if !present {
+                        self.close_inspector(cx);
+                    }
+                }
+                self.refresh_data(cx);
+            }
+        }
     }
 
     /// Show `f` in the inspector, opening it if needed. Nothing happens when it already
     /// shows `f`: the table re-selects the same row after every reload or filter keystroke,
     /// and the inspector keeps its state (and its plan) for it.
-    fn inspect(&mut self, f: Finding, cx: &mut Context<Self>) {
+    fn inspect(&mut self, f: Finding, window: &mut Window, cx: &mut Context<Self>) {
         match &self.inspector {
             Some(inspector) => {
                 if inspector.read(cx).finding_id() != &f.id {
@@ -177,7 +245,8 @@ impl AppView {
             }
             None => {
                 let inspector = cx.new(|cx| Inspector::new(f, cx));
-                self._inspector_events = Some(cx.subscribe(&inspector, Self::on_inspector_event));
+                self._inspector_events =
+                    Some(cx.subscribe_in(&inspector, window, Self::on_inspector_event));
                 self.inspector = Some(inspector);
                 cx.notify();
             }
@@ -200,16 +269,15 @@ impl AppView {
 
     fn on_inspector_event(
         &mut self,
-        _: Entity<Inspector>,
+        _: &Entity<Inspector>,
         event: &InspectorEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
             InspectorEvent::Close => self.close_inspector(cx),
             InspectorEvent::RemoveRequested(id) => {
-                // Task 11: removal dialog
-                let ids = [id];
-                tracing::debug!(?ids, "removal requested");
+                self.open_removal(vec![id.clone()], window, cx);
             }
         }
     }
@@ -280,16 +348,13 @@ impl AppView {
         &mut self,
         _: &Entity<CategoryView>,
         event: &CategoryEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
-            CategoryEvent::Inspect(finding) => self.inspect(finding.clone(), cx),
+            CategoryEvent::Inspect(finding) => self.inspect(finding.clone(), window, cx),
             CategoryEvent::Cleared => self.close_inspector(cx),
-            CategoryEvent::RemoveRequested(ids) => {
-                // Task 11: removal dialog
-                tracing::debug!(?ids, "removal requested");
-            }
+            CategoryEvent::RemoveRequested(ids) => self.open_removal(ids.clone(), window, cx),
         }
     }
 
