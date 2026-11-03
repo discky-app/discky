@@ -96,7 +96,8 @@ pub fn remove_enabled(
     checkable && !refreshing && (!has_selectable || count > 0)
 }
 
-/// Whether `c` can be part of a removal (not a shown-only component).
+/// Whether `c` can be part of a removal (not a shown-only component): trash, settings,
+/// launch jobs, receipts and the vendor's uninstaller script (`RunScript`).
 pub fn selectable(c: &Component) -> bool {
     c.removal != ComponentRemoval::None
 }
@@ -286,6 +287,29 @@ mod tests {
         assert_eq!(
             kind_label(&ComponentKind::ApplicationSupport),
             "Application Support"
+        );
+    }
+
+    #[test]
+    fn own_uninstaller_script_is_checkable() {
+        let mut script = comp(
+            ComponentKind::OwnUninstaller,
+            0,
+            true,
+            ComponentRemoval::RunScript,
+        );
+        script.note = Some("runs the vendor's uninstaller; may ask for a password".into());
+        let parts = vec![
+            comp(ComponentKind::AppBundle, 100, true, ComponentRemoval::Trash),
+            script,
+        ];
+        let mut s = ComponentSelection::from_components(&parts);
+        assert!(s.is_on(1));
+        assert!(s.toggle(1, &parts));
+        assert!(!s.is_on(1));
+        assert_eq!(
+            component_note(&parts[1]).as_deref(),
+            Some("runs the vendor's uninstaller; may ask for a password")
         );
     }
 

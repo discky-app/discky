@@ -23,8 +23,8 @@ use gpui_kit::*;
 use crate::app::AppState;
 use crate::format;
 use model::{
-    FindingTitles, INTERACTIVE_SKIPPED_NOTE, Phase, RemovalModel, RowStatus, RunToken, StepRow,
-    TRASH_OVERRIDDEN_NOTE, allow_interactive, show_empty_trash,
+    FindingTitles, OVERRIDE_NOTE, Phase, RemovalModel, RowStatus, RunToken, StepRow,
+    TRASH_OVERRIDDEN_NOTE, allow_interactive, run_only_steps, show_empty_trash,
 };
 
 /// Width of the dialog.
@@ -199,9 +199,14 @@ impl RemovalDialog {
             }
             let _ = ev_tx.send_blocking(ev);
         });
+        let only_steps = self
+            .model
+            .plan
+            .as_ref()
+            .and_then(|p| run_only_steps(p, self.trash_overridden));
         let req = ExecuteRequest {
             allow_interactive: allow_interactive(self.trash_overridden),
-            only_steps: None,
+            only_steps: only_steps.clone(),
             on_step: Some(sink),
         };
         // Counted before the thread starts, so a quit at any point sees the run.
@@ -217,7 +222,7 @@ impl RemovalDialog {
             cx.notify();
             return;
         }
-        self.model.start();
+        self.model.start_only(only_steps);
         self.running = Some(token);
         self._pump = cx.spawn_in(window, async move |this, cx| {
             // The event channel closes when the run ends and drops the sink.
@@ -586,12 +591,7 @@ impl Render for RemovalDialog {
                 this.child(div().text_sm().text_color(muted).child(self.model.header()))
             })
             .when(self.trash_overridden, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(INTERACTIVE_SKIPPED_NOTE),
-                )
+                this.child(div().text_xs().text_color(muted).child(OVERRIDE_NOTE))
             })
             .child(body)
             .children(status)

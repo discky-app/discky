@@ -94,6 +94,8 @@ pub struct RemovalModel {
     pub permanent_mode: bool,
     /// `removal.remind_trash`: offer "Empty Trash" after a run that trashed something.
     pub remind_trash: bool,
+    /// The step indices the current run executes (`None` = all; see [`run_only_steps`]).
+    pub run_only: Option<Vec<usize>>,
 }
 
 impl RemovalModel {
@@ -107,6 +109,7 @@ impl RemovalModel {
             phase: Phase::Planning,
             permanent_mode: cfg.removal.mode == RemovalMode::Permanent,
             remind_trash: cfg.removal.remind_trash,
+            run_only: None,
         }
     }
 
@@ -228,6 +231,13 @@ impl RemovalModel {
         !matches!(self.phase, Phase::Running { .. })
     }
 
+    /// The run starts with only the steps `only` (see [`run_only_steps`]); the rows of
+    /// the others finish as skipped ([`OVERRIDE_SKIPPED_REASON`]).
+    pub fn start_only(&mut self, only: Option<Vec<usize>>) {
+        self.start();
+        self.run_only = only;
+    }
+
     /// The run starts: every row back to pending.
     pub fn start(&mut self) {
         for r in &mut self.rows {
@@ -284,6 +294,16 @@ impl RemovalModel {
         let Some(r) = self.rows.iter_mut().find(|r| r.index == result.index) else {
             return;
         };
+        let left_out = self
+            .run_only
+            .as_ref()
+            .is_some_and(|o| !o.contains(&result.index));
+        if result.status == StepStatus::NotRun && left_out {
+            r.status = RowStatus::Skipped;
+            r.output = result.output;
+            r.reason = Some(OVERRIDE_SKIPPED_REASON.to_string());
+            return;
+        }
         r.status = match result.status {
             StepStatus::Done => RowStatus::Done,
             StepStatus::Failed => RowStatus::Failed,
@@ -378,9 +398,25 @@ pub fn allow_interactive(trash_overridden: bool) -> bool {
     !trash_overridden
 }
 
+/// The steps a run executes: with a `DISCKY_TRASH_BIN` override only the Trash/Remove
+/// steps (commands — `brew`, `defaults`, `launchctl`, `pkgutil`, scripts —, quits and
+/// Ollama deletes would act on the real system), otherwise all (`None`).
+pub fn run_only_steps(plan: &Plan, trash_overridden: bool) -> Option<Vec<usize>> {
+    trash_overridden.then(|| {
+        plan.steps
+            .iter()
+            .filter(|s| matches!(s.kind, StepKind::Trash { .. } | StepKind::Remove { .. }))
+            .map(|s| s.index)
+            .collect()
+    })
+}
+
 /// Shown in the dialog when the trash binary is overridden.
-pub const INTERACTIVE_SKIPPED_NOTE: &str =
-    "Trash bin overridden (DISCKY_TRASH_BIN): interactive steps are skipped";
+pub const OVERRIDE_NOTE: &str =
+    "Trash bin overridden (DISCKY_TRASH_BIN): command steps are skipped";
+
+/// The reason on the row of a step the dev override left out.
+pub const OVERRIDE_SKIPPED_REASON: &str = "skipped (dev override)";
 
 /// Shown instead of "Empty Trash" when the trash binary is overridden.
 pub const TRASH_OVERRIDDEN_NOTE: &str =
@@ -793,6 +829,64 @@ mod tests {
     fn interactive_steps_are_skipped_when_the_trash_bin_is_overridden() {
         assert!(allow_interactive(false));
         assert!(!allow_interactive(true));
+    }
+
+    #[test]
+    fn override_runs_only_trash_steps() {
+        use super::{OVERRIDE_SKIPPED_REASON, run_only_steps};
+        let quit = step(
+            0,
+            StepKind::Quit {
+                bundle_id: "com.x".into(),
+            },
+            StepFlags::INTERACTIVE,
+            None,
+        );
+        let brew = step(
+            1,
+            StepKind::Command {
+                argv: vec!["brew".into(), "uninstall".into()],
+                cwd: None,
+                env: Vec::new(),
+            },
+            StepFlags::empty(),
+            None,
+        );
+        let t = trash(2, "/tmp/a", StepFlags::empty(), 5);
+        let remove = step(
+            3,
+            StepKind::Remove {
+                paths: vec![PathBuf::from("/tmp/b")],
+            },
+            StepFlags::PERMANENT,
+            Some(1),
+        );
+        let p = plan(vec![quit, brew, t, remove], &[]);
+        assert_eq!(run_only_steps(&p, false), None);
+        assert_eq!(run_only_steps(&p, true), Some(vec![2, 3]));
+
+        // Rows of the steps left out say why.
+        let mut m = RemovalModel::from_plan(p.clone(), &Config::default());
+        m.start_only(run_only_steps(&p, true));
+        m.finish(Ok(ExecutionReport {
+            plan: PlanId("p".into()),
+            results: vec![
+                result(0, StepStatus::NotRun, 0),
+                result(1, StepStatus::NotRun, 0),
+                result(2, StepStatus::Done, 5),
+                result(3, StepStatus::Done, 1),
+            ],
+            freed_total: 6,
+            trashed_bytes: 5,
+            stopped_at: None,
+            log_path: PathBuf::from("/tmp/home/removals.log"),
+        }));
+        for i in [0, 1] {
+            assert_eq!(m.rows[i].status, RowStatus::Skipped);
+            assert_eq!(m.rows[i].reason.as_deref(), Some(OVERRIDE_SKIPPED_REASON));
+        }
+        assert_eq!(m.rows[2].reason, None);
+        assert_eq!(OVERRIDE_SKIPPED_REASON, "skipped (dev override)");
     }
 
     #[test]
