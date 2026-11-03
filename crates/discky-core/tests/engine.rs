@@ -1,5 +1,9 @@
 mod fixtures;
-use discky_core::{Engine, index::snapshot::Actor, scan::ScanStatus};
+use discky_core::plan::PlanId;
+use discky_core::plan::execute::ExecuteError;
+use discky_core::{
+    DisckyPaths, Engine, EngineOptions, ExecuteRequest, index::snapshot::Actor, scan::ScanStatus,
+};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -27,6 +31,40 @@ fn engine_in(d: &tempfile::TempDir) -> Engine {
     c.scan.roots = vec![d.path().join("tree")];
     e.set_config(c).unwrap();
     e
+}
+
+/// Run every step, non-interactively, without progress events.
+fn request() -> ExecuteRequest {
+    ExecuteRequest {
+        allow_interactive: false,
+        only_steps: None,
+        on_step: None,
+    }
+}
+
+/// Options with every file inside `d` and a fake trash binary `d/fake-trash` that moves
+/// its arguments into `d/trashed`, so the test never touches the real Trash.
+fn temp_opts(d: &tempfile::TempDir) -> EngineOptions {
+    let fake = d.path().join("fake-trash");
+    let trashed = d.path().join("trashed");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nmkdir -p \"{0}\" && mv \"$@\" \"{0}\"/\n",
+            trashed.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    EngineOptions {
+        paths: DisckyPaths {
+            config: d.path().join("c.toml"),
+            snapshot: d.path().join("s.bin"),
+            log: d.path().join("r.log"),
+        },
+        actor: Actor::App,
+        trash_bin: fake,
+    }
 }
 
 fn reopen(d: &tempfile::TempDir, actor: Actor) -> Engine {
@@ -100,7 +138,7 @@ fn plan_then_execute_updates_findings() {
     c.removal.mode = discky_core::RemovalMode::Permanent;
     e.set_config(c).unwrap();
     let plan = e.plan(std::slice::from_ref(&nm)).unwrap();
-    let rep = e.execute(&plan, false, None).unwrap();
+    let rep = e.execute_plan(&plan.id, request()).unwrap();
     assert!(matches!(
         rep.results[0].status,
         discky_core::plan::execute::StepStatus::Done
@@ -187,7 +225,7 @@ fn execute_while_a_reader_holds_the_snapshot_shares_the_index() {
         .0
         .clone();
     let plan = e.plan(std::slice::from_ref(&nm)).unwrap();
-    e.execute(&plan, false, None).unwrap();
+    e.execute_plan(&plan.id, request()).unwrap();
     assert!(e.inspect(&nm).unwrap().finding.is_none());
     let now = e.snapshot().unwrap();
     assert!(
@@ -223,4 +261,57 @@ fn reload_config_reads_the_file_without_writing_it() {
         discky_core::RemovalMode::Permanent,
         "last good config kept"
     );
+}
+
+#[test]
+fn open_with_uses_given_paths_and_trash_bin() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("tree");
+    fixtures::build_tree(&root);
+    let opts = temp_opts(&d);
+    let e = {
+        // Only `HOME` (for the build-dir pass) comes from the environment now.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("HOME", std::env::temp_dir()) };
+        Engine::open_with(opts).unwrap()
+    };
+    assert_eq!(e.paths().snapshot, d.path().join("s.bin"));
+    let mut c = e.config();
+    c.scan.roots = vec![root.clone()];
+    c.removal.mode = discky_core::RemovalMode::Trash;
+    e.set_config(c).unwrap();
+    assert!(d.path().join("c.toml").exists());
+
+    let id = e.start_scan(None);
+    e.wait_scan(&id, Duration::from_secs(30));
+    assert!(d.path().join("s.bin").exists());
+    let nm = e
+        .snapshot()
+        .unwrap()
+        .findings
+        .iter()
+        .find(|f| f.rule_id == "node-modules")
+        .unwrap()
+        .id
+        .0
+        .clone();
+    let plan = e.plan(std::slice::from_ref(&nm)).unwrap();
+    let rep = e.execute_plan(&plan.id, request()).unwrap();
+    assert!(matches!(
+        rep.results[0].status,
+        discky_core::plan::execute::StepStatus::Done
+    ));
+    assert!(!root.join("web/node_modules").exists());
+    assert!(d.path().join("trashed/node_modules/pkg/index.js").exists());
+    assert_eq!(rep.log_path, d.path().join("r.log"));
+}
+
+#[test]
+fn execute_plan_rejects_unknown_id() {
+    let d = tempfile::tempdir().unwrap();
+    let e = Engine::open_with(temp_opts(&d)).unwrap();
+    let err = e
+        .execute_plan(&PlanId("nope".into()), request())
+        .unwrap_err();
+    assert!(matches!(err, ExecuteError::UnknownPlan(_)));
 }

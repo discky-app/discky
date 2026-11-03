@@ -71,3 +71,21 @@ fn load_missing_file_expands_tilde_in_default_roots() {
     let home = std::env::var("HOME").unwrap();
     assert_eq!(c.scan.roots[0].to_str(), Some(home.as_str()));
 }
+
+#[test]
+fn save_is_atomic_no_tmp_left_behind() {
+    let (_guard, dir, paths) = isolated_home();
+    let mut c = Config::default();
+    c.removal.mode = RemovalMode::Permanent;
+    // Absolute roots: `load` expands the defaults' `~`.
+    c.scan.roots = vec![dir.path().join("root")];
+    c.save(&paths).unwrap();
+    assert!(paths.config.exists());
+    let tmp: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(tmp.is_empty(), "left behind: {tmp:?}");
+    assert_eq!(Config::load(&paths).unwrap(), c);
+}

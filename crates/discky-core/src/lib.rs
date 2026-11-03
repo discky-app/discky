@@ -14,6 +14,6 @@ pub mod scan;
 pub mod tools;
 
 pub use config::{Config, ConfigError, RemovalMode};
-pub use engine::{Engine, EngineError, Inspection};
+pub use engine::{Engine, EngineError, EngineOptions, ExecuteRequest, Inspection};
 pub use paths::DisckyPaths;
 pub use scan::{ScanId, ScanStatus};

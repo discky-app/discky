@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Locations of Discky's persistent files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,4 +30,9 @@ impl DisckyPaths {
             log: home.join("Library/Logs/Discky/removals.log"),
         }
     }
+}
+
+/// `p` as a string for JSON and UI text; bytes that are not UTF-8 become U+FFFD.
+pub fn display(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
 }

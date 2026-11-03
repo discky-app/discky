@@ -15,7 +15,7 @@ use crate::history::{self, HistoryRecord};
 use crate::index::snapshot::{Actor, Snapshot, SnapshotError};
 use crate::paths::DisckyPaths;
 use crate::plan::execute::{
-    ExecuteError, ExecuteOptions, ExecutionReport, StepStatus, execute_plan,
+    self, ExecuteError, ExecuteOptions, ExecutionReport, StepSink, StepStatus,
 };
 use crate::plan::{Fingerprint, Plan, PlanId, StepKind, plan_removal};
 use crate::query::{self, Overview, QueryError, SearchQuery, TreeEntry};
@@ -51,11 +51,47 @@ pub struct Inspection {
     pub in_snapshot: bool,
 }
 
+/// What [`Engine::open_with`] needs from the outside world. Build it explicitly (the GUI,
+/// tests) or with [`EngineOptions::resolve`] (the MCP server).
+#[derive(Debug, Clone)]
+pub struct EngineOptions {
+    pub paths: DisckyPaths,
+    pub actor: Actor,
+    /// The program Trash steps run, normally `/usr/bin/trash`.
+    pub trash_bin: PathBuf,
+}
+
+impl EngineOptions {
+    /// [`DisckyPaths::resolve`] (reads `DISCKY_HOME`), and `DISCKY_TRASH_BIN` or
+    /// `/usr/bin/trash` for the trash binary. The `DISCKY_TRASH_BIN` override is for tests
+    /// and development only (a fake that keeps test runs out of the real Trash).
+    pub fn resolve(actor: Actor) -> EngineOptions {
+        EngineOptions {
+            paths: DisckyPaths::resolve(),
+            actor,
+            trash_bin: std::env::var_os("DISCKY_TRASH_BIN")
+                .map_or_else(|| PathBuf::from(TRASH_BIN), PathBuf::from),
+        }
+    }
+}
+
+/// How to run a plan with [`Engine::execute_plan`]. No `Default`: the caller chooses
+/// `allow_interactive` deliberately.
+#[derive(Clone)]
+pub struct ExecuteRequest {
+    pub allow_interactive: bool,
+    /// Run only these step indices; the rest are `NotRun`.
+    pub only_steps: Option<Vec<usize>>,
+    /// Receives step progress while the plan runs.
+    pub on_step: Option<StepSink>,
+}
+
 pub struct Engine {
     paths: DisckyPaths,
     config: RwLock<Config>,
     rules: Arc<RuleSet>,
     actor: Actor,
+    trash_bin: PathBuf,
     current: Arc<RwLock<Current>>,
     scans: Mutex<HashMap<ScanId, ScanJob>>,
     plans: Mutex<VecDeque<Plan>>,
@@ -66,11 +102,21 @@ fn _assert_send_sync<T: Send + Sync>() {}
 const _: fn() = _assert_send_sync::<Engine>;
 
 impl Engine {
-    /// Resolve paths, load the config and the snapshot if one is usable. A missing or
+    /// [`Engine::open_with`] with [`EngineOptions::resolve`] (reads `DISCKY_HOME` and
+    /// `DISCKY_TRASH_BIN`).
+    pub fn open(actor: Actor) -> Result<Engine, EngineError> {
+        Engine::open_with(EngineOptions::resolve(actor))
+    }
+
+    /// Load the config and the snapshot if one is usable, from `opts.paths`. A missing or
     /// incompatible snapshot is ignored; any other load error is ignored too but kept in
     /// [`Engine::last_error`].
-    pub fn open(actor: Actor) -> Result<Engine, EngineError> {
-        let paths = DisckyPaths::resolve();
+    pub fn open_with(opts: EngineOptions) -> Result<Engine, EngineError> {
+        let EngineOptions {
+            paths,
+            actor,
+            trash_bin,
+        } = opts;
         let config = Config::load(&paths)?;
         let mut last_error = None;
         let snapshot = match Snapshot::load(&paths.snapshot) {
@@ -90,6 +136,7 @@ impl Engine {
             config: RwLock::new(config),
             rules: Arc::new(RuleSet::builtin()),
             actor,
+            trash_bin,
             current: Arc::new(RwLock::new(Current {
                 snapshot,
                 exact_private_size: None,
@@ -98,6 +145,11 @@ impl Engine {
             plans: Mutex::default(),
             last_error: Mutex::new(last_error),
         })
+    }
+
+    /// Where this engine keeps its config, snapshot and log.
+    pub fn paths(&self) -> &DisckyPaths {
+        &self.paths
     }
 
     /// The most recent non-fatal error (snapshot load, history read), if any.
@@ -301,28 +353,27 @@ impl Engine {
         lock(&self.plans).iter().find(|p| &p.id == id).cloned()
     }
 
-    /// Run `plan`, then drop from the in-memory snapshot the findings of `Done` steps
-    /// whose paths are gone, and of `Done` Ollama deletes. The index and the snapshot file are left as they are; the
-    /// next scan brings both up to date.
-    ///
-    /// Trash steps run `/usr/bin/trash`, or the program named by the `DISCKY_TRASH_BIN`
-    /// environment variable when set. That override is for tests and development only
-    /// (a fake that keeps test runs out of the real Trash).
-    pub fn execute(
+    /// Run the plan `id` made by [`Engine::plan`] (one of the last 20), then drop from the
+    /// in-memory snapshot the findings of `Done` steps whose paths are gone, and of `Done`
+    /// Ollama deletes. The index and the snapshot file are left as they are; the next scan
+    /// brings both up to date. `Err(UnknownPlan)` when `id` is not a kept plan: only plans
+    /// this engine made can run. Trash steps run [`EngineOptions::trash_bin`].
+    pub fn execute_plan(
         &self,
-        plan: &Plan,
-        allow_interactive: bool,
-        only_steps: Option<Vec<usize>>,
+        id: &PlanId,
+        req: ExecuteRequest,
     ) -> Result<ExecutionReport, ExecuteError> {
+        let plan = self
+            .get_plan(id)
+            .ok_or_else(|| ExecuteError::UnknownPlan(id.0.clone()))?;
+        // `req.on_step` is not delivered yet.
         let opts = ExecuteOptions {
-            allow_interactive,
-            only_steps,
+            allow_interactive: req.allow_interactive,
+            only_steps: req.only_steps,
             actor: self.actor,
-            trash_bin: std::env::var_os("DISCKY_TRASH_BIN")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(TRASH_BIN)),
+            trash_bin: self.trash_bin.clone(),
         };
-        let report = execute_plan(plan, &opts, &self.paths)?;
+        let report = execute::execute_plan(&plan, &opts, &self.paths)?;
         let done: Vec<_> = report
             .results
             .iter()
@@ -477,6 +528,7 @@ mod tests {
             config: RwLock::new(Config::default()),
             rules: Arc::new(RuleSet::builtin()),
             actor: Actor::Mcp,
+            trash_bin: PathBuf::from(TRASH_BIN),
             current: Arc::new(RwLock::new(Current {
                 snapshot: Some(Arc::new(snapshot)),
                 exact_private_size: None,

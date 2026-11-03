@@ -1,7 +1,7 @@
 use discky_core::{
     config::{Config, RemovalMode},
     findings::{Finding, FindingId, Removal},
-    plan::{StepFlags, StepKind, needs_admin, plan_removal},
+    plan::{Plan, PlanId, Step, StepFlags, StepKind, needs_admin, plan_removal},
     rules::{Category, SafetyLabel},
 };
 
@@ -284,4 +284,31 @@ fn cargo_cache_is_checked_by_tool_while_argv_runs_cargo() {
     };
     assert!(argv[0].ends_with("/cargo"), "{argv:?}");
     assert_eq!(s.description, "Run `cargo cache --autoclean`");
+}
+
+#[test]
+fn to_json_survives_non_utf8_paths() {
+    use std::os::unix::ffi::OsStrExt;
+    let p = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe"));
+    let plan = Plan {
+        id: PlanId("p".into()),
+        created_at: 0,
+        steps: vec![Step {
+            index: 0,
+            finding: FindingId("f".into()),
+            description: "Move it to the Trash".into(),
+            kind: StepKind::Trash { paths: vec![p] },
+            freed: Some(1),
+            freed_note: None,
+            flags: StepFlags::empty(),
+            warnings: vec![],
+            fingerprints: vec![],
+        }],
+        total_freed: 1,
+        skipped: vec![],
+    };
+    let v = plan.to_json();
+    assert_eq!(v["steps"][0]["kind"], "trash");
+    let shown = v["steps"][0]["paths"][0].as_str().unwrap();
+    assert!(shown.contains('\u{FFFD}'), "{shown}");
 }

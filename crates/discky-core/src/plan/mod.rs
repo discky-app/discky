@@ -8,11 +8,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::config::{Config, RemovalMode};
 use crate::findings::{Finding, FindingId, Removal, ollama_url};
+use crate::paths;
 use crate::tools;
 
 pub mod execute;
@@ -416,36 +417,46 @@ impl Plan {
     /// Flat JSON for the MCP server and the GUI: each step's `kind` is its name and the
     /// kind's fields (`argv`, `cwd`, `paths`, `bundle_id`, `url`, `model`) sit beside it.
     pub fn to_json(&self) -> Value {
+        let shown =
+            |ps: &[PathBuf]| -> Vec<String> { ps.iter().map(|p| paths::display(p)).collect() };
         let steps: Vec<Value> = self
             .steps
             .iter()
             .map(|s| {
-                let mut v = json!({
-                    "index": s.index,
-                    "finding": s.finding.0,
-                    "description": s.description,
-                    "freed": s.freed,
-                    "freed_note": s.freed_note,
-                    "flags": s.flags.names(),
-                    "warnings": s.warnings,
-                });
-                let o = v.as_object_mut().expect("object literal");
-                let (kind, extra) = match &s.kind {
-                    StepKind::Quit { bundle_id } => ("quit", json!({ "bundle_id": bundle_id })),
-                    StepKind::Trash { paths } => ("trash", json!({ "paths": paths })),
-                    StepKind::Remove { paths } => ("remove", json!({ "paths": paths })),
+                let mut o = Map::new();
+                o.insert("index".into(), s.index.into());
+                o.insert("finding".into(), s.finding.0.clone().into());
+                o.insert("description".into(), s.description.clone().into());
+                o.insert("freed".into(), s.freed.into());
+                o.insert("freed_note".into(), s.freed_note.clone().into());
+                o.insert("flags".into(), s.flags.names().into());
+                o.insert("warnings".into(), s.warnings.clone().into());
+                let kind = match &s.kind {
+                    StepKind::Quit { bundle_id } => {
+                        o.insert("bundle_id".into(), bundle_id.clone().into());
+                        "quit"
+                    }
+                    StepKind::Trash { paths } => {
+                        o.insert("paths".into(), shown(paths).into());
+                        "trash"
+                    }
+                    StepKind::Remove { paths } => {
+                        o.insert("paths".into(), shown(paths).into());
+                        "remove"
+                    }
                     StepKind::Command { argv, cwd } => {
-                        ("command", json!({ "argv": argv, "cwd": cwd }))
+                        o.insert("argv".into(), argv.clone().into());
+                        o.insert("cwd".into(), cwd.as_deref().map(paths::display).into());
+                        "command"
                     }
                     StepKind::OllamaDelete { url, model } => {
-                        ("ollama_delete", json!({ "url": url, "model": model }))
+                        o.insert("url".into(), url.clone().into());
+                        o.insert("model".into(), model.clone().into());
+                        "ollama_delete"
                     }
                 };
                 o.insert("kind".into(), kind.into());
-                if let Value::Object(extra) = extra {
-                    o.extend(extra);
-                }
-                v
+                Value::Object(o)
             })
             .collect();
         let skipped: Vec<Value> = self

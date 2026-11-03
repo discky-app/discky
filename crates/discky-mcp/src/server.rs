@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use discky_core::plan::execute::{ExecuteError, StepStatus};
 use discky_core::plan::{PlanId, StepFlags, StepKind};
 use discky_core::query::{QueryError, SearchQuery};
-use discky_core::{Config, DisckyPaths, Engine, EngineError, RemovalMode, ScanId, ScanStatus};
+use discky_core::{
+    Config, DisckyPaths, Engine, EngineError, ExecuteRequest, RemovalMode, ScanId, ScanStatus,
+};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, schema_for_output};
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -35,6 +37,8 @@ const URI_LOG: &str = "discky://log/removals";
 
 const NO_SNAPSHOT: &str = "No snapshot yet. Call `scan` first.";
 const MODE_CHANGED: &str = "Removal mode changed since planning. Call plan_removal again.";
+const UNKNOWN_PLAN: &str =
+    "Unknown plan id (plans are kept for this server session only). Call plan_removal again.";
 const DELETE_DISABLED: &str = "Agent deletion is disabled. Enable it in Discky → Settings → MCP server (`mcp.allow_agent_delete = true` in config.toml)";
 
 const INSTRUCTIONS: &str = "Discky is a macOS disk-cleanup tool: it scans the disk, finds removable things (caches, build outputs, models, large old files) and removes them safely. Call `disk_overview` first; if it reports `stale: true`, call `scan` (pass `wait_seconds` up to 60, or poll `scan_status`). All sizes are bytes actually allocated on disk, and `freed_if_deleted` is what deleting really frees (clones and hard links shared elsewhere are not counted). Always call `plan_removal` and show the plan to the user before `execute_plan`; `execute_plan` is disabled until the user enables agent deletion in Discky settings. Never guess paths: use `findings`, `tree`, `search` and `inspect`.";
@@ -338,9 +342,8 @@ impl DisckyServer {
         if !config.mcp.allow_agent_delete {
             return Err(DELETE_DISABLED.to_string());
         }
-        let plan = self.engine.get_plan(&PlanId(p.plan_id)).ok_or(
-            "Unknown plan id (plans are kept for this server session only). Call plan_removal again.",
-        )?;
+        let id = PlanId(p.plan_id);
+        let plan = self.engine.get_plan(&id).ok_or(UNKNOWN_PLAN)?;
         let wrong_kind = |k: &StepKind| match config.removal.mode {
             RemovalMode::Trash => matches!(k, StepKind::Remove { .. }),
             RemovalMode::Permanent => matches!(k, StepKind::Trash { .. }),
@@ -349,10 +352,15 @@ impl DisckyServer {
             return Err(MODE_CHANGED.to_string());
         }
         let engine = Arc::clone(&self.engine);
-        let run = plan.clone();
-        let report = blocking(move || engine.execute(&run, false, p.only_steps))
+        let req = ExecuteRequest {
+            allow_interactive: false,
+            only_steps: p.only_steps,
+            on_step: None,
+        };
+        let report = blocking(move || engine.execute_plan(&id, req))
             .await?
             .map_err(|e| match e {
+                ExecuteError::UnknownPlan(_) => UNKNOWN_PLAN.to_string(),
                 ExecuteError::PlanStale { path } => format!(
                     "Files changed since planning ({}). Call plan_removal again.",
                     path.display()

@@ -81,9 +81,21 @@ pub enum ExecuteError {
     PlanStale { path: PathBuf },
     #[error("step index {0} is not in the plan")]
     BadStepIndex(usize),
+    #[error("plan {0} is unknown or expired; plan again")]
+    UnknownPlan(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
+
+/// Progress of a running plan, delivered to a [`StepSink`].
+#[derive(Debug, Clone)]
+pub enum StepEvent {
+    Started { index: usize },
+    Finished(StepResult),
+}
+
+/// Receives [`StepEvent`]s while a plan runs (called on the executing thread).
+pub type StepSink = Arc<dyn Fn(StepEvent) + Send + Sync>;
 
 /// What running one step produced, before freed accounting.
 struct Outcome {

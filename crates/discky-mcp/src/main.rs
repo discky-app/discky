@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use discky_core::index::snapshot::Actor;
-use discky_core::{Engine, ScanStatus};
+use discky_core::{Engine, EngineOptions, ScanStatus};
 use rmcp::serve_server;
 
 use crate::server::DisckyServer;
@@ -43,7 +43,14 @@ fn main() -> ExitCode {
         .with_env_filter(tracing_subscriber::EnvFilter::new(&cli.log_level))
         .init();
 
-    let engine = match Engine::open(Actor::Mcp) {
+    let opts = EngineOptions::resolve(Actor::Mcp);
+    if opts.trash_bin != std::path::Path::new("/usr/bin/trash") {
+        tracing::warn!(
+            "DISCKY_TRASH_BIN is set: Trash steps run {} instead of /usr/bin/trash (tests and development only)",
+            opts.trash_bin.display()
+        );
+    }
+    let engine = match Engine::open_with(opts) {
         Ok(e) => Arc::new(e),
         Err(e) => {
             tracing::error!("cannot open Discky: {e}");
@@ -53,12 +60,6 @@ fn main() -> ExitCode {
     };
     if let Some(e) = engine.last_error() {
         tracing::warn!("{e}");
-    }
-    if let Some(bin) = std::env::var_os("DISCKY_TRASH_BIN") {
-        tracing::warn!(
-            "DISCKY_TRASH_BIN is set: Trash steps run {} instead of /usr/bin/trash (tests and development only)",
-            std::path::Path::new(&bin).display()
-        );
     }
     if cli.self_test_scan {
         return self_test_scan(&engine);

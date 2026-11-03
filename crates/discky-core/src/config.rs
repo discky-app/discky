@@ -125,8 +125,11 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Write the config, creating parent directories as needed.
+    /// Write the config atomically, creating parent directories as needed: the text goes
+    /// to `<config>.tmp`, is synced, then renamed over the config, so a reader (the other
+    /// Discky process) never sees a half-written file.
     pub fn save(&self, paths: &DisckyPaths) -> Result<(), ConfigError> {
+        use std::io::Write;
         let text = toml::to_string_pretty(self)?;
         let io_err = |source| ConfigError::Io {
             path: paths.config.clone(),
@@ -135,7 +138,20 @@ impl Config {
         if let Some(parent) = paths.config.parent() {
             std::fs::create_dir_all(parent).map_err(io_err)?;
         }
-        std::fs::write(&paths.config, text).map_err(io_err)
+        let mut tmp = paths.config.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let written = std::fs::File::create(&tmp).and_then(|mut f| {
+            f.write_all(text.as_bytes())?;
+            f.sync_all()
+        });
+        match written.and_then(|()| std::fs::rename(&tmp, &paths.config)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(io_err(e))
+            }
+        }
     }
 }
 
