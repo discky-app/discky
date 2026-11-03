@@ -28,6 +28,8 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 const OLLAMA_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
 const INTERACTIVE_REASON: &str = "Needs an interactive session; run from Discky.app";
+/// Absolute, never looked up through `PATH`: it may show an administrator prompt.
+const OSASCRIPT: &str = "/usr/bin/osascript";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -428,15 +430,32 @@ fn run_remove(paths: &[PathBuf]) -> Outcome {
 
 /// Trash or remove `paths` through `osascript -e <script(present paths)>`, for paths that
 /// need an administrator: Finder or `do shell script` asks for the password itself.
-fn run_osascript(paths: &[PathBuf], script: fn(&[PathBuf]) -> String) -> Outcome {
+/// Fails closed on a path that is not valid UTF-8: a lossy conversion could name a
+/// different path.
+fn run_osascript(paths: &[PathBuf], script: impl Fn(&[&str]) -> String) -> Outcome {
     if let Err(o) = check_absolute(paths) {
         return o;
     }
-    let present: Vec<PathBuf> = paths.iter().filter(|p| !is_gone(p)).cloned().collect();
+    let mut utf8 = Vec::with_capacity(paths.len());
+    for p in paths {
+        match p.to_str() {
+            Some(s) => utf8.push(s),
+            None => {
+                return Outcome::failed(
+                    String::new(),
+                    format!("path is not valid UTF-8: {}", p.display()),
+                );
+            }
+        }
+    }
+    let present: Vec<&str> = utf8
+        .into_iter()
+        .filter(|p| !is_gone(Path::new(p)))
+        .collect();
     if present.is_empty() {
         return already_absent(String::new());
     }
-    let mut cmd = Command::new("osascript");
+    let mut cmd = Command::new(OSASCRIPT);
     cmd.arg("-e").arg(script(&present));
     process_outcome(&mut cmd, "osascript")
 }
@@ -453,15 +472,10 @@ fn shell_quote(s: &str) -> String {
 
 /// AppleScript moving `paths` to the Trash through Finder (which prompts for an
 /// administrator password itself for items the user cannot move).
-pub(crate) fn finder_delete_script(paths: &[PathBuf]) -> String {
+pub(crate) fn finder_delete_script(paths: &[&str]) -> String {
     let files: Vec<String> = paths
         .iter()
-        .map(|p| {
-            format!(
-                "POSIX file \"{}\"",
-                applescript_escape(&p.to_string_lossy())
-            )
-        })
+        .map(|p| format!("POSIX file \"{}\"", applescript_escape(p)))
         .collect();
     format!(
         "tell application \"Finder\" to delete {{{}}}",
@@ -471,11 +485,8 @@ pub(crate) fn finder_delete_script(paths: &[PathBuf]) -> String {
 
 /// AppleScript running `/bin/rm -rf <paths>` with administrator privileges (the system
 /// prompts for the password). Paths are shell-quoted, then AppleScript-escaped.
-pub(crate) fn admin_rm_script(paths: &[PathBuf]) -> String {
-    let words: Vec<String> = paths
-        .iter()
-        .map(|p| shell_quote(&p.to_string_lossy()))
-        .collect();
+pub(crate) fn admin_rm_script(paths: &[&str]) -> String {
+    let words: Vec<String> = paths.iter().map(|p| shell_quote(p)).collect();
     format!(
         "do shell script \"{}\" with administrator privileges",
         applescript_escape(&format!("/bin/rm -rf {}", words.join(" ")))
@@ -527,7 +538,7 @@ fn run_quit(bundle_id: &str) -> Outcome {
         "tell application id \"{}\" to quit",
         applescript_escape(bundle_id)
     );
-    let mut cmd = Command::new("osascript");
+    let mut cmd = Command::new(OSASCRIPT);
     cmd.args(["-e", &script]);
     process_outcome(&mut cmd, "osascript")
 }
@@ -704,7 +715,7 @@ mod tests {
 
     #[test]
     fn finder_script_quotes_paths() {
-        let s = finder_delete_script(&[PathBuf::from(r#"/Library/Logs/A "B"/x\y"#)]);
+        let s = finder_delete_script(&[r#"/Library/Logs/A "B"/x\y"#]);
         assert_eq!(
             s,
             r#"tell application "Finder" to delete {POSIX file "/Library/Logs/A \"B\"/x\\y"}"#
@@ -713,7 +724,7 @@ mod tests {
 
     #[test]
     fn finder_script_lists_every_path() {
-        let s = finder_delete_script(&[PathBuf::from("/a"), PathBuf::from("/b")]);
+        let s = finder_delete_script(&["/a", "/b"]);
         assert_eq!(
             s,
             r#"tell application "Finder" to delete {POSIX file "/a", POSIX file "/b"}"#
@@ -722,10 +733,27 @@ mod tests {
 
     #[test]
     fn admin_rm_script_shell_and_applescript_quotes() {
-        let s = admin_rm_script(&[PathBuf::from("/Library/It's \"x\"")]);
+        let s = admin_rm_script(&["/Library/It's \"x\""]);
         assert_eq!(
             s,
             r#"do shell script "/bin/rm -rf '/Library/It'\\''s \"x\"'" with administrator privileges"#
         );
+    }
+
+    #[test]
+    fn non_utf8_path_fails_before_any_script() {
+        use std::os::unix::ffi::OsStrExt;
+        let p = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff"));
+        let built = std::sync::atomic::AtomicBool::new(false);
+        let o = run_osascript(&[p], |_: &[&str]| {
+            built.store(true, std::sync::atomic::Ordering::SeqCst);
+            String::new()
+        });
+        assert_eq!(o.status, StepStatus::Failed);
+        assert_eq!(
+            o.reason.as_deref(),
+            Some("path is not valid UTF-8: /tmp/\u{fffd}")
+        );
+        assert!(!built.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
