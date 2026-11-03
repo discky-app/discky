@@ -163,7 +163,17 @@ impl Render for AppView {
                         self.sidebar_collapsed,
                         cx.weak_entity(),
                     ))
-                    .child(content),
+                    // The content pane fills what the title bar and sidebar leave and clips to
+                    // it, so a scrolling screen sizes to that height, not to its content.
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(content),
+                    ),
                 // The inspector slot (Task 10) goes here, right of the content.
             )
     }

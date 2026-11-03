@@ -247,14 +247,12 @@ impl Render for OverviewView {
             .map(|(ix, c)| self.card(ix, c, cx));
         div()
             .id("overview")
-            .flex_1()
-            .h_full()
+            .size_full()
             .overflow_y_scrollbar()
             .child(
                 v_flex()
                     .p_6()
                     .gap_6()
-                    .min_h_full()
                     .when_some(self.model.last_error.clone(), |this, e| {
                         this.child(
                             h_flex()
@@ -298,8 +296,9 @@ fn rescan_button(id: &'static str, label: &'static str) -> Button {
         .on_click(|_, window, cx| window.dispatch_action(Box::new(Rescan), cx))
 }
 
-/// The colour of a bar segment: `chart_*` per category in sidebar order, `muted` for
-/// "Other scanned", the bar background for "Free".
+/// The colour of a bar segment: `chart_1..chart_5` for the first five categories in
+/// sidebar order, `chart_bullish` and `warning` for the last two, `muted` for "Other
+/// scanned", the bar background for "Free".
 fn segment_color(s: &BarSegment, cx: &App) -> Hsla {
     let t = cx.theme();
     match s.category {
@@ -308,10 +307,9 @@ fn segment_color(s: &BarSegment, cx: &App) -> Hsla {
         Some(Category::Models) => t.chart_3,
         Some(Category::DevCaches) => t.chart_4,
         Some(Category::ProjectBuilds) => t.chart_5,
-        // The theme has five numbered chart colours; the other two chart colours finish
-        // the set.
+        // The theme has five numbered chart colours. No red here: it would read as danger.
         Some(Category::LanguageVersions) => t.chart_bullish,
-        Some(Category::LargeOld) => t.chart_bearish,
+        Some(Category::LargeOld) => t.warning,
         None if s.label == "Free" => t.background,
         None => t.muted,
     }
