@@ -9,16 +9,21 @@ use std::time::Duration;
 use discky_core::index::snapshot::Actor;
 use discky_core::paths::display;
 use discky_core::rules::Category;
-use discky_core::{Config, ConfigError, DisckyPaths, Engine, EngineError, EngineOptions};
+use discky_core::{
+    Config, ConfigError, DisckyPaths, Engine, EngineError, EngineOptions, ScanStatus,
+};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, StyledExt as _, Theme, TitleBar, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Sizable as _, StyledExt as _, Theme, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::format;
 use crate::overview::OverviewView;
+use crate::scan::{ScanController, ScanMsg};
 use crate::sidebar;
 
 gpui_kit::actions!(
@@ -51,6 +56,19 @@ pub struct AppState {
 
 impl Global for AppState {}
 
+/// The main window's scan controller, reachable from app-level action handlers (the menu's
+/// Rescan works with nothing focused).
+struct MainScan(Entity<ScanController>);
+
+impl Global for MainScan {}
+
+/// Start a scan through the main window's controller, if there is one.
+fn start_scan(cx: &mut App) {
+    if let Some(scan) = cx.try_global::<MainScan>().map(|m| m.0.clone()) {
+        scan.update(cx, |s, cx| s.start(cx));
+    }
+}
+
 /// Which screen the content area shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
@@ -77,8 +95,10 @@ pub struct AppView {
     /// `Overview::by_category`, shown as sidebar weights.
     weights: Vec<(Category, u64)>,
     overview: Entity<OverviewView>,
+    scan: Entity<ScanController>,
     focus: FocusHandle,
     _appearance: Subscription,
+    _scan_events: Subscription,
 }
 
 impl AppView {
@@ -88,8 +108,11 @@ impl AppView {
             Theme::sync_system_appearance(Some(window), cx);
         });
         let weights = cx.global::<AppState>().engine.overview().by_category;
+        let scan = cx.global::<MainScan>().0.clone();
+        let scan_events = cx.subscribe_in(&scan, window, Self::on_scan_msg);
         let app = cx.weak_entity();
-        let overview = cx.new(|cx| OverviewView::new(app, cx));
+        let overview_scan = scan.clone();
+        let overview = cx.new(|cx| OverviewView::new(app, overview_scan, cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         AppView {
@@ -97,9 +120,81 @@ impl AppView {
             sidebar_collapsed: false,
             weights,
             overview,
+            scan,
             focus,
             _appearance: appearance,
+            _scan_events: scan_events,
         }
+    }
+
+    /// Fan a scan result out to the views: refresh on new data, a toast otherwise.
+    fn on_scan_msg(
+        &mut self,
+        _: &Entity<ScanController>,
+        msg: &ScanMsg,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match msg {
+            // The Overview observes the controller for progress itself.
+            ScanMsg::Progress(_) => {}
+            ScanMsg::Finished(ScanStatus::Done { .. }) | ScanMsg::Refreshed => {
+                self.refresh_data(cx)
+            }
+            ScanMsg::Finished(ScanStatus::Failed { error }) => {
+                window.push_notification(Notification::error(error.clone()), cx);
+            }
+            ScanMsg::Finished(ScanStatus::Cancelled { .. }) => {
+                window.push_notification(
+                    Notification::info("Scan cancelled; previous data kept"),
+                    cx,
+                );
+            }
+            ScanMsg::Finished(ScanStatus::Running { .. } | ScanStatus::Unknown) => {}
+            ScanMsg::SnapshotUpdatedElsewhere(_) => cx.notify(),
+        }
+    }
+
+    /// Re-read the engine's snapshot everywhere it is shown: sidebar weights and Overview.
+    fn refresh_data(&mut self, cx: &mut Context<Self>) {
+        self.weights = cx.global::<AppState>().engine.overview().by_category;
+        self.overview.update(cx, |o, cx| o.refresh(cx));
+        // Task 9: refresh category views
+        cx.notify();
+    }
+
+    /// "Snapshot updated by discky-mcp at <when> · Reload", above the route content.
+    fn elsewhere_banner(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let meta = self.scan.read(cx).updated_elsewhere.clone()?;
+        let by = match meta.actor {
+            Actor::Mcp => "discky-mcp",
+            Actor::App => "Discky.app",
+        };
+        let scan = self.scan.clone();
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .flex_shrink_0()
+                .gap_2()
+                .px_4()
+                .py_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.primary.opacity(0.08))
+                .text_sm()
+                .child(div().flex_1().child(format!(
+                    "Snapshot updated by {by} at {}",
+                    format::when(meta.created_at)
+                )))
+                .child(
+                    Button::new("reload-snapshot")
+                        .small()
+                        .label("Reload")
+                        .on_click(move |_, _, cx| {
+                            scan.update(cx, |s, cx| s.reload_from_disk(cx));
+                        }),
+                ),
+        )
     }
 
     /// Show `r` in the content area. The Overview re-reads the snapshot when it is shown.
@@ -136,6 +231,9 @@ impl Render for AppView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &Rescan, _, cx| {
+                this.scan.update(cx, |s, cx| s.start(cx));
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, _, cx| this.navigate(Route::Settings, cx)),
             )
@@ -172,6 +270,7 @@ impl Render for AppView {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
+                            .children(self.elsewhere_banner(cx))
                             .child(content),
                     ),
                 // The inspector slot (Task 10) goes here, right of the content.
@@ -237,6 +336,8 @@ fn install_actions(cx: &mut App) {
         KeyBinding::new("backspace", RemoveSelected, Some(CATEGORY_TABLE_CONTEXT)),
     ]);
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    // Also handled on the main view's root; this one serves the menu with nothing focused.
+    cx.on_action(|_: &Rescan, cx: &mut App| start_scan(cx));
     cx.set_menus([
         Menu::new("Discky").items([
             MenuItem::action("About Discky", About),
@@ -295,6 +396,8 @@ fn window_options(
 /// Make `engine` the global state and open the main window.
 fn open_main_window(engine: Arc<Engine>, launch: Launch, cx: &mut App) {
     cx.set_global(AppState { engine });
+    let scan = cx.new(ScanController::new);
+    cx.set_global(MainScan(scan));
     let options = window_options(
         size(px(1100.), px(720.)),
         size(px(800.), px(500.)),

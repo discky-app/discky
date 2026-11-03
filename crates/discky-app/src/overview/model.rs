@@ -14,6 +14,9 @@ use crate::sidebar::CATEGORIES;
 /// How many findings each category card lists.
 pub const CARD_ROWS: usize = 4;
 
+/// Age in seconds after which the toolbar suggests a rescan (24 h).
+pub const STALE_AFTER: i64 = 24 * 60 * 60;
+
 /// Everything the Overview screen shows.
 #[derive(Clone, Debug)]
 pub struct OverviewModel {
@@ -21,6 +24,8 @@ pub struct OverviewModel {
     pub volume_line: String,
     /// "scanned 23 s ago by Discky.app" / "… by discky-mcp"; `None` without a snapshot.
     pub scanned_line: Option<String>,
+    /// "Data from <when>" when the snapshot is older than [`STALE_AFTER`] seconds.
+    pub stale_line: Option<String>,
     /// Bytes that can be freed safely (findings that regenerate on their own).
     pub safe_to_free: u64,
     /// How exact `safe_to_free` is; empty when unknown.
@@ -99,6 +104,10 @@ pub fn build_from(
             actor_name(actor)
         )
     });
+    let stale_line = overview
+        .snapshot_at
+        .filter(|&at| now - at > STALE_AFTER)
+        .map(|at| format!("Data from {}", format::when(at)));
     let exact_note = match overview.exact_private_size {
         Some(true) => "Frees is exact (local snapshots considered)",
         Some(false) => "Frees ignores blocks held by local snapshots",
@@ -127,6 +136,7 @@ pub fn build_from(
     OverviewModel {
         volume_line,
         scanned_line,
+        stale_line,
         safe_to_free: overview.safe_to_free,
         exact_note,
         bar: bar(overview, weight),
@@ -351,6 +361,18 @@ mod tests {
         assert!(m.scanned_line.is_some());
         assert_eq!(m.cards.len(), 1);
         assert_eq!(m.cards[0].more, 0);
+    }
+
+    #[test]
+    fn stale_line_only_after_a_day() {
+        let ov = overview(vec![(Category::Models, GB)], 10 * GB);
+        let none = |_| (Vec::new(), 0);
+        assert_eq!(
+            build_from(&ov, none, None, 1_000 + STALE_AFTER).stale_line,
+            None
+        );
+        let stale = build_from(&ov, none, None, 1_001 + STALE_AFTER).stale_line;
+        assert!(stale.is_some_and(|s| s.starts_with("Data from ")));
     }
 
     #[test]

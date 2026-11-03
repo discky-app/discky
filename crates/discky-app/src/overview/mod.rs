@@ -6,15 +6,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use discky_core::rules::Category;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app::{AppState, AppView, Rescan, Route};
 use crate::format;
+use crate::scan::ScanController;
 use model::{BarSegment, CategoryCard, OverviewModel};
 
 /// The Overview screen. It never changes the route itself: clicks go to
@@ -22,14 +25,25 @@ use model::{BarSegment, CategoryCard, OverviewModel};
 pub struct OverviewView {
     model: OverviewModel,
     app: WeakEntity<AppView>,
+    /// Shown instead of the hero while it runs.
+    scan: Entity<ScanController>,
+    _scan_changed: Subscription,
 }
 
 impl OverviewView {
-    /// Build the screen from the current snapshot; `app` receives navigation.
-    pub fn new(app: WeakEntity<AppView>, cx: &mut Context<Self>) -> Self {
+    /// Build the screen from the current snapshot; `app` receives navigation, `scan` is
+    /// shown while it runs.
+    pub fn new(
+        app: WeakEntity<AppView>,
+        scan: Entity<ScanController>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let scan_changed = cx.observe(&scan, |_, _, cx| cx.notify());
         OverviewView {
             model: current_model(cx),
             app,
+            scan,
+            _scan_changed: scan_changed,
         }
     }
 
@@ -55,6 +69,7 @@ impl OverviewView {
         } else {
             "Scan now"
         };
+        let running = self.scan.read(cx).is_running();
         h_flex()
             .w_full()
             .justify_between()
@@ -67,7 +82,10 @@ impl OverviewView {
                     .text_color(cx.theme().muted_foreground)
                     .child(m.volume_line.clone())
                     .when_some(m.scanned_line.clone(), |this, s| this.child(s))
-                    .child(rescan_button("rescan", label)),
+                    .when_some(m.stale_line.clone(), |this, s| {
+                        this.child(format!("{s} · Rescan?"))
+                    })
+                    .child(rescan_button("rescan", label).disabled(running)),
             )
     }
 
@@ -120,6 +138,30 @@ impl OverviewView {
                         ),
                 )
             })
+    }
+
+    /// The running scan: an indeterminate bar, live totals and "Cancel".
+    fn scan_progress(&self, cx: &App) -> impl IntoElement {
+        let p = &self.scan.read(cx).progress;
+        let scan = self.scan.clone();
+        v_flex()
+            .gap_3()
+            .child(Progress::new("scan-progress").loading(true))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(div().text_lg().child(format!(
+                        "Scanning… {} files · {}",
+                        p.files,
+                        format::bytes(p.allocated)
+                    )))
+                    .child(
+                        Button::new("cancel-scan")
+                            .small()
+                            .label("Cancel")
+                            .on_click(move |_, _, cx| scan.update(cx, |s, cx| s.cancel(cx))),
+                    ),
+            )
     }
 
     fn disk_bar(&self, cx: &App) -> impl IntoElement {
@@ -240,6 +282,7 @@ impl Render for OverviewView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let has_snapshot = self.model.scanned_line.is_some();
+        let running = self.scan.read(cx).is_running();
         let cards = self
             .model
             .cards
@@ -270,12 +313,16 @@ impl Render for OverviewView {
                         )
                     })
                     .child(self.toolbar(cx))
+                    // Task 8: DuckScene replaces the progress bar here.
+                    .when(running, |this| this.child(self.scan_progress(cx)))
                     .when(has_snapshot, |this| {
-                        this.child(self.hero(cx))
+                        this.when(!running, |this| this.child(self.hero(cx)))
                             .child(self.disk_bar(cx))
                             .child(div().grid().grid_cols(2).gap_4().children(cards))
                     })
-                    .when(!has_snapshot, |this| this.child(self.empty_state(cx))),
+                    .when(!has_snapshot && !running, |this| {
+                        this.child(self.empty_state(cx))
+                    }),
             )
     }
 }
@@ -293,7 +340,6 @@ fn rescan_button(id: &'static str, label: &'static str) -> Button {
     Button::new(id)
         .small()
         .label(label)
-        // Task 6 handles `Rescan` (the scan controller); until then nothing happens.
         .on_click(|_, window, cx| window.dispatch_action(Box::new(Rescan), cx))
 }
 

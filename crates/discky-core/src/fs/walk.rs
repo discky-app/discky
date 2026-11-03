@@ -44,7 +44,7 @@ pub struct ScanOptions {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Progress {
     pub files: u64,
     pub dirs: u64,
