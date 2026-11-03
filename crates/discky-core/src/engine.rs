@@ -198,7 +198,8 @@ impl Engine {
     /// Load the snapshot file if its `created_at` is newer than the in-memory snapshot's
     /// (or there is none), e.g. after the other process scanned. `Ok(true)` when it
     /// replaced the current snapshot; `Ok(false)` when the file is missing or not newer,
-    /// or a scan of this engine published meanwhile.
+    /// or a scan of this engine published meanwhile. Like [`Engine::open_with`], findings
+    /// whose path no longer exists are dropped; the file is not rewritten.
     pub fn reload_snapshot(&self) -> Result<bool, SnapshotError> {
         let old = self.snapshot();
         let newer = |created_at: i64| old.as_ref().is_none_or(|o| created_at > o.meta.created_at);
@@ -214,6 +215,8 @@ impl Engine {
         if !newer(loaded.meta.created_at) {
             return Ok(false);
         }
+        // Checked before taking the lock: it stats every finding's path.
+        let loaded = drop_gone(loaded);
         let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
         // A scan that published meanwhile is fresher: keep it.
         let unchanged = match (&current.snapshot, &old) {
@@ -660,6 +663,54 @@ mod tests {
         assert_eq!(left, ["kept", "model:1b"]);
         // The snapshot file is not rewritten.
         assert_eq!(std::fs::read(&paths.snapshot).unwrap(), on_disk);
+    }
+
+    #[test]
+    fn reload_snapshot_drops_gone_findings() {
+        let d = tempfile::tempdir().unwrap();
+        let (kept, gone) = (d.path().join("kept"), d.path().join("gone"));
+        std::fs::write(&kept, b"k").unwrap();
+        std::fs::write(&gone, b"g").unwrap();
+        let with_path = |id: &str, p: &Path| Finding {
+            path: Some(p.to_path_buf()),
+            ..ollama_finding(id)
+        };
+        let paths = DisckyPaths {
+            config: d.path().join("config.toml"),
+            snapshot: d.path().join("snapshot.bin"),
+            log: d.path().join("removals.log"),
+        };
+        let engine = Engine::open_with(EngineOptions {
+            paths: paths.clone(),
+            actor: Actor::App,
+            trash_bin: PathBuf::from(TRASH_BIN),
+        })
+        .unwrap();
+        assert!(engine.snapshot().is_none());
+        let snapshot = Snapshot {
+            meta: SnapshotMeta {
+                format_version: SNAPSHOT_FORMAT,
+                created_at: 1,
+                actor: Actor::Mcp,
+                roots: vec![d.path().into()],
+                no_access: vec![],
+                node_count: 0,
+                exact_private_size: false,
+            },
+            index: Arc::new(crate::index::Index::default()),
+            findings: vec![with_path("kept", &kept), with_path("gone", &gone)],
+        };
+        snapshot.save(&paths.snapshot).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+        assert!(matches!(engine.reload_snapshot(), Ok(true)));
+        let left: Vec<_> = engine
+            .snapshot()
+            .unwrap()
+            .findings
+            .iter()
+            .map(|f| f.id.0.clone())
+            .collect();
+        assert_eq!(left, ["kept"]);
     }
 
     #[test]

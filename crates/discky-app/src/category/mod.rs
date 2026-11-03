@@ -535,7 +535,6 @@ impl Render for CategoryView {
     }
 }
 
-/// Findings for the unit tests of this module.
 /// "Selected N · X frees", plus " · M hidden by filter" when the filter hides checked rows.
 fn selection_text(count: usize, frees: u64, hidden: usize) -> String {
     let mut s = format!(
@@ -597,6 +596,7 @@ mod tests {
     }
 }
 
+/// Findings for the unit tests of this module.
 #[cfg(test)]
 pub(crate) mod fixtures {
     use std::path::PathBuf;

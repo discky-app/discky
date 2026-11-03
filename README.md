@@ -6,7 +6,7 @@ Discky finds what is eating your Mac's disk and lets an AI agent clear it safely
 
 ## Status
 
-Milestone 2: Discky.app (Overview, categories, inspector, removal, settings) and the MCP server. Requires macOS 15 or newer (Apple Silicon or Intel, APFS).
+Milestone 3: app uninstaller and mise versions, on top of Discky.app (Overview, categories, inspector, removal, settings) and the MCP server. Requires macOS 15 or newer (Apple Silicon or Intel, APFS).
 
 ## Build the app
 
@@ -20,11 +20,13 @@ Signing needs a stable identity, so that Full Disk Access survives rebuilds (mac
 
 **Full Disk Access.** Without it macOS hides parts of `~/Library` (Mail, Safari, other apps' containers) from the scan. Grant it in System Settings → Privacy & Security → Full Disk Access (add Discky with `+`), then rescan.
 
-**Automation prompt.** Some removals go through Apple Events: Finder moves admin-owned items to the Trash, apps are asked to quit before their caches are removed, and Empty Trash asks Finder. The first time, macOS asks whether Discky may control Finder (or that app); allow it, or those steps fail. The choice can be changed in System Settings → Privacy & Security → Automation.
+**Applications and Language versions.** Applications lists installed apps (Homebrew casks, App Store, installer packages and dragged-in bundles) with their last use and the files they left in `~/Library` and `/Library`, plus leftovers of apps that are already gone. Language versions lists the tool versions mise installed, with which ones are global or used by a project. The inspector shows each removable part of an app (bundle, caches, settings, launch agents, package receipts…) as a checkbox: uncheck a leftover to keep it. An app is removed only through official mechanisms: its vendor's uninstaller script first when it ships one, then `brew uninstall` (with `--zap` only when every path the cask's zap stanza removes is listed and checked), the installer package's file list, or the Trash; a language version through `mise uninstall`. Keychain items are never touched.
 
-**Quitting during a removal.** ⌘Q and closing the window wait until a running removal finishes. Quitting from the Dock or logging out during a removal interrupts it; the removal log records the interrupted step (`"kind": "interrupted"`), and the next scan shows what is left.
+**Automation prompt.** Some removals go through Apple Events: Finder moves admin-owned items to the Trash, apps are asked to quit before their files are removed, and Empty Trash asks Finder. The first time, macOS asks whether Discky may control Finder (or that app); allow it, or those steps fail. The choice can be changed in System Settings → Privacy & Security → Automation. System-level steps such as `pkgutil --forget` and `launchctl bootout system` show an administrator password prompt instead; cancelling it stops the removal at that step.
 
-**Upgrading from Milestone 1.** The snapshot format changed: an old `snapshot.bin` (format 1) is ignored, so the first launch shows "No scan yet" until you rescan. Build `discky-mcp` and Discky.app from the same milestone; they share the snapshot file, and each ignores a snapshot in the other's format.
+**Quitting during a removal.** ⌘Q and closing the window are refused with a notification while a removal runs; quitting from the Dock or logging out interrupts the running step and the log records it (`"kind": "interrupted"`). The next scan shows what is left.
+
+**Upgrading from an earlier milestone.** The snapshot format changed (now format 3): an older `snapshot.bin` is ignored, so the first launch shows "No scan yet" until you rescan. Build `discky-mcp` and Discky.app from the same milestone; they share the snapshot file, and each ignores a snapshot in the other's format.
 
 ## Install the MCP server
 

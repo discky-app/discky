@@ -181,8 +181,8 @@ mod tests {
         let text = render_plist(PLIST_TEMPLATE, "1.2.3");
         assert!(text.contains(
             "<key>NSAppleEventsUsageDescription</key>\n\t<string>Discky asks Finder to move \
-             admin-owned items to the Trash and asks apps to quit before their caches are \
-             removed.</string>"
+             admin-owned items to the Trash, asks apps to quit before their files are removed, \
+             and empties the Trash when you ask.</string>"
         ));
     }
 

@@ -27,7 +27,7 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Discky asks Finder to move admin-owned items to the Trash and asks apps to quit before their caches are removed.</string>
+	<string>Discky asks Finder to move admin-owned items to the Trash, asks apps to quit before their files are removed, and empties the Trash when you ask.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
