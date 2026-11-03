@@ -179,7 +179,10 @@ pub struct Finding {
     pub rule_id: String,
     pub explain: String,
     pub removal: Removal,
-    /// Any of `"sparse"`, `"dataless"`, `"hardlinks"`, `"no_access"`, `"clone_shared"`.
+    /// Any of `"sparse"`, `"dataless"`, `"hardlinks"`, `"no_access"`, `"clone_shared"`; app
+    /// findings also `"app-running"` and `"zap-shared"` (the cask's zap stanza names a shared
+    /// component: the planner must run `brew uninstall --cask <token>` without `--zap` and
+    /// trash the non-shared covered components itself).
     pub flags: Vec<String>,
     /// Selectable parts (app bundle, leftovers, requesting projects); empty for most
     /// findings. Indices are what [`crate::plan::PlanItem::components`] refers to.

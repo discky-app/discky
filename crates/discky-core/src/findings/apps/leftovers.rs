@@ -299,6 +299,9 @@ pub(crate) struct Installed {
     by_id: HashMap<String, String>,
     /// Display names, lowercase without spaces.
     names: HashSet<String>,
+    /// Ids known only as running processes (no installed bundle): an app's own helper
+    /// process is often one, so they never make a launchd job shared.
+    running_only: HashSet<String>,
 }
 
 impl Installed {
@@ -322,6 +325,23 @@ impl Installed {
         self.by_id
             .entry(id.to_lowercase())
             .or_insert_with(|| name.to_string());
+    }
+
+    /// Record a running process's id (counts as in use, see `running_only`).
+    pub fn insert_running(&mut self, id: &str, name: &str) {
+        let key = id.to_lowercase();
+        if !self.by_id.contains_key(&key) {
+            self.running_only.insert(key);
+        }
+        self.insert(id, name);
+    }
+
+    /// The name of installed bundle id `id` (lowercase); `None` for running-only ids.
+    fn bundle_name_of(&self, id: &str) -> Option<&str> {
+        if self.running_only.contains(id) {
+            return None;
+        }
+        self.by_id.get(id).map(String::as_str)
     }
 
     /// The longest installed id `norm` starts with (component-wise), with its name.
@@ -386,9 +406,9 @@ pub(crate) fn attach(
     let bid = q.bundle_id.map(str::to_lowercase);
     let bid = bid.as_deref();
     let own = |norm: &str| bid.is_some_and(|b| has_id_prefix(norm, b));
-    let mut picked: Vec<(&Candidate, bool /* own */)> = Vec::new();
-    let mut labels: HashSet<String> = HashSet::new();
-    let mut programs: HashSet<PathBuf> = HashSet::new();
+    let mut picked: Vec<(&Candidate, Sharing)> = Vec::new();
+    // Status of every matched job, by lowercase label and by program path, for helpers.
+    let mut jobs: Vec<(String, Option<PathBuf>, Sharing)> = Vec::new();
     let mut seen: HashSet<&Path> = HashSet::new();
     // Launchd jobs and everything else first; helpers need the matched jobs.
     for c in cands
@@ -412,11 +432,15 @@ pub(crate) fn attach(
         if !(by_id || by_zap || by_name || by_job) {
             continue;
         }
-        if let Some(j) = &c.launchd {
-            labels.insert(j.label.to_lowercase());
-            programs.extend(j.program.clone());
-        }
-        picked.push((c, by_id || by_job));
+        let status = match &c.launchd {
+            Some(j) => {
+                let s = job_sharing(c, j, bid, installed);
+                jobs.push((j.label.to_lowercase(), j.program.clone(), s.clone()));
+                s
+            }
+            None => sharing(&c.norm, by_id, bid, installed),
+        };
+        picked.push((c, status));
         seen.insert(&c.path);
     }
     for c in cands
@@ -424,16 +448,29 @@ pub(crate) fn attach(
         .iter()
         .filter(|c| c.kind == ComponentKind::PrivilegedHelper)
     {
-        let by_job = labels.contains(&c.norm) || programs.contains(&c.path);
-        if own(&c.norm) || by_job || q.zap_paths.contains(&c.path) {
-            picked.push((c, own(&c.norm) || by_job));
-            seen.insert(&c.path);
+        // A helper started by a matched job shares that job's status.
+        let inherited = jobs
+            .iter()
+            .filter(|(label, program, _)| *label == c.norm || program.as_deref() == Some(&*c.path))
+            .map(|(_, _, s)| s.clone())
+            .max_by_key(Sharing::rank);
+        let by_own = own(&c.norm) || q.zap_paths.contains(&c.path);
+        if inherited.is_none() && !by_own {
+            continue;
         }
+        let own_status = by_own.then(|| sharing(&c.norm, own(&c.norm), bid, installed));
+        let status = inherited
+            .into_iter()
+            .chain(own_status)
+            .max_by_key(Sharing::rank)
+            .unwrap_or(Sharing::Mine);
+        picked.push((c, status));
+        seen.insert(&c.path);
     }
 
     let mut out = Vec::new();
-    for (c, owned) in picked {
-        let shared = match sharing(&c.norm, owned, bid, installed) {
+    for (c, status) in picked {
+        let shared = match status {
             Sharing::Other => continue,
             Sharing::With(name) => Some(name),
             Sharing::Mine => None,
@@ -477,6 +514,7 @@ pub(crate) fn attach(
     out
 }
 
+#[derive(Debug, Clone)]
 enum Sharing {
     /// Removed with this app.
     Mine,
@@ -484,6 +522,44 @@ enum Sharing {
     With(String),
     /// Belongs to another app (a longer bundle id matches): not listed.
     Other,
+}
+
+impl Sharing {
+    /// Which status wins when a helper gets several: belonging elsewhere, then shared.
+    fn rank(&self) -> u8 {
+        match self {
+            Sharing::Mine => 0,
+            Sharing::With(_) => 1,
+            Sharing::Other => 2,
+        }
+    }
+}
+
+/// A matched launchd job. It is the app's own only when its label or plist name extends the
+/// app's bundle id; a match through `AssociatedBundleIdentifiers` or a cask `launchctl`
+/// label goes through the full shared check (vendor included). Any other installed app
+/// bundle in `AssociatedBundleIdentifiers` makes it shared (running-only ids do not).
+fn job_sharing(c: &Candidate, j: &LaunchdJob, bid: Option<&str>, installed: &Installed) -> Sharing {
+    let label = j.label.to_lowercase();
+    let owns = |n: &str| bid.is_some_and(|b| has_id_prefix(n, b));
+    let owned = owns(&c.norm) || owns(&label);
+    let mut status = sharing(&c.norm, owned, bid, installed);
+    if matches!(status, Sharing::Mine) && !owned && label != c.norm {
+        status = sharing(&label, false, bid, installed);
+    }
+    if matches!(status, Sharing::Other) {
+        return status;
+    }
+    let other = j
+        .associated
+        .iter()
+        .map(|a| a.to_lowercase())
+        .filter(|a| Some(a.as_str()) != bid)
+        .find_map(|a| installed.bundle_name_of(&a));
+    match other {
+        Some(name) => Sharing::With(name.to_string()),
+        None => status,
+    }
 }
 
 fn sharing(norm: &str, owned: bool, bid: Option<&str>, installed: &Installed) -> Sharing {

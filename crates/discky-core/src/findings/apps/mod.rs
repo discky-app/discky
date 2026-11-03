@@ -35,6 +35,12 @@ use leftovers::{Candidates, Installed, LeftoverQuery, NOTE_ADMIN};
 
 /// An app not opened for this many days counts as unused.
 pub const UNUSED_DAYS: u32 = 180;
+/// Flag of an app finding whose app is running (the planner quits it first).
+pub const FLAG_APP_RUNNING: &str = "app-running";
+/// Flag of a cask app finding whose `zap` stanza names a shared component: the planner
+/// must run `brew uninstall --cask <token>` without `--zap` and trash the non-shared
+/// covered components itself.
+pub const FLAG_ZAP_SHARED: &str = "zap-shared";
 /// `rule_id` of app findings.
 pub const RULE_APP: &str = "apps";
 /// `rule_id` of a leftover group of a removed app.
@@ -233,7 +239,7 @@ pub fn find_with(
         }
     }
     for id in input.running {
-        installed.insert(id, &leftovers::humanise(id));
+        installed.insert_running(id, &leftovers::humanise(id));
     }
     let cands = Candidates::gather(index, home, input.system_library, input.launchctl);
     let mut out = Vec::new();
@@ -305,10 +311,18 @@ fn app_finding(
         cask_launchctl: &cask_launchctl,
     };
     let mut leftovers = leftovers::attach(index, cands, &q, installed);
+    let mut zap_shared = false;
     for l in &mut leftovers {
-        l.component.covered_by_cask = l.component.path.as_deref().is_some_and(|p| {
+        let zapped = l.component.path.as_deref().is_some_and(|p| {
             zap_removed.iter().any(|z| p.starts_with(z)) || zap_rmdir.iter().any(|z| z == p)
         });
+        // A shared component is never removed by Discky, so it is never "covered": brew's
+        // zap would delete it, which the flag tells the planner.
+        if l.component.removal == ComponentRemoval::None {
+            zap_shared |= zapped;
+        } else {
+            l.component.covered_by_cask = zapped;
+        }
     }
 
     let running = app
@@ -395,7 +409,10 @@ fn app_finding(
         SafetyLabel::AppData
     };
     if running {
-        f.flags.push("app-running".to_string());
+        f.flags.push(FLAG_APP_RUNNING.to_string());
+    }
+    if zap_shared {
+        f.flags.push(FLAG_ZAP_SHARED.to_string());
     }
 
     let last = match app.last_used {
@@ -612,7 +629,7 @@ fn group_finding(index: &Index, vendor: &str, items: &[&leftovers::Candidate]) -
         modified: components.iter().filter_map(|(c, _)| c.modified).max(),
         label: SafetyLabel::AppData,
         rule_id: RULE_LEFTOVERS.to_string(),
-        explain: "No installed app uses these files.".to_string(),
+        explain: "No installed app found that uses these files.".to_string(),
         removal: Removal::Trash { paths },
         flags: Vec::new(),
         components: components.into_iter().map(|(c, _)| c).collect(),

@@ -372,6 +372,17 @@ fn shared_leftover_is_attached_to_no_app() {
         assert!(!s.default_on);
         assert_eq!(s.note.as_deref(), Some("shared with Google Drive"));
     }
+    for shared in [&google, &keystone] {
+        assert!(
+            !component(c, shared).covered_by_cask,
+            "{shared:?}: shared, never covered"
+        );
+    }
+    assert!(
+        c.flags.iter().any(|x| x == "zap-shared"),
+        "the zap stanza names a shared folder: {:?}",
+        c.flags
+    );
     let bundle_alloc = c.components[0].allocated;
     assert_eq!(c.allocated, bundle_alloc + component(c, &own).allocated);
 
@@ -597,7 +608,7 @@ fn leftover_group_for_removed_app_claims_its_nodes() {
         Some("leftovers of a removed app · 4 items")
     );
     assert_eq!(g.label, SafetyLabel::AppData);
-    assert_eq!(g.explain, "No installed app uses these files.");
+    assert_eq!(g.explain, "No installed app found that uses these files.");
     assert_eq!(g.components.len(), 4);
     let Removal::Trash { paths } = &g.removal else {
         panic!("{:?}", g.removal)
@@ -872,6 +883,11 @@ fn zap_paths_mark_components_as_covered() {
         !f.components.last().unwrap().covered_by_cask,
         "Keychain line"
     );
+    assert!(
+        !f.flags.iter().any(|x| x == "zap-shared"),
+        "no shared zap path: {:?}",
+        f.flags
+    );
 
     // A dragged app: nothing is covered.
     let found = Ctx::new(root).run(
@@ -887,4 +903,153 @@ fn zap_paths_mark_components_as_covered() {
         &mut HashSet::new(),
     );
     assert!(found[0].components.iter().all(|c| !c.covered_by_cask));
+}
+
+/// A launchd plist at `path` with `Label`, `AssociatedBundleIdentifiers` and `Program`.
+fn launchd_plist(path: &Path, label: &str, associated: &[&str], program: Option<&Path>) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut d = plist::Dictionary::new();
+    d.insert("Label".into(), label.into());
+    if !associated.is_empty() {
+        d.insert(
+            "AssociatedBundleIdentifiers".into(),
+            plist::Value::Array(associated.iter().map(|a| (*a).into()).collect()),
+        );
+    }
+    if let Some(p) = program {
+        d.insert("Program".into(), p.to_string_lossy().into_owned().into());
+    }
+    plist::Value::Dictionary(d).to_file_xml(path).unwrap();
+}
+
+#[test]
+fn job_associated_with_two_installed_apps_is_shared() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let one = root.join("Applications/One.app");
+    make_app(&one, "com.alpha.one");
+    let two = root.join("Applications/Two.app");
+    make_app(&two, "com.beta.two");
+    let helper = file(root, "Library/PrivilegedHelperTools/org.gamma.updater", 16);
+    let daemon = root.join("Library/LaunchDaemons/org.gamma.updater.plist");
+    launchd_plist(
+        &daemon,
+        "org.gamma.updater",
+        &["com.alpha.one", "com.beta.two"],
+        Some(&helper),
+    );
+    // Associated with one app and a running helper process that is no installed bundle:
+    // attached normally.
+    let solo = root.join("Library/LaunchAgents/org.gamma.solo.plist");
+    launchd_plist(
+        &solo,
+        "org.gamma.solo",
+        &["com.alpha.one", "com.alpha.helperprocess"],
+        None,
+    );
+    let idx = scan(root);
+    let apps = [
+        app(
+            &idx,
+            &one,
+            "com.alpha.one",
+            AppSource::Dragged,
+            LastUsed::Spotlight(NOW),
+        ),
+        app(
+            &idx,
+            &two,
+            "com.beta.two",
+            AppSource::Dragged,
+            LastUsed::Spotlight(NOW),
+        ),
+    ];
+    let mut ctx = Ctx::new(root);
+    ctx.running.insert("com.alpha.helperprocess".into());
+    let found = ctx.run(&idx, &home, &apps, &mut HashSet::new());
+    for (title, other) in [("One", "Two"), ("Two", "One")] {
+        let f = found.iter().find(|f| f.title == title).unwrap();
+        for p in [&daemon, &helper] {
+            let c = component(f, p);
+            assert_eq!(c.removal, ComponentRemoval::None, "{title} {p:?}");
+            assert!(!c.default_on, "{title} {p:?}");
+            assert_eq!(c.note.as_deref(), Some(&*format!("shared with {other}")));
+        }
+        if title == "Two" {
+            // One's own /Library agent needs a password; Two has only shared system items.
+            assert_eq!(
+                f.label,
+                SafetyLabel::AppData,
+                "the shared daemon is not selected"
+            );
+        }
+    }
+    let f = found.iter().find(|f| f.title == "One").unwrap();
+    let c = component(f, &solo);
+    assert!(c.default_on);
+    assert_eq!(
+        c.removal,
+        ComponentRemoval::Bootout {
+            label: "org.gamma.solo".into(),
+            system: false
+        }
+    );
+}
+
+#[test]
+fn cask_launchctl_label_of_a_shared_vendor_is_shared() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let home = root.join("home");
+    let chrome = root.join("Applications/Google Chrome.app");
+    make_app(&chrome, "com.google.Chrome");
+    let drive = root.join("Applications/Google Drive.app");
+    make_app(&drive, "com.google.drivefs");
+    let agent = home.join("Library/LaunchAgents/com.google.keystone.agent.plist");
+    launchd_plist(&agent, "com.google.keystone.agent", &[], None);
+    let own_agent = home.join("Library/LaunchAgents/com.google.Chrome.updater.plist");
+    launchd_plist(&own_agent, "com.google.Chrome.updater", &[], None);
+    let idx = scan(root);
+    let mut ctx = Ctx::new(root);
+    ctx.casks = vec![Cask {
+        token: "google-chrome".into(),
+        full_token: "google-chrome".into(),
+        installed: Some("1".into()),
+        app_targets: vec![chrome.clone()],
+        uninstall: vec![Directive {
+            launchctl: vec!["com.google.keystone.agent".into()],
+            ..Default::default()
+        }],
+        zap: Vec::new(),
+    }];
+    let apps = [
+        app(
+            &idx,
+            &chrome,
+            "com.google.Chrome",
+            AppSource::Cask {
+                token: "google-chrome".into(),
+                full_token: "google-chrome".into(),
+            },
+            LastUsed::Spotlight(NOW),
+        ),
+        app(
+            &idx,
+            &drive,
+            "com.google.drivefs",
+            AppSource::Dragged,
+            LastUsed::Spotlight(NOW),
+        ),
+    ];
+    let found = ctx.run(&idx, &home, &apps, &mut HashSet::new());
+    let c = found.iter().find(|f| f.title == "Google Chrome").unwrap();
+    let a = component(c, &agent);
+    assert_eq!(a.removal, ComponentRemoval::None);
+    assert!(!a.default_on);
+    assert_eq!(a.note.as_deref(), Some("shared with Google Drive"));
+    let own = component(c, &own_agent);
+    assert!(own.default_on, "label has Chrome's bundle id as prefix");
+    assert!(matches!(own.removal, ComponentRemoval::Bootout { .. }));
 }
