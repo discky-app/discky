@@ -13,7 +13,7 @@ use discky_core::index::snapshot::Actor;
 use discky_core::paths::display;
 use discky_core::rules::Category;
 use discky_core::{
-    Config, ConfigError, DisckyPaths, Engine, EngineError, EngineOptions, ScanStatus,
+    Config, ConfigError, DisckyPaths, Engine, EngineError, EngineOptions, PlanItem, ScanStatus,
 };
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input;
@@ -205,21 +205,21 @@ impl AppView {
                 })
                 .collect();
             if !ids.is_empty() {
-                self.open_removal(ids, window, cx);
+                self.open_removal(defaults(ids), window, cx);
             }
         }
         #[cfg(not(debug_assertions))]
         let _ = (window, cx);
     }
 
-    /// Open the removal dialog for `ids` (it plans them afresh); refused while a removal
+    /// Open the removal dialog for `items` (it plans them afresh); refused while a removal
     /// runs, so one run's dialog and flag are never replaced by another's.
-    fn open_removal(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_removal(&mut self, items: Vec<PlanItem>, window: &mut Window, cx: &mut Context<Self>) {
         if removal_running(cx) {
             window.push_notification(Notification::warning(REMOVAL_BUSY_MESSAGE), cx);
             return;
         }
-        let dialog = removal::open(ids, window, cx);
+        let dialog = removal::open(items, window, cx);
         self._removal_events = Some(cx.subscribe(&dialog, Self::on_removal_event));
         self.removal = Some(dialog);
     }
@@ -293,8 +293,8 @@ impl AppView {
     ) {
         match event {
             InspectorEvent::Close => self.close_inspector(cx),
-            InspectorEvent::RemoveRequested(id) => {
-                self.open_removal(vec![id.clone()], window, cx);
+            InspectorEvent::RemoveItems(items) => {
+                self.open_removal(items.clone(), window, cx);
             }
         }
     }
@@ -376,7 +376,9 @@ impl AppView {
         match event {
             CategoryEvent::Inspect(finding) => self.inspect(finding.clone(), window, cx),
             CategoryEvent::Cleared => self.close_inspector(cx),
-            CategoryEvent::RemoveRequested(ids) => self.open_removal(ids.clone(), window, cx),
+            CategoryEvent::RemoveRequested(ids) => {
+                self.open_removal(defaults(ids.clone()), window, cx);
+            }
         }
     }
 
@@ -635,6 +637,16 @@ fn install_actions(cx: &mut App) {
         // AppKit fills a menu named "Window" with the standard window items.
         Menu::new("Window"),
     ]);
+}
+
+/// Plan requests for `ids` with their default components (the table's checkboxes).
+fn defaults(ids: Vec<String>) -> Vec<PlanItem> {
+    ids.into_iter()
+        .map(|id| PlanItem {
+            id,
+            components: None,
+        })
+        .collect()
 }
 
 /// Whether a removal plan is executing right now.

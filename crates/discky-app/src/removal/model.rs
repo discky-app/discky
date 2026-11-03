@@ -1,15 +1,17 @@
 //! The removal dialog's state, free of GPUI: the planned steps as rows, their live
 //! statuses while the plan runs, and the result.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use discky_core::findings::{Finding, FindingId};
 use discky_core::plan::execute::{
     ExecuteError, ExecutionReport, StepEvent, StepResult, StepStatus,
 };
 use discky_core::plan::{Plan, PlanId, Step, StepFlags, StepKind};
-use discky_core::{Config, RemovalMode};
+use discky_core::{Config, PlanItem, RemovalMode};
 
 use crate::format;
 use crate::inspector::command_text_for;
@@ -38,6 +40,8 @@ pub enum Phase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepRow {
     pub index: usize,
+    /// "<finding title> → <component title>" for a step that acts on one component.
+    pub component: Option<String>,
     pub description: String,
     /// The shell form of the step (see `inspector::command_text_for`).
     pub command: String,
@@ -78,7 +82,10 @@ pub struct Summary {
 /// The removal dialog's model.
 #[derive(Clone, Debug)]
 pub struct RemovalModel {
-    /// The finding ids the dialog was opened for (planned again on Re-plan).
+    /// What the dialog was opened for, with each finding's component selection (planned
+    /// again on Re-plan).
+    pub items: Vec<PlanItem>,
+    /// The finding ids of `items`, or of the plan's planned and skipped findings.
     pub ids: Vec<String>,
     pub plan: Option<Plan>,
     pub rows: Vec<StepRow>,
@@ -90,10 +97,11 @@ pub struct RemovalModel {
 }
 
 impl RemovalModel {
-    /// A dialog for `ids` whose plan is still being made.
-    pub fn planning(ids: Vec<String>, cfg: &Config) -> Self {
+    /// A dialog for `items` whose plan is still being made.
+    pub fn planning(items: Vec<PlanItem>, cfg: &Config) -> Self {
         RemovalModel {
-            ids,
+            ids: items.iter().map(|i| i.id.clone()).collect(),
+            items,
             plan: None,
             rows: Vec::new(),
             phase: Phase::Planning,
@@ -103,8 +111,16 @@ impl RemovalModel {
     }
 
     /// A dialog showing `plan`: one row per step, notes from flags, warnings, the freed
-    /// note; `ids` are the planned and skipped findings.
+    /// note; `ids` are the planned and skipped findings. Rows carry no component titles
+    /// (see [`RemovalModel::from_plan_titled`]).
     pub fn from_plan(plan: Plan, cfg: &Config) -> Self {
+        RemovalModel::from_plan_titled(plan, &FindingTitles::default(), cfg)
+    }
+
+    /// [`RemovalModel::from_plan`], with "<finding> → <component>" on every row whose step
+    /// acts on a component, looked up in `titles`. `items` default to the plan's findings
+    /// with their default components.
+    pub fn from_plan_titled(plan: Plan, titles: &FindingTitles, cfg: &Config) -> Self {
         let mut ids: Vec<String> = Vec::new();
         let planned = plan.steps.iter().map(|s| &s.finding);
         for id in planned.chain(plan.skipped.iter().map(|(id, _)| id)) {
@@ -112,12 +128,19 @@ impl RemovalModel {
                 ids.push(id.0.clone());
             }
         }
-        let rows = plan.steps.iter().map(row).collect();
+        let rows = plan.steps.iter().map(|s| row(s, titles)).collect();
+        let items = ids
+            .iter()
+            .map(|id| PlanItem {
+                id: id.clone(),
+                components: None,
+            })
+            .collect();
         RemovalModel {
             plan: Some(plan),
             rows,
             phase: Phase::Ready,
-            ..RemovalModel::planning(ids, cfg)
+            ..RemovalModel::planning(items, cfg)
         }
     }
 
@@ -278,7 +301,7 @@ impl RemovalModel {
 /// The row for a planned step, with its notes: flags ("Needs an administrator password"
 /// — not for a Quit step, which only asks the app —, "Permanent", "Tool not installed:
 /// <hint>"), then the freed note, then the remaining warnings.
-fn row(step: &Step) -> StepRow {
+fn row(step: &Step, titles: &FindingTitles) -> StepRow {
     let mut notes = Vec::new();
     let quit = matches!(step.kind, StepKind::Quit { .. });
     if step.flags.contains(StepFlags::INTERACTIVE) && !quit {
@@ -298,6 +321,9 @@ fn row(step: &Step) -> StepRow {
     notes.extend(warnings.cloned());
     StepRow {
         index: step.index,
+        component: step
+            .component
+            .and_then(|i| titles.component(&step.finding, i)),
         description: step.description.clone(),
         command: command_text_for(step),
         freed: step.freed,
@@ -305,6 +331,36 @@ fn row(step: &Step) -> StepRow {
         status: RowStatus::Pending,
         output: String::new(),
         reason: None,
+    }
+}
+
+/// The titles of the planned findings and of their components, so a step row can say
+/// which part of which finding it removes.
+#[derive(Clone, Debug, Default)]
+pub struct FindingTitles(HashMap<String, (String, Vec<String>)>);
+
+impl FindingTitles {
+    /// The titles of `findings`.
+    pub fn from_findings<'a>(findings: impl IntoIterator<Item = &'a Finding>) -> Self {
+        FindingTitles(
+            findings
+                .into_iter()
+                .map(|f| {
+                    let comps = f.components.iter().map(|c| c.title.clone()).collect();
+                    (f.id.0.clone(), (f.title.clone(), comps))
+                })
+                .collect(),
+        )
+    }
+
+    /// "<finding title> → <component title>" for component `i` of `id`; only the finding
+    /// title when `i` is unknown; `None` for an unknown finding.
+    pub fn component(&self, id: &FindingId, i: usize) -> Option<String> {
+        let (title, comps) = self.0.get(&id.0)?;
+        Some(match comps.get(i) {
+            Some(c) => format!("{title} → {c}"),
+            None => title.clone(),
+        })
     }
 }
 
@@ -402,8 +458,10 @@ impl Drop for RunToken {
 #[cfg(test)]
 mod tests {
     use super::{
-        Phase, RemovalModel, RowStatus, RunFlag, Summary, allow_interactive, show_empty_trash,
+        FindingTitles, Phase, RemovalModel, RowStatus, RunFlag, Summary, allow_interactive,
+        show_empty_trash,
     };
+    use discky_core::PlanItem;
     use discky_core::findings::FindingId;
     use discky_core::plan::execute::{
         ExecuteError, ExecutionReport, StepEvent, StepResult, StepStatus,
@@ -574,7 +632,12 @@ mod tests {
         m.replan();
         assert_eq!(m.phase, Phase::Planning);
 
-        let m = RemovalModel::planning(vec!["a".into(), "b".into()], &Config::default());
+        let items = ["a", "b"].map(|id| PlanItem {
+            id: id.into(),
+            components: None,
+        });
+        let m = RemovalModel::planning(items.to_vec(), &Config::default());
+        assert_eq!(m.items, items);
         assert_eq!(m.phase, Phase::Planning);
         assert_eq!(m.ids, ["a", "b"]);
         assert!(m.rows.is_empty());
@@ -774,5 +837,68 @@ mod tests {
         drop(token);
         assert!(!flag.is_running());
         assert!(!shared.is_running());
+    }
+
+    #[test]
+    fn rows_show_component_titles() {
+        use discky_core::findings::{Component, ComponentKind, ComponentRemoval, Finding, Removal};
+        use discky_core::rules::{Category, SafetyLabel};
+        let comp = |title: &str| Component {
+            kind: ComponentKind::ApplicationSupport,
+            title: title.into(),
+            path: None,
+            allocated: 0,
+            freed_if_deleted: 0,
+            modified: None,
+            default_on: true,
+            removal: ComponentRemoval::Trash,
+            note: None,
+            covered_by_cask: false,
+        };
+        let finding = Finding {
+            id: FindingId("f0".into()),
+            category: Category::Apps,
+            title: "TeamViewer".into(),
+            subtitle: None,
+            path: None,
+            node: None,
+            allocated: 0,
+            logical: 0,
+            freed_if_deleted: 0,
+            modified: None,
+            label: SafetyLabel::AppData,
+            rule_id: "apps".into(),
+            explain: String::new(),
+            removal: Removal::None,
+            flags: Vec::new(),
+            components: vec![comp("Application"), comp("Application Support")],
+        };
+        let titles = FindingTitles::from_findings([&finding]);
+        let mut with = trash(0, "/tmp/a", StepFlags::empty(), 1);
+        with.component = Some(1);
+        with.warnings = vec!["Homebrew zap skipped: shared".into()];
+        let without = trash(1, "/tmp/b", StepFlags::empty(), 1);
+        let mut unknown = trash(2, "/tmp/c", StepFlags::empty(), 1);
+        unknown.finding = FindingId("f0".into());
+        unknown.component = Some(7);
+        let m = RemovalModel::from_plan_titled(
+            plan(vec![with, without, unknown], &[]),
+            &titles,
+            &Config::default(),
+        );
+        assert_eq!(
+            m.rows[0].component.as_deref(),
+            Some("TeamViewer → Application Support")
+        );
+        assert_eq!(m.rows[0].notes, ["Homebrew zap skipped: shared"]);
+        assert_eq!(m.rows[1].component, None);
+        // An index the titles do not know falls back to the finding title.
+        assert_eq!(m.rows[2].component.as_deref(), Some("TeamViewer"));
+        // Without titles, rows have no component line.
+        let plain = RemovalModel::from_plan(
+            plan(vec![trash(0, "/tmp/a", StepFlags::empty(), 1)], &[]),
+            &Config::default(),
+        );
+        assert_eq!(plain.rows[0].component, None);
     }
 }

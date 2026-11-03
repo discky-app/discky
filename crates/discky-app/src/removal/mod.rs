@@ -8,14 +8,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use discky_core::plan::execute::{ExecuteError, ExecutionReport, OSASCRIPT, StepEvent, StepSink};
-use discky_core::{Config, ExecuteRequest};
+use discky_core::{Config, ExecuteRequest, PlanItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -23,7 +23,7 @@ use gpui_kit::*;
 use crate::app::AppState;
 use crate::format;
 use model::{
-    INTERACTIVE_SKIPPED_NOTE, Phase, RemovalModel, RowStatus, RunToken, StepRow,
+    FindingTitles, INTERACTIVE_SKIPPED_NOTE, Phase, RemovalModel, RowStatus, RunToken, StepRow,
     TRASH_OVERRIDDEN_NOTE, allow_interactive, show_empty_trash,
 };
 
@@ -61,9 +61,10 @@ pub struct RemovalDialog {
 
 impl EventEmitter<RemovalEvent> for RemovalDialog {}
 
-/// Open the modal removal dialog for the finding `ids` and start planning them.
-pub fn open(ids: Vec<String>, window: &mut Window, cx: &mut App) -> Entity<RemovalDialog> {
-    let view = cx.new(|cx| RemovalDialog::new(ids, cx));
+/// Open the modal removal dialog for `items` (findings with their component selections)
+/// and start planning them.
+pub fn open(items: Vec<PlanItem>, window: &mut Window, cx: &mut App) -> Entity<RemovalDialog> {
+    let view = cx.new(|cx| RemovalDialog::new(items, cx));
     let shown = view.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
         let d = shown.read(cx);
@@ -81,13 +82,13 @@ pub fn open(ids: Vec<String>, window: &mut Window, cx: &mut App) -> Entity<Remov
 }
 
 impl RemovalDialog {
-    fn new(ids: Vec<String>, cx: &mut Context<Self>) -> Self {
+    fn new(items: Vec<PlanItem>, cx: &mut Context<Self>) -> Self {
         let engine = cx.global::<AppState>().engine.clone();
         let cfg = engine.config();
         let trash_overridden =
             engine.trash_bin() != std::path::Path::new(discky_core::engine::TRASH_BIN);
         let mut dialog = RemovalDialog {
-            model: RemovalModel::planning(ids, &cfg),
+            model: RemovalModel::planning(items, &cfg),
             home: discky_core::paths::home_dir().unwrap_or_default(),
             emptying: false,
             trash_overridden,
@@ -102,42 +103,59 @@ impl RemovalDialog {
 
     /// "Remove N items".
     fn title(&self) -> String {
-        match self.model.ids.len() {
+        match self.model.items.len() {
             1 => "Remove 1 item".to_string(),
             n => format!("Remove {n} items"),
         }
     }
 
-    /// Plan `model.ids` afresh on the background executor (planning stats every path).
+    /// Plan `model.items` afresh on the background executor (planning stats every path),
+    /// with the titles of the planned findings and their components for the rows.
     fn plan(&mut self, cx: &mut Context<Self>) {
         let engine = cx.global::<AppState>().engine.clone();
-        let ids = self.model.ids.clone();
+        let items = self.model.items.clone();
         let work = cx.background_spawn(async move {
-            let plan = engine.plan(&ids).map_err(|e| e.to_string());
-            (plan, engine.config())
+            let plan = engine.plan_items(&items).map_err(|e| e.to_string());
+            let titles = engine
+                .snapshot()
+                .map_or_else(FindingTitles::default, |snap| {
+                    FindingTitles::from_findings(
+                        snap.findings
+                            .iter()
+                            .filter(|f| items.iter().any(|i| i.id == f.id.0)),
+                    )
+                });
+            (plan, titles, engine.config())
         });
         self._plan = cx.spawn(async move |this, cx| {
-            let (plan, cfg) = work.await;
+            let (plan, titles, cfg) = work.await;
             let _ = this.update(cx, |this, cx| {
-                this.planned(plan, &cfg);
+                this.planned(plan, &titles, &cfg);
                 cx.notify();
             });
         });
     }
 
-    /// Show the plan (keeping the requested ids), or the planning error.
-    fn planned(&mut self, plan: Result<discky_core::plan::Plan, String>, cfg: &Config) {
+    /// Show the plan (keeping the requested items and ids), or the planning error.
+    fn planned(
+        &mut self,
+        plan: Result<discky_core::plan::Plan, String>,
+        titles: &FindingTitles,
+        cfg: &Config,
+    ) {
         match plan {
             Ok(plan) => {
+                let items = std::mem::take(&mut self.model.items);
                 let ids = std::mem::take(&mut self.model.ids);
-                self.model = RemovalModel::from_plan(plan, cfg);
+                self.model = RemovalModel::from_plan_titled(plan, titles, cfg);
+                self.model.items = items;
                 self.model.ids = ids;
             }
             Err(e) => self.model.phase = Phase::Error(e),
         }
     }
 
-    /// "Re-plan" after Stale or Expired: plan the same ids again.
+    /// "Re-plan" after Stale or Expired: plan the same items again.
     fn replan(&mut self, cx: &mut Context<Self>) {
         self.model.replan();
         self.plan(cx);
@@ -458,6 +476,11 @@ impl RemovalDialog {
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
+                    .children(
+                        row.component
+                            .clone()
+                            .map(|c| div().text_sm().font_semibold().child(c)),
+                    )
                     .child(div().text_sm().child(row.description.clone()))
                     .child(
                         div()
