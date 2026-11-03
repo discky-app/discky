@@ -26,7 +26,8 @@ use crate::scan::{self, Current, ScanId, ScanJob, ScanRequest, ScanSink, ScanSta
 const PLAN_HISTORY: usize = 20;
 const INSPECT_CHILDREN: usize = 20;
 const WAIT_POLL: Duration = Duration::from_millis(100);
-const TRASH_BIN: &str = "/usr/bin/trash";
+/// The system trash binary Trash steps run unless `DISCKY_TRASH_BIN` overrides it.
+pub const TRASH_BIN: &str = "/usr/bin/trash";
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -147,6 +148,12 @@ impl Engine {
     /// Where this engine keeps its config, snapshot and log.
     pub fn paths(&self) -> &DisckyPaths {
         &self.paths
+    }
+
+    /// The binary Trash steps run: [`TRASH_BIN`] unless overridden (`DISCKY_TRASH_BIN`,
+    /// tests and development only).
+    pub fn trash_bin(&self) -> &Path {
+        &self.trash_bin
     }
 
     /// The most recent non-fatal error (snapshot load, history read), if any.

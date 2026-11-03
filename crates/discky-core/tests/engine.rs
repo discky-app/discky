@@ -281,6 +281,11 @@ fn open_with_uses_given_paths_and_trash_bin() {
         Engine::open_with(opts).unwrap()
     };
     assert_eq!(e.paths().snapshot, d.path().join("s.bin"));
+    assert_eq!(e.trash_bin(), d.path().join("fake-trash"));
+    assert_ne!(
+        e.trash_bin(),
+        std::path::Path::new(discky_core::engine::TRASH_BIN)
+    );
     let mut c = e.config();
     c.scan.roots = vec![root.clone()];
     c.removal.mode = discky_core::RemovalMode::Trash;
