@@ -5,7 +5,7 @@ use discky_core::scan::{ScanEvent, ScanSink};
 use discky_core::{
     DisckyPaths, Engine, EngineOptions, ExecuteRequest, index::snapshot::Actor, scan::ScanStatus,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 /// `DISCKY_HOME` is process-wide; tests set it and open the engine under this lock (the
@@ -334,12 +334,44 @@ fn temp_engine(d: &tempfile::TempDir) -> Engine {
     e
 }
 
-/// A sink collecting every event, and the events it collected.
-fn collecting_sink() -> (ScanSink, Arc<Mutex<Vec<ScanEvent>>>) {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let sink_events = Arc::clone(&events);
-    let sink: ScanSink = Arc::new(move |ev| sink_events.lock().unwrap().push(ev));
-    (sink, events)
+/// A sink forwarding every event to the returned receiver.
+fn channel_sink() -> (ScanSink, mpsc::Receiver<ScanEvent>) {
+    let (tx, rx) = mpsc::channel();
+    let sink: ScanSink = Arc::new(move |ev| {
+        let _ = tx.send(ev);
+    });
+    (sink, rx)
+}
+
+/// A sink that forwards to `inner` (if any) and parks the scan on its first `Progress`
+/// until the returned sender is dropped: the scan cannot finish before that, because
+/// `walk` always reports progress at least once.
+fn gated_sink(inner: Option<ScanSink>) -> (ScanSink, mpsc::Sender<()>) {
+    let (release, gate) = mpsc::channel::<()>();
+    let gate = Mutex::new(Some(gate));
+    let sink: ScanSink = Arc::new(move |ev| {
+        let first_progress = matches!(ev, ScanEvent::Progress(_));
+        if let Some(inner) = &inner {
+            inner(ev);
+        }
+        if first_progress && let Some(gate) = gate.lock().unwrap().take() {
+            let _ = gate.recv_timeout(Duration::from_secs(30));
+        }
+    });
+    (sink, release)
+}
+
+/// Every event `rx` gets until the scan drops its sinks (after `Finished`): the complete
+/// event stream of that sink.
+fn all_events(rx: &mpsc::Receiver<ScanEvent>) -> Vec<ScanEvent> {
+    let mut events = Vec::new();
+    loop {
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(ev) => events.push(ev),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return events,
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!("no Finished within 30 s: {events:?}"),
+        }
+    }
 }
 
 fn finished_count(events: &[ScanEvent]) -> usize {
@@ -353,38 +385,42 @@ fn finished_count(events: &[ScanEvent]) -> usize {
 fn sink_receives_progress_then_exactly_one_finished() {
     let d = tempfile::tempdir().unwrap();
     let e = temp_engine(&d);
-    let (sink, events) = collecting_sink();
+    let (sink, rx) = channel_sink();
     let id = e.start_scan_with(None, Some(sink));
-    let st = e.wait_scan(&id, Duration::from_secs(30));
-    assert!(matches!(st, ScanStatus::Done { .. }));
-    let events = events.lock().unwrap();
+    let events = all_events(&rx);
     assert!(matches!(
         events.last(),
         Some(ScanEvent::Finished(ScanStatus::Done { .. }))
     ));
     assert_eq!(finished_count(&events), 1);
     assert!(events.iter().any(|e| matches!(e, ScanEvent::Progress(_))));
+    assert!(matches!(e.scan_status(&id), ScanStatus::Done { .. }));
 }
 
 #[test]
 fn cancel_scan_yields_cancelled_and_no_snapshot_file() {
     let d = tempfile::tempdir().unwrap();
     let e = temp_engine(&d);
-    let (sink, events) = collecting_sink();
-    let id = e.start_scan_with(None, Some(sink));
+    let (sink, rx) = channel_sink();
+    let (gated, release) = gated_sink(Some(sink));
+    let id = e.start_scan_with(None, Some(gated));
     assert!(e.cancel_scan(&id), "a running scan accepts the cancel");
-    let st = e.wait_scan(&id, Duration::from_secs(30));
+    drop(release);
+    let events = all_events(&rx);
+    assert_eq!(finished_count(&events), 1);
+    assert!(
+        matches!(
+            events.last(),
+            Some(ScanEvent::Finished(ScanStatus::Cancelled { .. }))
+        ),
+        "{events:?}"
+    );
+    let st = e.scan_status(&id);
     assert!(matches!(st, ScanStatus::Cancelled { .. }), "{st:?}");
     assert!(!e.paths().snapshot.exists());
     assert!(e.snapshot().is_none());
     assert!(!e.cancel_scan(&id), "a finished scan cannot be cancelled");
     assert!(!e.cancel_scan(&discky_core::scan::ScanId("nope".into())));
-    let events = events.lock().unwrap();
-    assert_eq!(finished_count(&events), 1);
-    assert!(matches!(
-        events.last(),
-        Some(ScanEvent::Finished(ScanStatus::Cancelled { .. }))
-    ));
     let v = serde_json::to_value(&st).unwrap();
     assert_eq!(v["kind"], "cancelled");
 }
@@ -418,16 +454,20 @@ fn reload_snapshot_picks_up_newer_file() {
 fn joining_running_scan_delivers_current_progress() {
     let d = tempfile::tempdir().unwrap();
     let e = temp_engine(&d);
-    let a = e.start_scan_with(None, None);
-    let (sink, events) = collecting_sink();
+    let (gated, release) = gated_sink(None);
+    let a = e.start_scan_with(None, Some(gated));
+    let (sink, rx) = channel_sink();
     let b = e.start_scan_with(None, Some(sink));
     assert_eq!(a, b);
-    e.wait_scan(&a, Duration::from_secs(30));
-    let events = events.lock().unwrap();
+    drop(release);
+    let events = all_events(&rx);
     assert!(
         matches!(events.first(), Some(ScanEvent::Progress(_))),
         "{events:?}"
     );
     assert_eq!(finished_count(&events), 1);
-    assert!(matches!(events.last(), Some(ScanEvent::Finished(_))));
+    assert!(matches!(
+        events.last(),
+        Some(ScanEvent::Finished(ScanStatus::Done { .. }))
+    ));
 }

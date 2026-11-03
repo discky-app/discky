@@ -229,6 +229,9 @@ impl Engine {
     /// While a scan is running, joins it instead: returns its id and `roots` is ignored.
     /// `sink` gets every `Progress` (at most every 50 ms) and exactly one `Finished`;
     /// joining a running scan delivers its current `Progress` to `sink` immediately.
+    /// The `Finished` is sent just after the status turns terminal, so it may arrive
+    /// shortly after [`Engine::scan_status`] / [`Engine::wait_scan`] report the end: wait
+    /// for the `Finished` itself, not for the status, before treating the events as complete.
     pub fn start_scan_with(&self, roots: Option<Vec<PathBuf>>, sink: Option<ScanSink>) -> ScanId {
         let mut scans = lock(&self.scans);
         if let Some((id, job)) = scans.iter().find(|(_, j)| j.is_running()) {
