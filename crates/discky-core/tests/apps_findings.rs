@@ -1053,3 +1053,77 @@ fn cask_launchctl_label_of_a_shared_vendor_is_shared() {
     assert!(own.default_on, "label has Chrome's bundle id as prefix");
     assert!(matches!(own.removal, ComponentRemoval::Bootout { .. }));
 }
+
+#[test]
+fn job_associated_with_another_vendors_running_helper_is_shared() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let one = root.join("Applications/One.app");
+    make_app(&one, "com.alpha.one");
+    // Label under One's bundle id, but also used by vendor Beta's agent, which runs from
+    // its support folder (no bundle in /Applications).
+    let daemon = root.join("Library/LaunchDaemons/com.alpha.one.updater.plist");
+    launchd_plist(
+        &daemon,
+        "com.alpha.one.updater",
+        &["com.alpha.one", "com.beta.agent"],
+        None,
+    );
+    let idx = scan(root);
+    let mut ctx = Ctx::new(root);
+    ctx.running.insert("com.beta.agent".into());
+    let apps = [app(
+        &idx,
+        &one,
+        "com.alpha.one",
+        AppSource::Dragged,
+        LastUsed::Spotlight(NOW),
+    )];
+    let found = ctx.run(&idx, &home, &apps, &mut HashSet::new());
+    let c = component(&found[0], &daemon);
+    assert_eq!(c.removal, ComponentRemoval::None);
+    assert!(!c.default_on);
+    assert_eq!(c.note.as_deref(), Some("shared with Beta"));
+}
+
+#[test]
+fn job_label_of_a_longer_installed_id_belongs_to_that_app() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let home = root.join("home");
+    let app_path = root.join("Applications/Foo.app");
+    make_app(&app_path, "com.foo.app");
+    let helper_app = root.join("Applications/Foo Helper.app");
+    make_app(&helper_app, "com.foo.app.helper");
+    // The file name says nothing; the label is the helper app's.
+    let agent = home.join("Library/LaunchAgents/agent.plist");
+    launchd_plist(&agent, "com.foo.app.helper.agent", &[], None);
+    let idx = scan(root);
+    let apps = [
+        app(
+            &idx,
+            &app_path,
+            "com.foo.app",
+            AppSource::Dragged,
+            LastUsed::Spotlight(NOW),
+        ),
+        app(
+            &idx,
+            &helper_app,
+            "com.foo.app.helper",
+            AppSource::Dragged,
+            LastUsed::Spotlight(NOW),
+        ),
+    ];
+    let found = Ctx::new(root).run(&idx, &home, &apps, &mut HashSet::new());
+    let foo = found.iter().find(|f| f.title == "Foo").unwrap();
+    assert!(
+        !component_paths(foo).contains(&agent),
+        "{:#?}",
+        foo.components
+    );
+    let helper = found.iter().find(|f| f.title == "Foo Helper").unwrap();
+    assert!(component(helper, &agent).default_on);
+}

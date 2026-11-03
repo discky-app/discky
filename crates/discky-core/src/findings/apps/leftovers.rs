@@ -336,9 +336,13 @@ impl Installed {
         self.insert(id, name);
     }
 
-    /// The name of installed bundle id `id` (lowercase); `None` for running-only ids.
-    fn bundle_name_of(&self, id: &str) -> Option<&str> {
-        if self.running_only.contains(id) {
+    /// The name of `id` (lowercase) as another app using a job of app `bid`. A running-only
+    /// id of `bid`'s own vendor (or extending `bid`) is that app's helper process and does
+    /// not count; any other running-only id is another vendor's app (e.g. an updater
+    /// running from `/Library/Application Support/<Vendor>`) and does.
+    fn other_user_of_job(&self, id: &str, bid: Option<&str>) -> Option<&str> {
+        let own_helper = bid.is_some_and(|b| id_vendor(id) == id_vendor(b) || has_id_prefix(id, b));
+        if self.running_only.contains(id) && own_helper {
             return None;
         }
         self.by_id.get(id).map(String::as_str)
@@ -538,14 +542,22 @@ impl Sharing {
 /// A matched launchd job. It is the app's own only when its label or plist name extends the
 /// app's bundle id; a match through `AssociatedBundleIdentifiers` or a cask `launchctl`
 /// label goes through the full shared check (vendor included). Any other installed app
-/// bundle in `AssociatedBundleIdentifiers` makes it shared (running-only ids do not).
+/// in `AssociatedBundleIdentifiers` makes it shared — a running-only id too, unless it is of
+/// the app's own vendor (see [`Installed::other_user_of_job`]).
 fn job_sharing(c: &Candidate, j: &LaunchdJob, bid: Option<&str>, installed: &Installed) -> Sharing {
     let label = j.label.to_lowercase();
     let owns = |n: &str| bid.is_some_and(|b| has_id_prefix(n, b));
     let owned = owns(&c.norm) || owns(&label);
     let mut status = sharing(&c.norm, owned, bid, installed);
-    if matches!(status, Sharing::Mine) && !owned && label != c.norm {
-        status = sharing(&label, false, bid, installed);
+    if label != c.norm {
+        let by_label = sharing(&label, owned, bid, installed);
+        // Owned: a longer installed id prefixing the label also takes the job away.
+        // Not owned: the label gets the full shared check too.
+        if (owned && matches!(by_label, Sharing::Other))
+            || (!owned && matches!(status, Sharing::Mine))
+        {
+            status = by_label;
+        }
     }
     if matches!(status, Sharing::Other) {
         return status;
@@ -555,7 +567,7 @@ fn job_sharing(c: &Candidate, j: &LaunchdJob, bid: Option<&str>, installed: &Ins
         .iter()
         .map(|a| a.to_lowercase())
         .filter(|a| Some(a.as_str()) != bid)
-        .find_map(|a| installed.bundle_name_of(&a));
+        .find_map(|a| installed.other_user_of_job(&a, bid));
     match other {
         Some(name) => Sharing::With(name.to_string()),
         None => status,
