@@ -4,12 +4,12 @@
 use std::cmp::{Ordering, Reverse};
 use std::path::PathBuf;
 
-use discky_core::findings::{Finding, FindingId};
-use discky_core::rules::SafetyLabel;
+use discky_core::findings::apps::{RULE_APP, RULE_LEFTOVERS, RULE_RECEIPTS};
+use discky_core::findings::{AppSource, ComponentKind, Finding, FindingId, Removal};
+use discky_core::rules::{Category, SafetyLabel};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::selection::{Selection, SelectionSummary, is_checkable};
@@ -27,16 +27,70 @@ const FREES_WIDTH: f32 = 120.;
 const NAME_MIN: f32 = 240.;
 /// Minimum width of the Where column.
 const WHERE_MIN: f32 = 200.;
+/// Width of the Applications table's Source column.
+const SOURCE_WIDTH: f32 = 130.;
+/// Width of the Applications table's Last opened column.
+const LAST_OPENED_WIDTH: f32 = 120.;
+/// Width of the Applications table's Total column (wide enough for its
+/// "app 133 MB + leftovers 250 KB" line).
+const TOTAL_WIDTH: f32 = 180.;
+/// Width of the Language versions table's Status column.
+const STATUS_WIDTH: f32 = 180.;
+/// Width of the Language versions table's Size column.
+const SIZE_WIDTH: f32 = 120.;
+/// Minimum width of the Language versions table's Name column.
+const VERSION_NAME_MIN: f32 = 200.;
 /// What the table draws besides its columns: the trailing spacer column (12 px), the
 /// border and the vertical scrollbar.
 const TABLE_CHROME: f32 = 26.;
 
-/// Column indexes.
+/// Column indexes. Every layout has five columns: check, name, then three that depend on
+/// the [`Layout`] (Default: Where, Modified, Frees; Apps: Source, Last opened, Total;
+/// Versions: Status, Where, Size).
 const COL_CHECK: usize = 0;
 const COL_NAME: usize = 1;
-const COL_WHERE: usize = 2;
-const COL_MODIFIED: usize = 3;
-const COL_FREES: usize = 4;
+const COL_THIRD: usize = 2;
+const COL_FOURTH: usize = 3;
+const COL_FIFTH: usize = 4;
+
+/// Which columns the category table shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layout {
+    /// Name · Where · Modified · Frees (caches, models, builds, large & old).
+    Default,
+    /// Name (+ bundle id) · Source · Last opened · Total (Applications).
+    Apps,
+    /// Name · Status · Where · Size (Language versions).
+    Versions,
+}
+
+impl Layout {
+    /// The layout of `category`'s table.
+    pub fn for_category(category: Category) -> Layout {
+        match category {
+            Category::Apps => Layout::Apps,
+            Category::LanguageVersions => Layout::Versions,
+            _ => Layout::Default,
+        }
+    }
+
+    /// The sort tabs of this layout, in the order the segmented control shows them.
+    pub fn sort_tabs(self) -> &'static [(SortBy, &'static str)] {
+        match self {
+            Layout::Default => &[
+                (SortBy::Size, "Size"),
+                (SortBy::Age, "Age"),
+                (SortBy::Name, "Name"),
+            ],
+            Layout::Apps => &[
+                (SortBy::Size, "Size"),
+                (SortBy::LastOpened, "Last opened"),
+                (SortBy::Name, "Name"),
+            ],
+            Layout::Versions => &[(SortBy::Size, "Size"), (SortBy::Name, "Tool")],
+        }
+    }
+}
 
 /// The order of the category table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,6 +101,9 @@ pub enum SortBy {
     Age,
     /// Title A–Z, case-insensitive; equal titles largest first.
     Name,
+    /// Longest unused first: oldest `modified` first, unknown dates first of all (equal
+    /// dates largest first).
+    LastOpened,
 }
 
 /// Sort `findings` in place by `by`.
@@ -62,6 +119,82 @@ pub fn sort(findings: &mut [Finding], by: SortBy) {
         SortBy::Name => {
             findings.sort_by_cached_key(|f| (f.title.to_lowercase(), Reverse(f.allocated)))
         }
+        // `None < Some(_)`, so unknown last use comes first.
+        SortBy::LastOpened => findings.sort_by_key(|f| (f.modified, Reverse(f.allocated))),
+    }
+}
+
+/// Where an app came from ("cask · raycast", "pkg", "App Store", "drag & drop"); for a
+/// leftover group "leftovers", for the orphan receipts "receipts"; empty otherwise.
+pub fn source_text(f: &Finding) -> String {
+    match &f.removal {
+        Removal::App { source, .. } => match source {
+            AppSource::Cask { token, .. } => format!("cask · {token}"),
+            AppSource::Pkg { .. } => "pkg".to_string(),
+            AppSource::AppStore => "App Store".to_string(),
+            AppSource::Dragged => "drag & drop".to_string(),
+        },
+        _ if f.rule_id == RULE_LEFTOVERS => "leftovers".to_string(),
+        _ if f.rule_id == RULE_RECEIPTS => "receipts".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Whether the finding's last-used date is an estimate (core marks its subtitle with `*`).
+pub fn is_estimate(f: &Finding) -> bool {
+    f.subtitle.as_deref().is_some_and(|s| s.contains('*'))
+}
+
+/// The Last opened cell: `relative` time, with `*` for an estimate; "never*" for an app
+/// with no known use; "—" for a finding that is not an app and has no date.
+pub fn last_opened_text(f: &Finding, now: i64) -> String {
+    match f.modified {
+        Some(t) => {
+            let mut text = format::relative(t, now);
+            if is_estimate(f) {
+                text.push('*');
+            }
+            text
+        }
+        None if f.rule_id == RULE_APP => "never*".to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// The Status cell of a language version: its subtitle up to " · " ("global",
+/// "pinned in 3 projects", "not referenced").
+pub fn status_text(f: &Finding) -> String {
+    let subtitle = f.subtitle.as_deref().unwrap_or_default();
+    subtitle
+        .split_once(" · ")
+        .map_or(subtitle, |(status, _)| status)
+        .to_string()
+}
+
+/// "app X + leftovers Y" under an app's total: X is the bundle component's `allocated`, Y
+/// the rest of the finding's. `None` without a bundle component or without leftover bytes
+/// (the total is then the bundle alone).
+pub fn total_breakdown(f: &Finding) -> Option<String> {
+    let bundle = f
+        .components
+        .iter()
+        .find(|c| c.kind == ComponentKind::AppBundle)?
+        .allocated;
+    let leftovers = f.allocated.saturating_sub(bundle);
+    (leftovers > 0).then(|| {
+        format!(
+            "app {} + leftovers {}",
+            format::bytes(bundle),
+            format::bytes(leftovers)
+        )
+    })
+}
+
+/// The muted line under an app's name: its bundle id, or (a leftover group) the subtitle.
+fn app_detail(f: &Finding) -> Option<String> {
+    match &f.removal {
+        Removal::App { bundle_id, .. } => bundle_id.clone(),
+        _ => f.subtitle.clone(),
     }
 }
 
@@ -83,13 +216,31 @@ pub fn filter<'a>(findings: &'a [Finding], needle: &str) -> Vec<&'a Finding> {
         .collect()
 }
 
-/// Widths of the flexible Name and Where columns for a table `table_width` wide: they
-/// share what the fixed columns leave, 55 : 45, each at least its minimum.
-pub fn flex_widths(table_width: f32) -> (f32, f32) {
-    let free = table_width - CHECK_WIDTH - MODIFIED_WIDTH - FREES_WIDTH - TABLE_CHROME;
-    let name = (free * 0.55).max(NAME_MIN);
-    let place = (free - name).max(WHERE_MIN);
-    (name, place)
+/// Widths of the flexible columns of a `layout` table `table_width` wide, each at least
+/// its minimum. Default: Name and Where share what the fixed columns leave, 55 : 45. Apps:
+/// Name takes all of it (the second width is unused). Versions: Name and Where, 50 : 50.
+pub fn flex_widths(layout: Layout, table_width: f32) -> (f32, f32) {
+    match layout {
+        Layout::Default => {
+            let free = table_width - CHECK_WIDTH - MODIFIED_WIDTH - FREES_WIDTH - TABLE_CHROME;
+            let name = (free * 0.55).max(NAME_MIN);
+            (name, (free - name).max(WHERE_MIN))
+        }
+        Layout::Apps => {
+            let free = table_width
+                - CHECK_WIDTH
+                - SOURCE_WIDTH
+                - LAST_OPENED_WIDTH
+                - TOTAL_WIDTH
+                - TABLE_CHROME;
+            (free.max(NAME_MIN), 0.)
+        }
+        Layout::Versions => {
+            let free = table_width - CHECK_WIDTH - STATUS_WIDTH - SIZE_WIDTH - TABLE_CHROME;
+            let name = (free * 0.5).max(VERSION_NAME_MIN);
+            (name, (free - name).max(WHERE_MIN))
+        }
+    }
 }
 
 /// Rows, checked findings and presentation inputs of the category table.
@@ -97,6 +248,7 @@ pub fn flex_widths(table_width: f32) -> (f32, f32) {
 /// `all` holds every finding of the category in the current sort order; `rows` is the
 /// filtered part the table shows. Sorting and filtering never touch `selection`.
 pub struct FindingsDelegate {
+    layout: Layout,
     all: Vec<Finding>,
     rows: Vec<Finding>,
     selection: Selection,
@@ -106,14 +258,15 @@ pub struct FindingsDelegate {
     home: PathBuf,
     /// Unix seconds the Modified column is relative to (taken at each reload).
     now: i64,
-    /// Name and Where column widths, see [`flex_widths`].
+    /// Widths of the flexible columns, see [`flex_widths`].
     widths: (f32, f32),
 }
 
 impl FindingsDelegate {
-    /// An empty table sorted by size; `home` shortens paths to `~/…`.
-    pub fn new(home: PathBuf) -> Self {
+    /// An empty `layout` table sorted by size; `home` shortens paths to `~/…`.
+    pub fn new(layout: Layout, home: PathBuf) -> Self {
         FindingsDelegate {
+            layout,
             all: Vec::new(),
             rows: Vec::new(),
             selection: Selection::default(),
@@ -121,7 +274,7 @@ impl FindingsDelegate {
             needle: String::new(),
             home,
             now: 0,
-            widths: (NAME_MIN, WHERE_MIN),
+            widths: flex_widths(layout, 0.),
         }
     }
 
@@ -150,7 +303,7 @@ impl FindingsDelegate {
     /// Size the flexible columns for a table `table_width` wide. Returns whether the
     /// widths changed (the table then needs a `refresh`).
     pub fn set_table_width(&mut self, table_width: f32) -> bool {
-        let widths = flex_widths(table_width);
+        let widths = flex_widths(self.layout, table_width);
         let changed = widths != self.widths;
         self.widths = widths;
         changed
@@ -243,6 +396,46 @@ pub(crate) fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
         .child(text.into())
 }
 
+impl FindingsDelegate {
+    /// The Where text of `f`: its path under `~`, or (a path-less finding) its subtitle.
+    fn place_text(&self, f: &Finding) -> String {
+        match &f.path {
+            Some(p) => format::home_relative(p, &self.home),
+            None => f.subtitle.clone().unwrap_or_default(),
+        }
+    }
+
+    /// The text of cell (`f`, `col_ix`) for the third to fifth columns, by layout.
+    fn cell_text_of(&self, f: &Finding, col_ix: usize) -> Option<String> {
+        let text = match (self.layout, col_ix) {
+            (_, COL_NAME) => f.title.clone(),
+            (Layout::Default, COL_THIRD) | (Layout::Versions, COL_FOURTH) => self.place_text(f),
+            (Layout::Default, COL_FOURTH) => f
+                .modified
+                .map_or_else(|| "—".to_string(), |t| format::relative(t, self.now)),
+            (Layout::Default, COL_FIFTH) => format::bytes(f.freed_if_deleted),
+            (Layout::Apps, COL_THIRD) => source_text(f),
+            (Layout::Apps, COL_FOURTH) => last_opened_text(f, self.now),
+            (Layout::Apps, COL_FIFTH) | (Layout::Versions, COL_FIFTH) => format::bytes(f.allocated),
+            (Layout::Versions, COL_THIRD) => status_text(f),
+            _ => return None,
+        };
+        Some(text)
+    }
+}
+
+/// A right-aligned value with an optional muted second line.
+fn two_lines(cell: Div, top: String, below: Option<String>, muted: Hsla) -> AnyElement {
+    cell.justify_end()
+        .child(
+            v_flex()
+                .items_end()
+                .child(top)
+                .children(below.map(|b| div().text_xs().text_color(muted).truncate().child(b))),
+        )
+        .into_any_element()
+}
+
 impl TableDelegate for FindingsDelegate {
     fn columns_count(&self, _: &App) -> usize {
         5
@@ -253,24 +446,37 @@ impl TableDelegate for FindingsDelegate {
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
-        let (name, place) = self.widths;
-        match col_ix {
-            COL_CHECK => Column::new("check", "")
+        let (first, second) = self.widths;
+        let fixed = |key: &'static str, name: &'static str, width: f32| {
+            Column::new(key, name).width(px(width))
+        };
+        match (self.layout, col_ix) {
+            (_, COL_CHECK) => Column::new("check", "")
                 .width(px(CHECK_WIDTH))
                 .resizable(false)
                 .selectable(false),
-            COL_NAME => Column::new("name", "Name")
+            (Layout::Versions, COL_NAME) => Column::new("name", "Name")
+                .min_width(px(VERSION_NAME_MIN))
+                .width(px(first)),
+            (_, COL_NAME) => Column::new("name", "Name")
                 .min_width(px(NAME_MIN))
-                .width(px(name)),
-            COL_WHERE => Column::new("where", "Where")
-                .min_width(px(WHERE_MIN))
-                .width(px(place)),
-            COL_MODIFIED => Column::new("modified", "Modified")
-                .width(px(MODIFIED_WIDTH))
-                .text_right(),
-            _ => Column::new("frees", "Frees")
-                .width(px(FREES_WIDTH))
-                .text_right(),
+                .width(px(first)),
+            (Layout::Default, COL_THIRD) | (Layout::Versions, COL_FOURTH) => {
+                Column::new("where", "Where")
+                    .min_width(px(WHERE_MIN))
+                    .width(px(second))
+            }
+            (Layout::Default, COL_FOURTH) => {
+                fixed("modified", "Modified", MODIFIED_WIDTH).text_right()
+            }
+            (Layout::Default, _) => fixed("frees", "Frees", FREES_WIDTH).text_right(),
+            (Layout::Apps, COL_THIRD) => fixed("source", "Source", SOURCE_WIDTH),
+            (Layout::Apps, COL_FOURTH) => {
+                fixed("last-opened", "Last opened", LAST_OPENED_WIDTH).text_right()
+            }
+            (Layout::Apps, _) => fixed("total", "Total", TOTAL_WIDTH).text_right(),
+            (Layout::Versions, COL_THIRD) => fixed("status", "Status", STATUS_WIDTH),
+            (Layout::Versions, _) => fixed("size", "Size", SIZE_WIDTH).text_right(),
         }
     }
 
@@ -285,9 +491,10 @@ impl TableDelegate for FindingsDelegate {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
         let cell = || h_flex().size_full().items_center().text_sm();
-        match col_ix {
-            COL_CHECK => {
+        match (self.layout, col_ix) {
+            (_, COL_CHECK) => {
                 let id = f.id.clone();
                 let table = cx.entity().downgrade();
                 cell()
@@ -306,10 +513,15 @@ impl TableDelegate for FindingsDelegate {
                     )
                     .into_any_element()
             }
-            COL_NAME => {
+            (layout, COL_NAME) => {
                 let (text, color) = badge(f.label, cx);
-                // A path-less finding (a model) shows its subtitle under Where instead.
-                let subtitle = f.subtitle.clone().filter(|_| f.path.is_some());
+                let detail = match layout {
+                    // A path-less finding (a model) shows its subtitle under Where instead.
+                    Layout::Default => f.subtitle.clone().filter(|_| f.path.is_some()),
+                    Layout::Apps => app_detail(f),
+                    // The status has its own column.
+                    Layout::Versions => None,
+                };
                 cell()
                     .child(
                         v_flex()
@@ -322,46 +534,46 @@ impl TableDelegate for FindingsDelegate {
                                     .child(pill(text, color)),
                             )
                             .children(
-                                subtitle
+                                detail
                                     .map(|s| div().text_xs().text_color(muted).truncate().child(s)),
                             ),
                     )
                     .into_any_element()
             }
-            COL_WHERE => {
-                let place = match &f.path {
-                    Some(p) => format::home_relative(p, &self.home),
-                    None => f.subtitle.clone().unwrap_or_default(),
-                };
-                cell()
-                    .text_color(muted)
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_xs()
-                    .child(div().min_w_0().truncate().child(place))
-                    .into_any_element()
-            }
-            COL_MODIFIED => cell()
+            (Layout::Default, COL_THIRD) | (Layout::Versions, COL_FOURTH) => cell()
+                .text_color(muted)
+                .font_family(mono)
+                .text_xs()
+                .child(div().min_w_0().truncate().child(self.place_text(f)))
+                .into_any_element(),
+            (Layout::Default, COL_FOURTH) | (Layout::Apps, COL_FOURTH) => cell()
                 .justify_end()
                 .text_color(muted)
-                .child(match f.modified {
-                    Some(t) => format::relative(t, self.now),
-                    None => "—".to_string(),
-                })
+                .child(self.cell_text_of(f, col_ix).unwrap_or_default())
                 .into_any_element(),
-            COL_FREES => {
+            (Layout::Default, COL_FIFTH) => {
                 let frees = format::bytes(f.freed_if_deleted);
                 let allocated = format::bytes(f.allocated);
-                cell()
-                    .justify_end()
-                    .child(
-                        v_flex()
-                            .items_end()
-                            .child(frees.clone())
-                            .when(allocated != frees, |this| {
-                                this.child(div().text_xs().text_color(muted).child(allocated))
-                            }),
-                    )
-                    .into_any_element()
+                let below = (allocated != frees).then_some(allocated);
+                two_lines(cell(), frees, below, muted)
+            }
+            (Layout::Apps, COL_THIRD) | (Layout::Versions, COL_THIRD) => cell()
+                .text_color(muted)
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(self.cell_text_of(f, col_ix).unwrap_or_default()),
+                )
+                .into_any_element(),
+            (Layout::Apps, COL_FIFTH) => two_lines(
+                cell(),
+                format::bytes(f.allocated),
+                total_breakdown(f),
+                muted,
+            ),
+            (Layout::Versions, COL_FIFTH) => {
+                two_lines(cell(), format::bytes(f.allocated), None, muted)
             }
             _ => div().into_any_element(),
         }
@@ -382,32 +594,146 @@ impl TableDelegate for FindingsDelegate {
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
         let f = self.rows.get(row_ix)?;
-        let text = match col_ix {
-            COL_NAME => f.title.clone(),
-            COL_WHERE => match &f.path {
-                Some(p) => format::home_relative(p, &self.home),
-                None => f.subtitle.clone().unwrap_or_default(),
-            },
-            COL_MODIFIED => f
-                .modified
-                .map_or_else(|| "—".to_string(), |t| format::relative(t, self.now)),
-            COL_FREES => format::bytes(f.freed_if_deleted),
-            _ => return None,
-        };
-        Some(text.into())
+        self.cell_text_of(f, col_ix).map(Into::into)
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Explicit imports, like the crate's other test modules (see `app.rs`).
-    use super::{FindingsDelegate, SortBy, filter, flex_widths, sort};
-    use crate::category::fixtures::finding;
+    use super::{
+        FindingsDelegate, Layout, SortBy, filter, flex_widths, is_estimate, last_opened_text, sort,
+        source_text, status_text, total_breakdown,
+    };
+    use crate::category::fixtures::{app, finding};
+    use discky_core::findings::{AppSource, Component, ComponentKind, ComponentRemoval};
     use std::path::PathBuf;
 
     #[test]
+    fn source_text_forms() {
+        let cask = AppSource::Cask {
+            token: "raycast".into(),
+            full_token: "homebrew/cask/raycast".into(),
+        };
+        assert_eq!(source_text(&app("a", cask, Some(0), "")), "cask · raycast");
+        let pkg = AppSource::Pkg {
+            pkg_ids: vec!["us.zoom.pkg".into()],
+        };
+        assert_eq!(source_text(&app("b", pkg, Some(0), "")), "pkg");
+        assert_eq!(
+            source_text(&app("c", AppSource::AppStore, Some(0), "")),
+            "App Store"
+        );
+        assert_eq!(
+            source_text(&app("d", AppSource::Dragged, Some(0), "")),
+            "drag & drop"
+        );
+        let mut group = finding("e", "Readdle", 1);
+        group.rule_id = "app-leftovers".into();
+        assert_eq!(source_text(&group), "leftovers");
+        group.rule_id = "pkg-receipts".into();
+        assert_eq!(source_text(&group), "receipts");
+    }
+
+    #[test]
+    fn last_opened_text_marks_estimates() {
+        let day = 86_400;
+        let now = 400 * day;
+        let exact = app(
+            "a",
+            AppSource::Dragged,
+            Some(now - 3 * day),
+            "drag & drop · last opened 3 days ago",
+        );
+        assert!(!is_estimate(&exact));
+        assert_eq!(last_opened_text(&exact, now), "3 days ago");
+        let estimate = app(
+            "b",
+            AppSource::Dragged,
+            Some(now - 70 * day),
+            "drag & drop · last opened 2 months ago*",
+        );
+        assert!(is_estimate(&estimate));
+        assert_eq!(last_opened_text(&estimate, now), "2 months ago*");
+        let never = app("c", AppSource::Dragged, None, "drag & drop · never opened*");
+        assert_eq!(last_opened_text(&never, now), "never*");
+        // A leftover group without a date is not an app that was never opened.
+        let mut group = finding("d", "Readdle", 1);
+        group.rule_id = "app-leftovers".into();
+        group.modified = None;
+        assert_eq!(last_opened_text(&group, now), "—");
+    }
+
+    #[test]
+    fn versions_status_text() {
+        let mut v = finding("n", "node 19.9.0", 1);
+        v.subtitle = Some("global".into());
+        assert_eq!(status_text(&v), "global");
+        v.subtitle = Some("pinned in 3 projects · 2 untracked files".into());
+        assert_eq!(status_text(&v), "pinned in 3 projects");
+        v.subtitle = Some("not referenced".into());
+        assert_eq!(status_text(&v), "not referenced");
+        v.subtitle = None;
+        assert_eq!(status_text(&v), "");
+    }
+
+    #[test]
+    fn total_breakdown_splits_bundle_and_leftovers() {
+        let component = |kind: ComponentKind, allocated: u64| Component {
+            kind,
+            title: String::new(),
+            path: None,
+            allocated,
+            freed_if_deleted: allocated,
+            modified: None,
+            default_on: true,
+            removal: ComponentRemoval::None,
+            note: None,
+            covered_by_cask: false,
+        };
+        let mut a = app("a", AppSource::Dragged, None, "");
+        assert_eq!(total_breakdown(&a), None);
+        a.components = vec![
+            component(ComponentKind::AppBundle, 300_000_000),
+            component(ComponentKind::Caches, 100_000_000),
+        ];
+        a.allocated = 400_000_000;
+        assert_eq!(
+            total_breakdown(&a).as_deref(),
+            Some("app 300 MB + leftovers 100 MB")
+        );
+        a.allocated = 300_000_000;
+        assert_eq!(total_breakdown(&a), None);
+    }
+
+    #[test]
+    fn layout_follows_category() {
+        use discky_core::rules::Category;
+        assert_eq!(Layout::for_category(Category::Apps), Layout::Apps);
+        assert_eq!(
+            Layout::for_category(Category::LanguageVersions),
+            Layout::Versions
+        );
+        assert_eq!(Layout::for_category(Category::DevCaches), Layout::Default);
+    }
+
+    #[test]
+    fn sort_last_opened_puts_unknown_first() {
+        let mut rows = vec![
+            finding("a", "New", 1),
+            finding("b", "Unknown", 2),
+            finding("c", "Old", 3),
+        ];
+        rows[0].modified = Some(2_000);
+        rows[1].modified = None;
+        rows[2].modified = Some(1_000);
+        sort(&mut rows, SortBy::LastOpened);
+        assert_eq!(titles(&rows), ["Unknown", "Old", "New"]);
+    }
+
+    #[test]
     fn hidden_checked_counts_checked_rows_the_filter_hides() {
-        let mut d = FindingsDelegate::new(PathBuf::from("/Users/me"));
+        let mut d = FindingsDelegate::new(Layout::Default, PathBuf::from("/Users/me"));
         d.set_findings(
             vec![
                 finding("alpha", "Alpha", 3),
@@ -481,9 +807,15 @@ mod tests {
 
     #[test]
     fn flex_widths_fill_and_keep_minimums() {
-        let (name, place) = flex_widths(1_000.);
+        let (name, place) = flex_widths(Layout::Default, 1_000.);
         assert!((name + place - (1_000. - 36. - 110. - 120. - 26.)).abs() < 0.01);
         assert!(name > place);
-        assert_eq!(flex_widths(300.), (240., 200.));
+        assert_eq!(flex_widths(Layout::Default, 300.), (240., 200.));
+        let (name, _) = flex_widths(Layout::Apps, 1_000.);
+        assert!((name - (1_000. - 36. - 130. - 120. - 180. - 26.)).abs() < 0.01);
+        assert_eq!(flex_widths(Layout::Apps, 300.).0, 240.);
+        let (name, place) = flex_widths(Layout::Versions, 1_000.);
+        assert!((name + place - (1_000. - 36. - 180. - 120. - 26.)).abs() < 0.01);
+        assert_eq!(flex_widths(Layout::Versions, 300.), (200., 200.));
     }
 }

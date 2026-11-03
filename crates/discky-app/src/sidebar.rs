@@ -33,6 +33,16 @@ pub fn weight_label(bytes: u64) -> String {
     }
 }
 
+/// The label next to `cat`: for Applications the number of apps not opened in 6 months
+/// (`Overview::apps_unused`, "—" for none), for the others [`weight_label`] of its bytes.
+pub fn category_label(cat: Category, weights: &[(Category, u64)], apps_unused: usize) -> String {
+    match cat {
+        Category::Apps if apps_unused == 0 => "—".to_string(),
+        Category::Apps => apps_unused.to_string(),
+        _ => weight_label(weight_of(weights, cat)),
+    }
+}
+
 /// Bytes recorded for `cat` in an `Overview::by_category` list (0 when absent).
 fn weight_of(weights: &[(Category, u64)], cat: Category) -> u64 {
     weights
@@ -41,11 +51,12 @@ fn weight_of(weights: &[(Category, u64)], cat: Category) -> u64 {
         .map_or(0, |(_, b)| *b)
 }
 
-/// Build the sidebar for `route`, with `weights` from `Overview::by_category`. Clicks call
-/// [`AppView::navigate`] on `view`.
+/// Build the sidebar for `route`, with `weights` from `Overview::by_category` and
+/// `apps_unused` from `Overview::apps_unused`. Clicks call [`AppView::navigate`] on `view`.
 pub fn sidebar(
     route: Route,
     weights: &[(Category, u64)],
+    apps_unused: usize,
     collapsed: bool,
     view: WeakEntity<AppView>,
 ) -> Sidebar<Section> {
@@ -62,7 +73,7 @@ pub fn sidebar(
     let overview = SidebarMenu::new().child(item("Overview".into(), Route::Overview));
     let findings = SidebarGroup::new("Findings").child(SidebarMenu::new().children(
         CATEGORIES.iter().map(|&cat| {
-            let label = weight_label(weight_of(weights, cat));
+            let label = category_label(cat, weights, apps_unused);
             item(cat.to_string().into(), Route::Category(cat)).suffix(move |_, cx| {
                 div()
                     .text_xs()
@@ -140,8 +151,16 @@ impl RenderOnce for Footer {
 #[cfg(test)]
 mod tests {
     // Not `use super::*`: the GPUI glob brings a `test` attribute macro that shadows std's.
-    use super::{weight_label, weight_of};
+    use super::{category_label, weight_label, weight_of};
     use discky_core::rules::Category;
+
+    #[test]
+    fn applications_show_the_unused_count() {
+        let w = [(Category::Apps, 9_100_000_000), (Category::Models, 5_000)];
+        assert_eq!(category_label(Category::Apps, &w, 19), "19");
+        assert_eq!(category_label(Category::Apps, &w, 0), "—");
+        assert_eq!(category_label(Category::Models, &w, 19), "5 KB");
+    }
 
     #[test]
     fn zero_weight_is_a_dash() {

@@ -58,9 +58,11 @@ pub struct CategoryCard {
     pub category: Category,
     /// `allocated` bytes of the category (`Overview::by_category`).
     pub total: u64,
-    /// Number of findings in the category.
+    /// Number of findings in the category; for Applications the number of apps not opened
+    /// in 6 months (see [`unused_apps_page`]).
     pub count: usize,
-    /// The first [`CARD_ROWS`] findings (largest first).
+    /// The first [`CARD_ROWS`] findings (largest first); for Applications the largest
+    /// unused apps.
     pub top: Vec<Finding>,
     /// Findings not listed in `top`.
     pub more: usize,
@@ -73,6 +75,10 @@ pub fn build(engine: &Engine, now: i64) -> OverviewModel {
     let snap = engine.snapshot();
     let overview = query::disk_overview(snap.as_deref());
     let pages = |c: Category| match snap.as_deref() {
+        Some(s) if c == Category::Apps => {
+            let (apps, _) = query::findings_in(s, Some(c), None, 0, None, 0, usize::MAX);
+            unused_apps_page(apps, now)
+        }
         Some(s) => {
             let (page, total) = query::findings_in(s, Some(c), None, 0, None, 0, CARD_ROWS);
             (page.into_iter().cloned().collect(), total)
@@ -80,6 +86,36 @@ pub fn build(engine: &Engine, now: i64) -> OverviewModel {
         None => (Vec::new(), 0),
     };
     build_from(&overview, pages, engine.last_error(), now)
+}
+
+/// The Applications card's page: the [`CARD_ROWS`] largest of `findings` that are apps not
+/// opened in 6 months at `now` (`query::is_unused_app`), and how many such apps there are.
+pub fn unused_apps_page<'a>(
+    findings: impl IntoIterator<Item = &'a Finding>,
+    now: i64,
+) -> (Vec<Finding>, usize) {
+    let mut unused: Vec<&Finding> = findings
+        .into_iter()
+        .filter(|f| query::is_unused_app(f, now))
+        .collect();
+    unused.sort_by_key(|f| std::cmp::Reverse(f.allocated));
+    let total = unused.len();
+    (unused.into_iter().take(CARD_ROWS).cloned().collect(), total)
+}
+
+/// A card's header: "Applications · 19 not opened in 6 months", otherwise
+/// "Dev caches · 9.1 GB · 12 items".
+pub fn card_header(card: &CategoryCard) -> String {
+    if card.category == Category::Apps {
+        return format!("{} · {} not opened in 6 months", card.category, card.count);
+    }
+    format!(
+        "{} · {} · {} {}",
+        card.category,
+        format::bytes(card.total),
+        card.count,
+        if card.count == 1 { "item" } else { "items" }
+    )
 }
 
 /// Build the model from an `overview`, a page source returning the first [`CARD_ROWS`]
@@ -276,6 +312,7 @@ mod tests {
             protected_bytes: 0,
             safe_to_free: 5 * GB,
             no_access: 3,
+            apps_unused: 0,
             exact_private_size: Some(false),
         }
     }
@@ -344,6 +381,43 @@ mod tests {
         assert_eq!(m.volume_line, "Data · 60 GB of 100 GB used");
         assert_eq!(m.exact_note, "Frees ignores blocks held by local snapshots");
         assert_eq!(m.no_access, 3);
+    }
+
+    #[test]
+    fn apps_card_lists_the_largest_unused_apps() {
+        let day = 86_400;
+        let now = 1_000 * day;
+        let mut findings: Vec<Finding> = (0..7)
+            .map(|i| finding(i, Category::Apps, (i as u64 + 1) * GB))
+            .collect();
+        for f in &mut findings {
+            f.rule_id = "apps".into();
+        }
+        // The largest app was opened yesterday; a leftover group is not an app.
+        findings[6].modified = Some(now - day);
+        findings[5].rule_id = "app-leftovers".into();
+        let (top, count) = unused_apps_page(&findings, now);
+        assert_eq!(count, 5);
+        let titles: Vec<&str> = top.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["Finding 4", "Finding 3", "Finding 2", "Finding 1"]);
+        let card = CategoryCard {
+            category: Category::Apps,
+            total: 28 * GB,
+            count,
+            more: count - top.len(),
+            top,
+        };
+        assert_eq!(
+            card_header(&card),
+            "Applications · 5 not opened in 6 months"
+        );
+        assert_eq!(card.more, 1);
+        let card = CategoryCard {
+            category: Category::DevCaches,
+            count: 1,
+            ..card
+        };
+        assert_eq!(card_header(&card), "Dev caches · 28 GB · 1 item");
     }
 
     #[test]

@@ -107,6 +107,8 @@ pub struct AppView {
     sidebar_collapsed: bool,
     /// `Overview::by_category`, shown as sidebar weights.
     weights: Vec<(Category, u64)>,
+    /// `Overview::apps_unused`, shown next to Applications.
+    apps_unused: usize,
     overview: Entity<OverviewView>,
     settings: Entity<SettingsView>,
     /// One screen per category visited so far, created on first visit.
@@ -131,7 +133,8 @@ impl AppView {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
-        let weights = cx.global::<AppState>().engine.overview().by_category;
+        let overview_data = cx.global::<AppState>().engine.overview();
+        let (weights, apps_unused) = (overview_data.by_category, overview_data.apps_unused);
         let scan = cx.global::<MainScan>().0.clone();
         let scan_events = cx.subscribe_in(&scan, window, Self::on_scan_msg);
         let app = cx.weak_entity();
@@ -144,6 +147,7 @@ impl AppView {
             route: start_route(),
             sidebar_collapsed: false,
             weights,
+            apps_unused,
             overview,
             settings,
             categories: HashMap::new(),
@@ -331,7 +335,9 @@ impl AppView {
     /// Re-read the engine's snapshot everywhere it is shown: sidebar weights, Overview
     /// and every category screen created so far.
     fn refresh_data(&mut self, cx: &mut Context<Self>) {
-        self.weights = cx.global::<AppState>().engine.overview().by_category;
+        let overview = cx.global::<AppState>().engine.overview();
+        self.weights = overview.by_category;
+        self.apps_unused = overview.apps_unused;
         self.overview.update(cx, |o, cx| o.refresh(cx));
         for view in self.categories.values() {
             view.update(cx, |v, cx| v.reload(cx));
@@ -475,6 +481,7 @@ impl Render for AppView {
                     .child(sidebar::sidebar(
                         self.route,
                         &self.weights,
+                        self.apps_unused,
                         self.sidebar_collapsed,
                         cx.weak_entity(),
                     ))

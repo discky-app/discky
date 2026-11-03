@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use globset::GlobBuilder;
 use serde::{Deserialize, Serialize};
 
+use crate::findings::apps::{RULE_APP, UNUSED_DAYS};
 use crate::findings::{Finding, FindingId, Removal};
 use crate::fs::attr::ObjKind;
 use crate::index::snapshot::{Actor, Snapshot};
@@ -54,6 +55,9 @@ pub struct Overview {
     /// removed by a command with a `freed_note` (it frees an unknown part of them).
     pub safe_to_free: u64,
     pub no_access: usize,
+    /// Installed apps not opened for [`UNUSED_DAYS`] days (unknown last use counts), see
+    /// [`is_unused_app`]; the sidebar shows this count for Applications.
+    pub apps_unused: usize,
     /// How the last scan measured `freed_if_deleted`: `Some(false)` = fast mode
     /// (clone-aware only; blocks also held by APFS local snapshots are counted as freed),
     /// `Some(true)` = exact mode (the kernel's private size, enabled when Time Machine
@@ -151,6 +155,7 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
             protected_bytes: 0,
             safe_to_free: 0,
             no_access: 0,
+            apps_unused: 0,
             exact_private_size: None,
         };
     };
@@ -185,8 +190,22 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
             .map(|f| f.freed_if_deleted)
             .sum(),
         no_access: snap.meta.no_access.len(),
+        apps_unused: apps_unused(&snap.findings, now_secs()),
         exact_private_size: Some(snap.meta.exact_private_size),
     }
+}
+
+/// Whether `f` is an installed app (`rule_id` [`RULE_APP`]) not opened for at least
+/// [`UNUSED_DAYS`] days at `now` (Unix seconds). An unknown last use counts as not opened.
+pub fn is_unused_app(f: &Finding, now: i64) -> bool {
+    f.rule_id == RULE_APP
+        && f.modified
+            .is_none_or(|t| now.saturating_sub(t) >= i64::from(UNUSED_DAYS) * SECS_PER_DAY)
+}
+
+/// How many of `findings` are unused apps, see [`is_unused_app`].
+pub fn apps_unused(findings: &[Finding], now: i64) -> usize {
+    findings.iter().filter(|f| is_unused_app(f, now)).count()
 }
 
 /// Removed by a command that frees only part of the finding (it carries a `freed_note`).
@@ -362,4 +381,50 @@ pub fn findings_in(
         matching.into_iter().skip(offset).take(limit).collect(),
         total,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::findings::apps::RULE_LEFTOVERS;
+
+    fn app(rule: &str, modified: Option<i64>) -> Finding {
+        Finding {
+            id: FindingId(format!("{rule}-{modified:?}")),
+            category: Category::Apps,
+            title: "App".into(),
+            subtitle: None,
+            path: None,
+            node: None,
+            allocated: 1,
+            logical: 1,
+            freed_if_deleted: 1,
+            modified,
+            label: SafetyLabel::AppData,
+            rule_id: rule.into(),
+            explain: String::new(),
+            removal: Removal::None,
+            flags: vec![],
+            components: vec![],
+        }
+    }
+
+    #[test]
+    fn apps_unused_counts_unknown_and_old() {
+        let now = 1_000 * SECS_PER_DAY;
+        let limit = i64::from(UNUSED_DAYS) * SECS_PER_DAY;
+        let findings = [
+            app(RULE_APP, None),
+            app(RULE_APP, Some(now - limit)),
+            app(RULE_APP, Some(now - limit + 1)),
+            app(RULE_APP, Some(now)),
+            app(RULE_LEFTOVERS, None),
+            app("pkg-receipts", None),
+        ];
+        assert_eq!(apps_unused(&findings, now), 2);
+        assert!(is_unused_app(&findings[0], now));
+        assert!(is_unused_app(&findings[1], now));
+        assert!(!is_unused_app(&findings[2], now));
+        assert!(!is_unused_app(&findings[4], now));
+    }
 }

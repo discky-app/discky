@@ -245,13 +245,7 @@ impl OverviewView {
 
     fn card(&self, ix: usize, card: &CategoryCard, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
-        let header = format!(
-            "{} · {} · {} {}",
-            card.category,
-            format::bytes(card.total),
-            card.count,
-            if card.count == 1 { "item" } else { "items" }
-        );
+        let header = model::card_header(card);
         v_flex()
             .p_4()
             .gap_1()

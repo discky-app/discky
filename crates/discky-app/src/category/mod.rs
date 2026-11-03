@@ -21,14 +21,49 @@ use gpui_kit::*;
 
 use crate::app::{AppState, CATEGORY_TABLE_CONTEXT, FocusFilter, RemoveSelected, ToggleCheck};
 use crate::format;
-use table::{FindingsDelegate, ROW_HEIGHT, SortBy};
+use discky_core::findings::apps::{RULE_APP, RULE_LEFTOVERS, RULE_RECEIPTS};
+use discky_core::query::is_unused_app;
+use table::{FindingsDelegate, Layout, ROW_HEIGHT, SortBy};
 
-/// The sort tabs, in the order the segmented control shows them.
-const SORT_TABS: [(SortBy, &str); 3] = [
-    (SortBy::Size, "Size"),
-    (SortBy::Age, "Age"),
-    (SortBy::Name, "Name"),
-];
+/// The filter tabs of the Applications screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppsTab {
+    /// Apps not opened for `apps::UNUSED_DAYS` days, or never (unknown counts).
+    Unused,
+    /// Every installed app.
+    All,
+    /// Leftover groups of removed apps and the orphan package receipts.
+    Leftovers,
+}
+
+/// The filter tabs, in the order the segmented control shows them.
+const APPS_TABS: [AppsTab; 3] = [AppsTab::Unused, AppsTab::All, AppsTab::Leftovers];
+
+impl AppsTab {
+    /// "Not opened in 6 months (19)", "All (47)", "Leftovers (53)".
+    fn label(self, count: usize) -> String {
+        let name = match self {
+            AppsTab::Unused => "Not opened in 6 months",
+            AppsTab::All => "All",
+            AppsTab::Leftovers => "Leftovers",
+        };
+        format!("{name} ({})", format::count(count as u64))
+    }
+}
+
+/// The Applications findings `tab` shows, in the order of `findings`; `now` is Unix
+/// seconds. Unused = installed apps not opened for `UNUSED_DAYS` days (an unknown last use
+/// counts as not opened), All = installed apps, Leftovers = leftover groups and receipts.
+pub fn apps_filter(findings: &[Finding], now: i64, tab: AppsTab) -> Vec<&Finding> {
+    findings
+        .iter()
+        .filter(|f| match tab {
+            AppsTab::Unused => is_unused_app(f, now),
+            AppsTab::All => f.rule_id == RULE_APP,
+            AppsTab::Leftovers => f.rule_id == RULE_LEFTOVERS || f.rule_id == RULE_RECEIPTS,
+        })
+        .collect()
+}
 
 /// What a category screen asks of the app.
 #[derive(Clone, Debug)]
@@ -50,9 +85,16 @@ pub enum CategoryEvent {
 /// something is checked, the action bar.
 pub struct CategoryView {
     category: Category,
+    layout: Layout,
     table: Entity<TableState<FindingsDelegate>>,
     filter: Entity<InputState>,
     sort: SortBy,
+    /// The Applications filter tab (ignored by other categories).
+    apps_tab: AppsTab,
+    /// Every finding of the category as last loaded, and the time it was loaded (Unix
+    /// seconds): the Applications tabs choose from these and count them.
+    loaded: Vec<Finding>,
+    now: i64,
     filter_visible: bool,
     focus: FocusHandle,
     /// Move keyboard focus to the table on the next render (the screen was just shown).
@@ -68,8 +110,9 @@ impl CategoryView {
     /// Build the screen for `category` from the engine's current snapshot.
     pub fn new(category: Category, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let home = discky_core::paths::home_dir().unwrap_or_default();
+        let layout = Layout::for_category(category);
         let table = cx.new(|cx| {
-            TableState::new(FindingsDelegate::new(home), window, cx)
+            TableState::new(FindingsDelegate::new(layout, home), window, cx)
                 .sortable(false)
                 .col_movable(false)
                 .col_resizable(false)
@@ -84,9 +127,13 @@ impl CategoryView {
         ];
         let mut view = CategoryView {
             category,
+            layout,
             table,
             filter,
             sort: SortBy::Size,
+            apps_tab: AppsTab::Unused,
+            loaded: Vec::new(),
+            now: 0,
             filter_visible: false,
             focus: cx.focus_handle(),
             focus_table: true,
@@ -108,10 +155,32 @@ impl CategoryView {
             0,
             usize::MAX,
         );
-        let now = SystemTime::now()
+        self.now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-        self.update_rows(cx, move |d| d.set_findings(findings, now));
+        self.loaded = findings;
+        self.show_loaded(cx);
+    }
+
+    /// Hand the loaded findings to the table: on the Applications screen only those of the
+    /// current tab (checked findings outside it are dropped).
+    fn show_loaded(&mut self, cx: &mut Context<Self>) {
+        let rows: Vec<Finding> = match self.layout {
+            Layout::Apps => apps_filter(&self.loaded, self.now, self.apps_tab)
+                .into_iter()
+                .cloned()
+                .collect(),
+            _ => self.loaded.clone(),
+        };
+        let now = self.now;
+        self.update_rows(cx, move |d| d.set_findings(rows, now));
+    }
+
+    fn set_apps_tab(&mut self, tab: AppsTab, cx: &mut Context<Self>) {
+        if self.apps_tab != tab {
+            self.apps_tab = tab;
+            self.show_loaded(cx);
+        }
     }
 
     /// Ask for keyboard focus on the table when the screen is next drawn.
@@ -265,10 +334,30 @@ impl CategoryView {
                 format::count(total as u64)
             )
         };
-        let selected = SORT_TABS
+        let sort_tabs = self.layout.sort_tabs();
+        let selected = sort_tabs
             .iter()
             .position(|(by, _)| *by == self.sort)
             .unwrap_or(0);
+        let apps_tabs = (self.layout == Layout::Apps).then(|| {
+            let selected = APPS_TABS
+                .iter()
+                .position(|t| *t == self.apps_tab)
+                .unwrap_or(0);
+            TabBar::new("apps-filter")
+                .segmented()
+                .small()
+                .selected_index(selected)
+                .children(APPS_TABS.iter().map(|&tab| {
+                    let count = apps_filter(&self.loaded, self.now, tab).len();
+                    Tab::new().label(tab.label(count))
+                }))
+                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                    if let Some(tab) = APPS_TABS.get(*ix) {
+                        this.set_apps_tab(*tab, cx);
+                    }
+                }))
+        });
         h_flex()
             .flex_shrink_0()
             .gap_3()
@@ -293,14 +382,15 @@ impl CategoryView {
                             .child(count),
                     ),
             )
+            .children(apps_tabs)
             .child(
                 TabBar::new("sort")
                     .segmented()
                     .small()
                     .selected_index(selected)
-                    .children(SORT_TABS.iter().map(|(_, label)| Tab::new().label(*label)))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        if let Some((by, _)) = SORT_TABS.get(*ix) {
+                    .children(sort_tabs.iter().map(|(_, label)| Tab::new().label(*label)))
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        if let Some((by, _)) = sort_tabs.get(*ix) {
                             this.set_sort(*by, cx);
                         }
                     })),
@@ -464,7 +554,38 @@ fn selection_text(count: usize, frees: u64, hidden: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::selection_text;
+    use super::{AppsTab, apps_filter, selection_text};
+    use crate::category::fixtures::{app, finding};
+    use discky_core::findings::AppSource;
+
+    #[test]
+    fn apps_filter_treats_unknown_as_unused() {
+        let day = 86_400;
+        let now = 1_000 * day;
+        let mut leftovers = finding("l", "Readdle", 5);
+        leftovers.rule_id = "app-leftovers".into();
+        let mut receipts = finding("r", "Package receipts of removed apps", 0);
+        receipts.rule_id = "pkg-receipts".into();
+        let findings = vec![
+            app("never", AppSource::Dragged, None, ""),
+            app("old", AppSource::Dragged, Some(now - 180 * day), ""),
+            app("recent", AppSource::Dragged, Some(now - 179 * day), ""),
+            leftovers,
+            receipts,
+        ];
+        let titles = |tab| -> Vec<String> {
+            apps_filter(&findings, now, tab)
+                .iter()
+                .map(|f| f.title.clone())
+                .collect()
+        };
+        assert_eq!(titles(AppsTab::Unused), ["never", "old"]);
+        assert_eq!(titles(AppsTab::All), ["never", "old", "recent"]);
+        assert_eq!(
+            titles(AppsTab::Leftovers),
+            ["Readdle", "Package receipts of removed apps"]
+        );
+    }
 
     #[test]
     fn selection_text_mentions_rows_hidden_by_the_filter() {
@@ -480,8 +601,36 @@ mod tests {
 pub(crate) mod fixtures {
     use std::path::PathBuf;
 
-    use discky_core::findings::{Finding, FindingId, Removal};
+    use discky_core::findings::{AppSource, Finding, FindingId, Removal};
     use discky_core::rules::{Category, SafetyLabel};
+
+    /// An app finding titled `title` installed from `source`, last opened at `modified`,
+    /// with `subtitle` (empty for none) and bundle id `com.example.<title>`.
+    pub fn app(title: &str, source: AppSource, modified: Option<i64>, subtitle: &str) -> Finding {
+        let bundle = PathBuf::from(format!("/Applications/{title}.app"));
+        Finding {
+            id: FindingId::new("app", title),
+            category: Category::Apps,
+            title: title.to_string(),
+            subtitle: (!subtitle.is_empty()).then(|| subtitle.to_string()),
+            path: Some(bundle.clone()),
+            node: None,
+            allocated: 1,
+            logical: 1,
+            freed_if_deleted: 1,
+            modified,
+            label: SafetyLabel::AppData,
+            rule_id: "apps".to_string(),
+            explain: String::new(),
+            removal: Removal::App {
+                source,
+                bundle,
+                bundle_id: Some(format!("com.example.{title}")),
+            },
+            flags: Vec::new(),
+            components: Vec::new(),
+        }
+    }
 
     /// A removable App caches finding `title` of `allocated` bytes (also its
     /// `freed_if_deleted`), at `/Users/me/Library/Caches/<key>`.
