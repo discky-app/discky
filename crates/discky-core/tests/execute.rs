@@ -840,6 +840,7 @@ fn skipped_script_skips_the_findings_remaining_steps() {
     let items = [PlanItem {
         id: "app".into(),
         components: Some(vec![0, 1]),
+        parts: None,
     }];
     let plan = plan_items_with_tools(&items, &[&f], &Config::default(), &PlanTools::default());
     assert_eq!(plan.steps.len(), 2, "{:#?}", plan.steps);

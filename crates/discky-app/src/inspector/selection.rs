@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use discky_core::PlanItem;
 use discky_core::findings::{Component, ComponentKind, ComponentRemoval};
+use discky_core::plan::parts_signature;
 
 /// The checked components of one finding, by index into `Finding::components`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,13 +51,15 @@ impl ComponentSelection {
             .retain(|&i| components.get(i).is_some_and(selectable));
     }
 
-    /// The plan request for finding `id` with exactly the checked components, ascending.
-    pub fn items(&self, id: &str) -> PlanItem {
+    /// The plan request for finding `id` with exactly the checked components, ascending,
+    /// signed with the `components` they index (the plan refuses it if they changed).
+    pub fn items(&self, id: &str, components: &[Component]) -> PlanItem {
         let mut chosen: Vec<usize> = self.on.iter().copied().collect();
         chosen.sort_unstable();
         PlanItem {
             id: id.to_string(),
             components: Some(chosen),
+            parts: Some(parts_signature(components)),
         }
     }
 
@@ -152,6 +155,7 @@ mod tests {
     use super::{ComponentSelection, component_note, kind_label};
     use discky_core::PlanItem;
     use discky_core::findings::{Component, ComponentKind, ComponentRemoval};
+    use discky_core::plan::parts_signature;
     use std::path::PathBuf;
 
     fn comp(
@@ -234,15 +238,28 @@ mod tests {
         s.toggle(2, &c);
         s.toggle(0, &c);
         assert_eq!(
-            s.items("abc"),
+            s.items("abc", &c),
             PlanItem {
                 id: "abc".into(),
                 components: Some(vec![1, 2]),
+                parts: Some(parts_signature(&c)),
             }
         );
         s.set(1, false, &c);
         s.set(2, false, &c);
-        assert_eq!(s.items("abc").components, Some(vec![]));
+        assert_eq!(s.items("abc", &c).components, Some(vec![]));
+    }
+
+    #[test]
+    fn items_carry_the_parts_signature() {
+        let comps = app();
+        let s = ComponentSelection::from_components(&comps);
+        assert_eq!(s.items("id", &comps).parts, Some(parts_signature(&comps)));
+        // Another component list (a reload re-mapped the indices) signs differently.
+        assert_ne!(
+            s.items("id", &comps[1..]).parts,
+            Some(parts_signature(&comps))
+        );
     }
 
     #[test]
@@ -256,7 +273,7 @@ mod tests {
         let shorter = &c[..2];
         assert_eq!(s.summary(shorter), (2, 120));
         s.retain_valid(shorter);
-        assert_eq!(s.items("x").components, Some(vec![0, 1]));
+        assert_eq!(s.items("x", shorter).components, Some(vec![0, 1]));
     }
 
     #[test]

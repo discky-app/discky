@@ -151,7 +151,8 @@ impl Inspector {
         if self.finding.components.is_empty() {
             PlanItem::defaults(&self.finding.id)
         } else {
-            self.selection.items(&self.finding.id.0)
+            self.selection
+                .items(&self.finding.id.0, &self.finding.components)
         }
     }
 

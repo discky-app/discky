@@ -412,6 +412,7 @@ impl Engine {
             .map(|id| PlanItem {
                 id: id.clone(),
                 components: None,
+                parts: None,
             })
             .collect();
         self.plan_items(&items)

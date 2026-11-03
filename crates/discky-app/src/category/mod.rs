@@ -23,7 +23,7 @@ use crate::app::{AppState, CATEGORY_TABLE_CONTEXT, FocusFilter, RemoveSelected, 
 use crate::format;
 use discky_core::findings::apps::{RULE_APP, RULE_LEFTOVERS, RULE_RECEIPTS};
 use discky_core::query::is_unused_app;
-use table::{FindingsDelegate, Layout, ROW_HEIGHT, SortBy};
+use table::{FindingsDelegate, Layout, ROW_HEIGHT, SortBy, TabFilter};
 
 /// The filter tabs of the Applications screen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,20 +49,22 @@ impl AppsTab {
         };
         format!("{name} ({})", format::count(count as u64))
     }
+
+    /// Whether this tab shows `f` (see [`apps_filter`]); `now` is Unix seconds.
+    fn shows(self, f: &Finding, now: i64) -> bool {
+        match self {
+            AppsTab::Unused => is_unused_app(f, now),
+            AppsTab::All => f.rule_id == RULE_APP,
+            AppsTab::Leftovers => f.rule_id == RULE_LEFTOVERS || f.rule_id == RULE_RECEIPTS,
+        }
+    }
 }
 
 /// The Applications findings `tab` shows, in the order of `findings`; `now` is Unix
 /// seconds. Unused = installed apps not opened for `UNUSED_DAYS` days (an unknown last use
 /// counts as not opened), All = installed apps, Leftovers = leftover groups and receipts.
 pub fn apps_filter(findings: &[Finding], now: i64, tab: AppsTab) -> Vec<&Finding> {
-    findings
-        .iter()
-        .filter(|f| match tab {
-            AppsTab::Unused => is_unused_app(f, now),
-            AppsTab::All => f.rule_id == RULE_APP,
-            AppsTab::Leftovers => f.rule_id == RULE_LEFTOVERS || f.rule_id == RULE_RECEIPTS,
-        })
-        .collect()
+    findings.iter().filter(|f| tab.shows(f, now)).collect()
 }
 
 /// What a category screen asks of the app.
@@ -162,24 +164,29 @@ impl CategoryView {
         self.show_loaded(cx);
     }
 
-    /// Hand the loaded findings to the table: on the Applications screen only those of the
-    /// current tab (checked findings outside it are dropped).
+    /// Hand the loaded findings to the table; on the Applications screen all of them, with
+    /// the current tab as a filter (checks on findings outside it are kept).
     fn show_loaded(&mut self, cx: &mut Context<Self>) {
-        let rows: Vec<Finding> = match self.layout {
-            Layout::Apps => apps_filter(&self.loaded, self.now, self.apps_tab)
-                .into_iter()
-                .cloned()
-                .collect(),
-            _ => self.loaded.clone(),
-        };
-        let now = self.now;
-        self.update_rows(cx, move |d| d.set_findings(rows, now));
+        let rows = self.loaded.clone();
+        let (now, tab) = (self.now, self.tab_filter());
+        self.update_rows(cx, move |d| {
+            d.set_tab_filter(tab);
+            d.set_findings(rows, now);
+        });
+    }
+
+    /// The current Applications tab as a table filter; `None` on other screens.
+    fn tab_filter(&self) -> Option<TabFilter> {
+        let (tab, now) = (self.apps_tab, self.now);
+        (self.layout == Layout::Apps)
+            .then(|| Box::new(move |f: &Finding| tab.shows(f, now)) as TabFilter)
     }
 
     fn set_apps_tab(&mut self, tab: AppsTab, cx: &mut Context<Self>) {
         if self.apps_tab != tab {
             self.apps_tab = tab;
-            self.show_loaded(cx);
+            let filter = self.tab_filter();
+            self.update_rows(cx, move |d| d.set_tab_filter(filter));
         }
     }
 
@@ -323,7 +330,7 @@ impl CategoryView {
     /// Title and count, the sort control and the filter button.
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let delegate = self.table.read(cx).delegate();
-        let total = delegate.all().len();
+        let total = delegate.tab_total();
         let shown = delegate.shown_count();
         let count = if shown == total {
             format::count(total as u64)
@@ -467,7 +474,7 @@ impl Render for CategoryView {
         if std::mem::take(&mut self.focus_table) && !self.filter_focused(window, cx) {
             window.focus(&self.table.focus_handle(cx), cx);
         }
-        let empty = self.table.read(cx).delegate().all().is_empty();
+        let empty = self.table.read(cx).delegate().tab_total() == 0;
         let muted = cx.theme().muted_foreground;
         let body = if empty {
             v_flex()

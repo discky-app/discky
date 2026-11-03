@@ -368,6 +368,7 @@ fn plan_items_with_no_selection_uses_default_on_components() {
     let items = [PlanItem {
         id: f.id.0.clone(),
         components: None,
+        parts: None,
     }];
     let plan = plan_items(&items, &[&f], &Config::default());
     assert_eq!(plan.steps.len(), 1, "{:?}", plan.steps);
@@ -382,6 +383,7 @@ fn plan_items_with_no_selection_uses_default_on_components() {
     let items = [PlanItem {
         id: f.id.0.clone(),
         components: Some(vec![0, 1]),
+        parts: None,
     }];
     let plan = plan_items(&items, &[&f], &Config::default());
     let comps: Vec<Option<usize>> = plan.steps.iter().map(|s| s.component).collect();
@@ -397,6 +399,7 @@ fn plan_items_rejects_bad_component_index() {
     let items = [PlanItem {
         id: f.id.0.clone(),
         components: Some(vec![0, 7]),
+        parts: None,
     }];
     let plan = plan_items(&items, &[&f], &Config::default());
     assert_eq!(plan.skipped.len(), 1);
@@ -419,6 +422,7 @@ fn plan_items_rejects_bad_component_index() {
     let items = [PlanItem {
         id: plain.id.0.clone(),
         components: Some(vec![0]),
+        parts: None,
     }];
     let plan = plan_items(&items, &[&plain], &Config::default());
     assert!(plan.steps.is_empty());

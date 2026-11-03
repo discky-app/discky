@@ -321,6 +321,7 @@ fn global_version_is_not_removable() {
         &[discky_core::PlanItem {
             id: g.id.0.clone(),
             components: None,
+            parts: None,
         }],
         &[g],
         &discky_core::Config::default(),

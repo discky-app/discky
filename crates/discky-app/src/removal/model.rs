@@ -137,6 +137,7 @@ impl RemovalModel {
             .map(|id| PlanItem {
                 id: id.clone(),
                 components: None,
+                parts: None,
             })
             .collect();
         RemovalModel {
@@ -678,6 +679,7 @@ mod tests {
         let items = ["a", "b"].map(|id| PlanItem {
             id: id.into(),
             components: None,
+            parts: None,
         });
         let m = RemovalModel::planning(items.to_vec(), &Config::default());
         assert_eq!(m.items, items);

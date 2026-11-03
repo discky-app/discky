@@ -9,8 +9,8 @@ use discky_core::{
         AppSource, Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal,
     },
     plan::{
-        CaskInfo, Plan, PlanItem, PlanTools, Step, StepFlags, StepKind, ZapInfo,
-        plan_items_with_tools,
+        ALREADY_GONE, CaskInfo, NOTHING_TO_DO, PARTS_CHANGED, Plan, PlanItem, PlanTools, Step,
+        StepFlags, StepKind, ZapInfo, parts_signature, plan_items_with_tools,
     },
     rules::{Category, SafetyLabel},
 };
@@ -102,8 +102,19 @@ fn plan_with(f: &Finding, components: Option<Vec<usize>>, tools: &PlanTools, cfg
     let items = [PlanItem {
         id: f.id.0.clone(),
         components,
+        parts: None,
     }];
     plan_items_with_tools(&items, &[f], cfg, tools)
+}
+
+/// Plan `f` with the given component selection and parts signature.
+fn plan_parts(f: &Finding, components: Option<Vec<usize>>, parts: Option<u64>) -> Plan {
+    let items = [PlanItem {
+        id: f.id.0.clone(),
+        components,
+        parts,
+    }];
+    plan_items_with_tools(&items, &[f], &Config::default(), &PlanTools::default())
 }
 
 fn argv(s: &Step) -> Vec<&str> {
@@ -1272,4 +1283,100 @@ fn invalid_pkg_ids_and_apple_launch_jobs_are_never_touched() {
     ] {
         assert!(warnings.iter().any(|x| *x == w), "{w}: {warnings:?}");
     }
+}
+
+/// A dragged app with an existing bundle and an Application Support folder.
+fn parts_app(t: &Path) -> Finding {
+    let bundle = dir(t, "P.app");
+    let support = dir(t, "p-support");
+    app(
+        "P",
+        AppSource::Dragged,
+        &bundle,
+        vec![
+            trash_comp(ComponentKind::AppBundle, bundle.clone(), 10),
+            trash_comp(ComponentKind::ApplicationSupport, support, 3),
+        ],
+    )
+}
+
+#[test]
+fn stale_parts_signature_skips_the_finding() {
+    let t = tempfile::tempdir().unwrap();
+    let f = parts_app(t.path());
+    let p = plan_parts(&f, Some(vec![1]), Some(parts_signature(&f.components) ^ 1));
+    assert!(p.steps.is_empty(), "{:#?}", p.steps);
+    assert_eq!(p.skipped[0].1, PARTS_CHANGED);
+    // A reload that re-orders the parts changes the signature too.
+    let mut swapped = f.components.clone();
+    swapped.swap(0, 1);
+    let p = plan_parts(&f, Some(vec![1]), Some(parts_signature(&swapped)));
+    assert_eq!(p.skipped[0].1, PARTS_CHANGED);
+}
+
+#[test]
+fn matching_parts_signature_plans_normally() {
+    let t = tempfile::tempdir().unwrap();
+    let f = parts_app(t.path());
+    let p = plan_parts(&f, Some(vec![1]), Some(parts_signature(&f.components)));
+    assert_eq!(p.steps.len(), 1, "{:#?}", p.skipped);
+    assert_eq!(p.steps[0].component, Some(1));
+    assert!(p.skipped.is_empty());
+}
+
+#[test]
+fn all_selected_paths_gone_reports_already_gone() {
+    let t = tempfile::tempdir().unwrap();
+    let bundle = dir(t.path(), "G.app");
+    let caches = dir(t.path(), "g-caches");
+    let logs = dir(t.path(), "g-logs");
+    let agent = file(t.path(), "com.apple.g-agent.plist");
+    let global = file(t.path(), "g-global.plist");
+    let f = app(
+        "G",
+        AppSource::Dragged,
+        &bundle,
+        vec![
+            trash_comp(ComponentKind::AppBundle, bundle.clone(), 10),
+            trash_comp(ComponentKind::Caches, caches.clone(), 3),
+            trash_comp(ComponentKind::Logs, logs.clone(), 1),
+            // An Apple job is never unloaded; its plist is gone.
+            comp(
+                ComponentKind::LaunchAgent,
+                Some(agent.clone()),
+                1,
+                ComponentRemoval::Bootout {
+                    label: "com.apple.g-agent".into(),
+                    system: false,
+                },
+            ),
+            // A protected settings domain whose file still exists.
+            comp(
+                ComponentKind::Preferences,
+                Some(global),
+                1,
+                ComponentRemoval::Defaults {
+                    domain: "NSGlobalDomain".into(),
+                },
+            ),
+        ],
+    );
+    std::fs::remove_dir(&caches).unwrap();
+    std::fs::remove_dir(&logs).unwrap();
+    std::fs::remove_file(&agent).unwrap();
+    let p = plan_parts(&f, Some(vec![1, 2]), None);
+    assert!(p.steps.is_empty(), "{:#?}", p.steps);
+    assert_eq!(p.skipped[0].1, ALREADY_GONE);
+    // Gone, though no step would have been planned for it anyway.
+    let p = plan_parts(&f, Some(vec![3]), None);
+    assert_eq!(p.skipped[0].1, ALREADY_GONE);
+    // Still there, but never acted on.
+    let p = plan_parts(&f, Some(vec![4]), None);
+    assert_eq!(p.skipped[0].1, NOTHING_TO_DO);
+    // Some gone, some only warned about: not "Already gone".
+    let p = plan_parts(&f, Some(vec![1, 4]), None);
+    assert_eq!(p.skipped[0].1, NOTHING_TO_DO);
+    // Nothing selected stays "Nothing selected".
+    let p = plan_parts(&f, Some(vec![]), None);
+    assert_eq!(p.skipped[0].1, "Nothing selected");
 }

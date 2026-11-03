@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::{
-    ALREADY_GONE, Bucket, Fingerprint, Step, StepFlags, StepKind, already_gone, bundle_component,
-    display, path_step, removal_step, step,
+    ALREADY_GONE, Bucket, Fingerprint, NOTHING_TO_DO, Step, StepFlags, StepKind, already_gone,
+    bundle_component, display, path_step, removal_step, step,
 };
 use crate::config::{Config, RemovalMode};
 use crate::findings::apps::{FLAG_APP_RUNNING, FLAG_ZAP_SHARED, cask, leftovers, pkg};
@@ -367,11 +367,7 @@ pub(super) fn plan_finding(
         }
     }
     if out.steps.is_empty() {
-        return Err(if out.missing > 0 {
-            ALREADY_GONE.to_string()
-        } else {
-            "Nothing selected".to_string()
-        });
+        return Err(empty_reason(f, selected).to_string());
     }
     if !out.warnings.is_empty()
         && let Some((_, first)) = out
@@ -384,13 +380,30 @@ pub(super) fn plan_finding(
     Ok(out.steps)
 }
 
+/// Why `f` plans no step for the `selected` components: nothing is selected; every
+/// selected component with a path (at least one) is gone ([`ALREADY_GONE`]); otherwise
+/// [`NOTHING_TO_DO`] (e.g. only protected settings domains or Apple launch jobs).
+fn empty_reason(f: &Finding, selected: &[usize]) -> &'static str {
+    if selected.is_empty() {
+        return "Nothing selected";
+    }
+    let mut paths = selected
+        .iter()
+        .filter_map(|&i| f.components[i].path.as_deref())
+        .peekable();
+    if paths.peek().is_some() && paths.all(|p| !Fingerprint::take(p).exists) {
+        ALREADY_GONE
+    } else {
+        NOTHING_TO_DO
+    }
+}
+
 /// Steps collected for one finding, plus finding-level warnings (attached to its first
-/// non-quit step) and how many selected components were already missing.
+/// non-quit step).
 #[derive(Default)]
 struct Out {
     steps: Vec<(Bucket, Step)>,
     warnings: Vec<String>,
-    missing: usize,
 }
 
 impl Out {
@@ -648,7 +661,6 @@ fn own_uninstaller(f: &Finding, i: usize, path: &Path, out: &mut Out) -> Result<
         _ => return Err(format!("Component {i} is not a script")),
     };
     if !Fingerprint::take(path).exists {
-        out.missing += 1;
         return Ok(());
     }
     let mut s = command(
@@ -870,7 +882,7 @@ fn mise_step(f: &Finding, tool: &str, version: &str, tools: &PlanTools) -> Step 
 /// plist's trash step (see [`bootout_steps`]); Defaults → `defaults delete` (never for a
 /// [`protected_domain`], which becomes a warning); PkgForget → `pkgutil --forget`;
 /// RunScript (see [`own_uninstaller`]) and None → nothing.
-/// Components whose path no longer exists are left out (and counted as missing).
+/// Components whose path no longer exists are left out.
 fn component_steps(
     f: &Finding,
     selected: &[usize],
@@ -893,8 +905,6 @@ fn component_steps(
                 };
                 if exists == Some(true) {
                     out.push(Bucket::Trash, component_trash(f, i, c, path, cfg));
-                } else {
-                    out.missing += 1;
                 }
             }
             ComponentRemoval::Bootout { label, .. } if apple_label(label) => {
@@ -903,13 +913,11 @@ fn component_steps(
                 ));
             }
             // The bootout itself comes from `bootout_steps`; here only the plist.
-            ComponentRemoval::Bootout { .. } => match (&c.path, exists) {
-                (Some(path), Some(true)) => {
+            ComponentRemoval::Bootout { .. } => {
+                if let (Some(path), Some(true)) = (&c.path, exists) {
                     out.push(Bucket::Trash, component_trash(f, i, c, path, cfg));
                 }
-                (Some(_), _) => out.missing += 1,
-                _ => {}
-            },
+            }
             ComponentRemoval::Defaults { domain } => {
                 let (target, _) = defaults_target(c, domain);
                 if protected_domain(domain) || protected_domain(&target) {
@@ -918,7 +926,6 @@ fn component_steps(
                     continue;
                 }
                 if exists == Some(false) {
-                    out.missing += 1;
                     continue;
                 }
                 out.push(Bucket::Defaults, defaults_step(f, i, c, domain));
@@ -931,7 +938,6 @@ fn component_steps(
                     continue;
                 }
                 if exists == Some(false) {
-                    out.missing += 1;
                     continue;
                 }
                 let mut s = command(

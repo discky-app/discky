@@ -647,6 +647,7 @@ fn defaults(ids: Vec<String>) -> Vec<PlanItem> {
         .map(|id| PlanItem {
             id,
             components: None,
+            parts: None,
         })
         .collect()
 }

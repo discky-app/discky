@@ -6,6 +6,7 @@
 //! planning.
 
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,9 @@ use serde_json::{Map, Value, json};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::config::{Config, RemovalMode};
-use crate::findings::{ComponentKind, ComponentRemoval, Finding, FindingId, Removal, ollama_url};
+use crate::findings::{
+    Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal, ollama_url,
+};
 use crate::paths;
 use crate::tools;
 
@@ -155,7 +158,30 @@ pub struct PlanItem {
     pub id: String,
     /// Component indices to act on; `None` = every `default_on` component.
     pub components: Option<Vec<usize>>,
+    /// [`parts_signature`] of the components the selection was made against; a plan refuses
+    /// the item with [`PARTS_CHANGED`] when the finding's components differ. `None` = no
+    /// check (MCP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<u64>,
 }
+
+/// A same-process signature of `components`: their `kind`, `path` and `removal`, in order
+/// (`DefaultHasher` over their `Debug` output). Never persisted — the hasher may change
+/// between builds.
+pub fn parts_signature(components: &[Component]) -> u64 {
+    let mut h = DefaultHasher::new();
+    components.len().hash(&mut h);
+    for c in components {
+        format!("{:?}|{:?}|{:?}", c.kind, c.path, c.removal).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Skip reason of an item whose [`PlanItem::parts`] no longer matches the finding.
+pub const PARTS_CHANGED: &str = "Finding changed since it was shown (rescan to refresh)";
+/// Skip reason of a finding whose selection is non-empty but plans no step, and not
+/// because every selected path is gone.
+pub const NOTHING_TO_DO: &str = "Nothing to do for the selected components";
 
 impl PlanItem {
     /// The finding `id` with its default components.
@@ -163,6 +189,7 @@ impl PlanItem {
         PlanItem {
             id: id.0.clone(),
             components: None,
+            parts: None,
         }
     }
 }
@@ -398,9 +425,15 @@ fn removal_step(f: &Finding, cfg: &Config) -> Result<Option<Step>, String> {
 }
 
 /// The component indices `item` selects in `f`, in component order, or why it cannot be
-/// planned (an unknown index, or a shown-only component — `ComponentRemoval::None` —
-/// named explicitly).
+/// planned (the parts changed since the selection was made — [`PARTS_CHANGED`] — an
+/// unknown index, or a shown-only component — `ComponentRemoval::None` — named explicitly).
 fn selected_components(f: &Finding, item: &PlanItem) -> Result<Vec<usize>, String> {
+    if item
+        .parts
+        .is_some_and(|sig| sig != parts_signature(&f.components))
+    {
+        return Err(PARTS_CHANGED.to_string());
+    }
     match &item.components {
         None => Ok((0..f.components.len())
             .filter(|&i| f.components[i].default_on)
@@ -423,7 +456,8 @@ fn selected_components(f: &Finding, item: &PlanItem) -> Result<Vec<usize>, Strin
     }
 }
 
-const ALREADY_GONE: &str = "Already gone (rescan to refresh)";
+/// Skip reason of a finding (or every selected component) whose paths are all missing.
+pub const ALREADY_GONE: &str = "Already gone (rescan to refresh)";
 /// Skip reason for an id that is not among the findings (e.g. not in the snapshot).
 pub const UNKNOWN_ID: &str = "Unknown finding id (rescan?)";
 

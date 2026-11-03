@@ -324,6 +324,7 @@ impl DisckyServer {
             .into_iter()
             .map(|id| PlanItem {
                 components: by_id.remove(&id),
+                parts: None,
                 id,
             })
             .collect();

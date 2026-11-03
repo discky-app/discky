@@ -243,10 +243,14 @@ pub fn flex_widths(layout: Layout, table_width: f32) -> (f32, f32) {
     }
 }
 
+/// Which findings an Applications tab shows.
+pub type TabFilter = Box<dyn Fn(&Finding) -> bool>;
+
 /// Rows, checked findings and presentation inputs of the category table.
 ///
 /// `all` holds every finding of the category in the current sort order; `rows` is the
-/// filtered part the table shows. Sorting and filtering never touch `selection`.
+/// part the table shows (needle and tab filter). Sorting and filtering never touch
+/// `selection`.
 pub struct FindingsDelegate {
     layout: Layout,
     all: Vec<Finding>,
@@ -254,6 +258,8 @@ pub struct FindingsDelegate {
     selection: Selection,
     sort: SortBy,
     needle: String,
+    /// The Applications tab's predicate, applied with the needle; `None` lets all through.
+    tab: Option<TabFilter>,
     /// `~` for the Where column.
     home: PathBuf,
     /// Unix seconds the Modified column is relative to (taken at each reload).
@@ -272,6 +278,7 @@ impl FindingsDelegate {
             selection: Selection::default(),
             sort: SortBy::Size,
             needle: String::new(),
+            tab: None,
             home,
             now: 0,
             widths: flex_widths(layout, 0.),
@@ -300,6 +307,13 @@ impl FindingsDelegate {
         self.apply_filter();
     }
 
+    /// Show only rows `pred` lets through (an Applications tab), on top of the needle.
+    /// Checks on rows it hides are kept and count in [`Self::hidden_checked`].
+    pub fn set_tab_filter(&mut self, pred: Option<TabFilter>) {
+        self.tab = pred;
+        self.apply_filter();
+    }
+
     /// Size the flexible columns for a table `table_width` wide. Returns whether the
     /// widths changed (the table then needs a `refresh`).
     pub fn set_table_width(&mut self, table_width: f32) -> bool {
@@ -312,8 +326,18 @@ impl FindingsDelegate {
     fn apply_filter(&mut self) {
         self.rows = filter(&self.all, &self.needle)
             .into_iter()
+            .filter(|f| self.in_tab(f))
             .cloned()
             .collect();
+    }
+
+    fn in_tab(&self, f: &Finding) -> bool {
+        self.tab.as_ref().is_none_or(|pred| pred(f))
+    }
+
+    /// How many findings the tab filter lets through (needle ignored).
+    pub fn tab_total(&self) -> usize {
+        self.all.iter().filter(|f| self.in_tab(f)).count()
     }
 
     /// Every finding of the category, in table order (filter ignored).
@@ -606,7 +630,8 @@ mod tests {
         source_text, status_text, total_breakdown,
     };
     use crate::category::fixtures::{app, finding};
-    use discky_core::findings::{AppSource, Component, ComponentKind, ComponentRemoval};
+    use discky_core::findings::{AppSource, Component, ComponentKind, ComponentRemoval, FindingId};
+    use discky_core::query::is_unused_app;
     use std::path::PathBuf;
 
     #[test]
@@ -750,6 +775,38 @@ mod tests {
         d.set_needle("gamma");
         assert_eq!(d.hidden_checked(), 2);
         d.set_needle("");
+        assert_eq!(d.hidden_checked(), 0);
+    }
+
+    #[test]
+    fn tab_filter_keeps_checks_hidden() {
+        let day = 86_400;
+        let now = 1_000 * day;
+        let mut d = FindingsDelegate::new(Layout::Apps, PathBuf::from("/Users/me"));
+        d.set_findings(
+            vec![
+                app("Unused", AppSource::Dragged, Some(now - 400 * day), ""),
+                app("Recent", AppSource::Dragged, Some(now - day), ""),
+            ],
+            now,
+        );
+        let recent = d.position(&FindingId::new("app", "Recent")).unwrap();
+        assert!(d.toggle_row(recent));
+        d.set_tab_filter(Some(Box::new(move |f| is_unused_app(f, now))));
+        assert_eq!(titles(&d.rows), ["Unused"]);
+        assert_eq!(d.shown_count(), 1);
+        assert_eq!(d.tab_total(), 1);
+        assert_eq!(d.checked_ids(), [FindingId::new("app", "Recent").0]);
+        assert_eq!(d.hidden_checked(), 1);
+        // The needle narrows the tab's rows further; a reload keeps the tab filter.
+        d.set_needle("nothing");
+        assert_eq!(d.shown_count(), 0);
+        d.set_needle("");
+        d.set_findings(d.all().to_vec(), now);
+        assert_eq!(titles(&d.rows), ["Unused"]);
+        assert_eq!(d.hidden_checked(), 1);
+        d.set_tab_filter(None);
+        assert_eq!(d.shown_count(), 2);
         assert_eq!(d.hidden_checked(), 0);
     }
 
