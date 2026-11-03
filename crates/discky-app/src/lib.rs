@@ -1,6 +1,7 @@
 //! Discky.app: the GUI shell over `discky-core`.
 
 pub mod app;
+pub mod duck;
 pub mod format;
 pub mod overview;
 pub mod scan;
