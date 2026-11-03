@@ -155,10 +155,12 @@ pub fn gather(index: &Index, home: &Path, tools: &ToolPaths) -> Gathered {
     }
 }
 
-/// Whether the index covers `/Applications`. Without it nothing is known about what is
-/// installed, so [`find`] (and the `running` lookup before it) is skipped entirely.
-pub fn applies(index: &Index) -> bool {
+/// Whether the index covers `/Applications` or `<home>/Applications`. Without either
+/// nothing is known about what is installed, so [`find`] (and the `running` lookup before
+/// it) is skipped entirely.
+pub fn applies(index: &Index, home: &Path) -> bool {
     index.find(Path::new(inventory::SYSTEM_APPS)).is_some()
+        || index.find(&home.join("Applications")).is_some()
 }
 
 /// App findings for the categorizer (see the module docs); nothing when the index does
@@ -173,7 +175,7 @@ pub fn find(
     claimed: &mut HashSet<NodeId>,
     running: &HashSet<String>,
 ) -> Vec<Finding> {
-    if !applies(index) {
+    if !applies(index, home) {
         return Vec::new();
     }
     let tools = ToolPaths::detect();

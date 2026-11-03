@@ -225,7 +225,7 @@ impl Categorizer<'_> {
         out.extend(rule_pass(self.index, self.rules, &mut claimed));
         if let Some(home) = home {
             // Before App caches: leftover groups of removed apps claim their folders.
-            if apps::applies(self.index) {
+            if apps::applies(self.index, home) {
                 let running = crate::tools::running_app_bundle_ids();
                 out.extend(apps::find(self.index, home, &mut claimed, &running));
             }

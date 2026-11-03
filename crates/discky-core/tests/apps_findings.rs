@@ -1127,3 +1127,16 @@ fn job_label_of_a_longer_installed_id_belongs_to_that_app() {
     let helper = found.iter().find(|f| f.title == "Foo Helper").unwrap();
     assert!(component(helper, &agent).default_on);
 }
+
+#[test]
+fn applies_with_home_applications_only() {
+    use discky_core::findings::apps::applies;
+    let d = tempfile::tempdir().unwrap();
+    let with = d.path().join("with");
+    std::fs::create_dir_all(with.join("Applications/X.app/Contents")).unwrap();
+    std::fs::write(with.join("Applications/X.app/Contents/Info.plist"), "x").unwrap();
+    assert!(applies(&scan(&with), &with));
+    let without = d.path().join("without");
+    std::fs::create_dir_all(without.join("Library")).unwrap();
+    assert!(!applies(&scan(&without), &without));
+}

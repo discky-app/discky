@@ -508,26 +508,23 @@ fn plan_removal_with_components_selects_steps() {
     }
     std::fs::write(
         home.join("config.toml"),
-        // The apps pass only runs when the index covers `/Applications` (read-only scan);
-        // the fake app lives under the scratch `~/Applications`.
-        format!(
-            "[scan]\nroots = [\"{}\", \"/Applications\"]\n",
-            home.display()
-        ),
+        format!("[scan]\nroots = [\"{}\"]\n", home.display()),
     )
     .unwrap();
     let mut m = Mcp::start(home);
     m.initialize();
-    let sc = m.tool("scan", json!({"wait_seconds": 60}));
+    let sc = m.tool("scan", json!({"wait_seconds": 30}));
     assert_eq!(sc["status"]["kind"], "done", "{sc}");
-    let f = m.tool("findings", json!({"category": "apps", "limit": 200}));
+    let f = m.tool("findings", json!({"category": "apps"}));
+    // The orphan-receipts finding (same category) reads the host's `pkgutil`; ignore it.
     let items: Vec<&Value> = f["items"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|i| i["title"] == "Demo")
+        .filter(|i| i["rule_id"] == "apps")
         .collect();
     assert_eq!(items.len(), 1, "{f}");
+    assert_eq!(items[0]["title"], "Demo", "{f}");
     assert!(items[0]["components_count"].as_u64().unwrap() >= 3, "{f}");
     assert!(items[0].get("components").is_none());
     let id = items[0]["id"].as_str().unwrap().to_string();
