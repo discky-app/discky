@@ -17,7 +17,7 @@ use crate::paths::DisckyPaths;
 use crate::plan::execute::{
     self, ExecuteError, ExecuteOptions, ExecutionReport, StepSink, StepStatus,
 };
-use crate::plan::{Fingerprint, Plan, PlanId, PlanItem, StepKind, plan_items};
+use crate::plan::{self, Fingerprint, Plan, PlanId, PlanItem, StepKind, plan_items};
 use crate::query::{self, Overview, QueryError, SearchQuery, TreeEntry};
 use crate::rules::{Category, RuleSet, SafetyLabel};
 use crate::scan::{self, Current, ScanId, ScanJob, ScanRequest, ScanSink, ScanStatus, lock};
@@ -444,6 +444,30 @@ impl Engine {
             .filter(|f| items.iter().any(|i| i.id == f.id.0))
             .collect();
         let plan = plan_items(&items, &found, &self.config());
+        let mut plans = lock(&self.plans);
+        plans.push_back(plan.clone());
+        while plans.len() > PLAN_HISTORY {
+            plans.pop_front();
+        }
+        drop(plans);
+        Ok((plan, snap))
+    }
+
+    /// Plan the removal of arbitrary `paths` of the current snapshot (disk map tiles); see
+    /// [`plan::plan_paths_in`] for the refusal rules. The plan is kept for
+    /// [`Engine::get_plan`].
+    pub fn plan_paths(&self, paths: &[PathBuf]) -> Result<Plan, EngineError> {
+        self.plan_paths_with_snapshot(paths).map(|(plan, _)| plan)
+    }
+
+    /// [`Engine::plan_paths`], also returning the snapshot the plan was made from.
+    pub fn plan_paths_with_snapshot(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<(Plan, Arc<Snapshot>), EngineError> {
+        let snap = self.snapshot().ok_or(EngineError::NoSnapshot)?;
+        let home = crate::paths::home_dir().unwrap_or_default();
+        let plan = plan::plan_paths_in(paths, &snap, &self.config(), &home);
         let mut plans = lock(&self.plans);
         plans.push_back(plan.clone());
         while plans.len() > PLAN_HISTORY {

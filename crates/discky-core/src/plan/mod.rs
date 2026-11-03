@@ -17,7 +17,12 @@ use crate::config::{Config, RemovalMode};
 use crate::findings::{
     Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal, ollama_url,
 };
+use crate::fs::attr::ObjKind;
+use crate::index::NodeFlags;
+use crate::index::snapshot::Snapshot;
 use crate::paths;
+use crate::query::NodeFindings;
+use crate::rules::Category;
 use crate::tools;
 
 mod app;
@@ -321,27 +326,41 @@ fn step(f: &Finding, description: String, kind: StepKind) -> Step {
 /// A step trashing (or, in permanent mode, deleting) `paths`, `INTERACTIVE` when any of
 /// them needs an administrator, with every path fingerprinted.
 fn path_step(f: &Finding, paths: &[PathBuf], cfg: &Config) -> Step {
+    path_step_for(&f.id, f.freed_if_deleted, paths, cfg)
+}
+
+/// [`path_step`] for a step that credits `freed` bytes to `id`, without a finding.
+fn path_step_for(id: &FindingId, freed: u64, paths: &[PathBuf], cfg: &Config) -> Step {
     let shown = display_paths(paths);
-    let mut s = match cfg.removal.mode {
-        RemovalMode::Trash => step(
-            f,
+    let (description, kind) = match cfg.removal.mode {
+        RemovalMode::Trash => (
             format!("Move {shown} to the Trash"),
             StepKind::Trash {
                 paths: paths.to_vec(),
             },
         ),
-        RemovalMode::Permanent => {
-            let mut s = step(
-                f,
-                format!("Delete {shown} permanently"),
-                StepKind::Remove {
-                    paths: paths.to_vec(),
-                },
-            );
-            s.flags |= StepFlags::PERMANENT;
-            s
-        }
+        RemovalMode::Permanent => (
+            format!("Delete {shown} permanently"),
+            StepKind::Remove {
+                paths: paths.to_vec(),
+            },
+        ),
     };
+    let mut s = Step {
+        index: 0,
+        finding: id.clone(),
+        description,
+        kind,
+        freed: Some(freed),
+        freed_note: None,
+        flags: StepFlags::empty(),
+        warnings: Vec::new(),
+        fingerprints: Vec::new(),
+        component: None,
+    };
+    if cfg.removal.mode == RemovalMode::Permanent {
+        s.flags |= StepFlags::PERMANENT;
+    }
     if paths.iter().any(|p| needs_admin(p)) {
         s.flags |= StepFlags::INTERACTIVE;
     }
@@ -542,7 +561,6 @@ pub fn plan_items_with_tools(
     cfg: &Config,
     tools: &PlanTools,
 ) -> Plan {
-    let created_at = now_secs();
     let mut buckets: [Vec<Step>; 5] = Default::default();
     let mut skipped = Vec::new();
     let mut quitting = HashSet::new();
@@ -591,13 +609,22 @@ pub fn plan_items_with_tools(
             buckets[bucket as usize].push(s);
         }
     }
-    let mut steps: Vec<Step> = buckets.into_iter().flatten().collect();
+    finish_plan(buckets.into_iter().flatten().collect(), skipped)
+}
+
+/// A [`Plan`] of `steps` (numbered here) with a fresh id and `created_at`.
+fn finish_plan(mut steps: Vec<Step>, skipped: Vec<(FindingId, String)>) -> Plan {
+    let created_at = now_secs();
     for (i, s) in steps.iter_mut().enumerate() {
         s.index = i;
     }
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    let ids: Vec<&str> = steps
+        .iter()
+        .map(|s| s.finding.0.as_str())
+        .chain(skipped.iter().map(|(id, _)| id.0.as_str()))
+        .collect();
     let id = PlanId(format!(
         "{:016x}",
         xxh3_64(format!("{created_at}:{n}:{}", ids.join(",")).as_bytes())
@@ -610,6 +637,88 @@ pub fn plan_items_with_tools(
         total_freed,
         skipped,
     }
+}
+
+/// `FindingId` of a step planned for an arbitrary path: this prefix + the absolute path.
+pub const PATH_ID_PREFIX: &str = "path:";
+pub const NOT_IN_SNAPSHOT: &str = "Not in the snapshot (rescan to refresh)";
+pub const ROOT_REFUSED: &str = "Scan roots cannot be removed";
+pub const CLOUD_REFUSED: &str = "Stored in the cloud, not on disk";
+pub const PROTECTED_REFUSED: &str = "Protected location";
+
+/// Why a path inside a finding with its own removal route is refused.
+pub fn managed_by(category: Category) -> String {
+    format!("Managed by {category}; remove it from there")
+}
+
+/// Whether `path` is a location the disk map never removes: `home/Library` itself,
+/// anything under `home/Library/{Keychains, Mobile Documents, CloudStorage, Preferences}`,
+/// `/Library/Keychains` or `/System`.
+pub fn is_protected(path: &Path, home: &Path) -> bool {
+    let lib = home.join("Library");
+    path == lib
+        || [
+            "Keychains",
+            "Mobile Documents",
+            "CloudStorage",
+            "Preferences",
+        ]
+        .iter()
+        .any(|d| path.starts_with(lib.join(d)))
+        || path.starts_with("/Library/Keychains")
+        || path.starts_with("/System")
+}
+
+/// Plan the removal of arbitrary `paths` of the snapshot (disk map tiles), one step each
+/// by `cfg.removal.mode`. A path is refused, with the reason in [`Plan::skipped`], when it
+/// is not in the snapshot, is a scan root, is dataless, is protected ([`is_protected`]),
+/// or lies in a finding whose removal is not a plain trash (first failing rule wins).
+/// Repeated paths count once, at the first position.
+pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Path) -> Plan {
+    let nf = NodeFindings::build(snap);
+    let index = &*snap.index;
+    let mut seen = HashSet::new();
+    let mut steps = Vec::new();
+    let mut skipped = Vec::new();
+    for p in paths {
+        if !seen.insert(p.as_path()) {
+            continue;
+        }
+        let id = FindingId(format!("{PATH_ID_PREFIX}{}", p.display()));
+        let verdict = (|| {
+            let node = p
+                .is_absolute()
+                .then(|| index.find(p))
+                .flatten()
+                .ok_or_else(|| NOT_IN_SNAPSHOT.to_string())?;
+            let n = index.node(node);
+            if n.flags.contains(NodeFlags::ROOT) {
+                return Err(ROOT_REFUSED.to_string());
+            }
+            if n.flags.contains(NodeFlags::DATALESS) {
+                return Err(CLOUD_REFUSED.to_string());
+            }
+            if is_protected(p, home) {
+                return Err(PROTECTED_REFUSED.to_string());
+            }
+            if let Some(i) = nf.owner(index, node) {
+                let f = &snap.findings[i];
+                if !matches!(f.removal, Removal::Trash { .. }) {
+                    return Err(managed_by(f.category));
+                }
+            }
+            Ok(if n.kind == ObjKind::Dir {
+                n.agg_private
+            } else {
+                n.private
+            })
+        })();
+        match verdict {
+            Ok(freed) => steps.push(path_step_for(&id, freed, std::slice::from_ref(p), cfg)),
+            Err(reason) => skipped.push((id, reason)),
+        }
+    }
+    finish_plan(steps, skipped)
 }
 
 impl Plan {
