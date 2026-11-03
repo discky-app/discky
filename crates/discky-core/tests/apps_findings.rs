@@ -760,3 +760,131 @@ fn apps_findings_on_this_mac() {
         }
     }
 }
+
+#[test]
+fn tiny_leftover_groups_are_dropped() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let home = root.join("home");
+    let bundle = root.join("Applications/Raycast.app");
+    make_app(&bundle, "com.raycast.macos");
+    // Below both thresholds: one small item, two small items.
+    let tiny = file(&home, "Library/Preferences/com.tiny.app.plist", 4);
+    file(&home, "Library/Preferences/com.pair.app.plist", 4);
+    let pair_cache = blob(&home, "Library/Caches/com.pair.app", 8);
+    // Three small items: shown.
+    file(&home, "Library/Preferences/com.three.app.plist", 4);
+    blob(&home, "Library/Caches/com.three.app", 8);
+    blob(&home, "Library/HTTPStorages/com.three.app", 8);
+    // One big item: shown.
+    blob(&home, "Library/Application Support/com.big.app", 1024);
+    let idx = scan(root);
+    let apps = [app(
+        &idx,
+        &bundle,
+        "com.raycast.macos",
+        AppSource::Dragged,
+        LastUsed::Spotlight(NOW),
+    )];
+    let mut claimed = HashSet::new();
+    let found = Ctx::new(root).run(&idx, &home, &apps, &mut claimed);
+    let mut ids: Vec<FindingId> = found
+        .iter()
+        .filter(|f| f.rule_id == "app-leftovers")
+        .map(|f| f.id.clone())
+        .collect();
+    ids.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut want = vec![
+        FindingId::new("app-leftovers", "com.three"),
+        FindingId::new("app-leftovers", "com.big"),
+    ];
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(ids, want, "{found:#?}");
+    for p in [&tiny, &pair_cache] {
+        assert!(
+            !claimed.contains(&idx.find(p).unwrap()),
+            "{p:?}: dropped groups claim nothing"
+        );
+    }
+}
+
+#[test]
+fn zap_paths_mark_components_as_covered() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let home = root.join("home");
+    let bundle = root.join("Applications/Hex.app");
+    make_app(&bundle, "com.example.hex");
+    let zapped = blob(&home, "Library/Application Support/com.example.hex", 64);
+    let cache = blob(&home, "Library/Caches/com.example.hex", 8);
+    let under = blob(&home, "Library/Logs/Hex", 8);
+    let config = blob(&home, ".config/hex", 8);
+    let not_zapped = file(&home, "Library/Preferences/com.example.hex.plist", 4);
+    let idx = scan(root);
+    let mut ctx = Ctx::new(root);
+    ctx.casks = vec![Cask {
+        token: "hex".into(),
+        full_token: "anomalyco/tap/hex".into(),
+        installed: Some("1".into()),
+        app_targets: vec![bundle.clone()],
+        uninstall: Vec::new(),
+        zap: vec![Directive {
+            trash: vec!["~/Library/Application Support/com.example.hex".into()],
+            // A whole location folder: never a component itself, but what lies under it
+            // is covered.
+            delete: vec!["~/.config/hex".into(), "~/Library/Logs".into()],
+            // rmdir removes an empty folder only: exactly this path is covered.
+            rmdir: vec![
+                "~/Library/Caches/com.example.hex".into(),
+                "~/Library/Preferences".into(),
+            ],
+            ..Default::default()
+        }],
+    }];
+    let cask_app = app(
+        &idx,
+        &bundle,
+        "com.example.hex",
+        AppSource::Cask {
+            token: "hex".into(),
+            full_token: "anomalyco/tap/hex".into(),
+        },
+        LastUsed::Spotlight(NOW),
+    );
+    let found = ctx.run(&idx, &home, &[cask_app], &mut HashSet::new());
+    let f = found.iter().find(|f| f.title == "Hex").unwrap();
+    assert_eq!(f.components[0].kind, ComponentKind::AppBundle);
+    assert!(f.components[0].covered_by_cask, "the bundle of a cask app");
+    for p in [&zapped, &cache, &under, &config] {
+        assert!(component(f, p).covered_by_cask, "{p:?}");
+    }
+    assert!(
+        !component(f, &not_zapped).covered_by_cask,
+        "under an rmdir path is not covered"
+    );
+    for p in ["Library/Logs", "Library/Preferences"] {
+        assert!(
+            !component_paths(f).contains(&home.join(p)),
+            "{p}: a location folder is never a component"
+        );
+    }
+    assert!(
+        !f.components.last().unwrap().covered_by_cask,
+        "Keychain line"
+    );
+
+    // A dragged app: nothing is covered.
+    let found = Ctx::new(root).run(
+        &idx,
+        &home,
+        &[app(
+            &idx,
+            &bundle,
+            "com.example.hex",
+            AppSource::Dragged,
+            LastUsed::Spotlight(NOW),
+        )],
+        &mut HashSet::new(),
+    );
+    assert!(found[0].components.iter().all(|c| !c.covered_by_cask));
+}

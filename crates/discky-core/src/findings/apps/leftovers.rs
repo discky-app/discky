@@ -231,6 +231,8 @@ pub(crate) struct Candidate {
 pub(crate) struct Candidates {
     pub items: Vec<Candidate>,
     pub launchctl: Option<PathBuf>,
+    /// Every searched location folder (`~/Library/Caches`, `/Library/LaunchDaemons`, …).
+    pub location_dirs: Vec<PathBuf>,
 }
 
 impl Candidates {
@@ -242,6 +244,7 @@ impl Candidates {
     ) -> Candidates {
         let user = home.join("Library");
         let mut items = Vec::new();
+        let mut location_dirs = Vec::new();
         let places = USER_LOCATIONS
             .iter()
             .map(|(l, k)| (user.as_path(), *l, k, false))
@@ -252,6 +255,7 @@ impl Candidates {
             );
         for (base, location, kind, system) in places {
             let dir = base.join(location);
+            location_dirs.push(dir.clone());
             let Some(dir_id) = index.find(&dir) else {
                 continue;
             };
@@ -284,6 +288,7 @@ impl Candidates {
         Candidates {
             items,
             launchctl: launchctl.map(Path::to_path_buf),
+            location_dirs,
         }
     }
 }
@@ -442,8 +447,14 @@ pub(crate) fn attach(
         });
         out.push(leftover(index, c, shared, loaded));
     }
-    // Zap paths outside the locations (e.g. `~/.config/raycast`).
-    for p in q.zap_paths.iter().filter(|p| !seen.contains(p.as_path())) {
+    // Zap paths outside the locations (e.g. `~/.config/raycast`). A location folder itself
+    // or anything above one (`~/Library/Caches`, `~/Library`, `~`) is never a component.
+    for p in q
+        .zap_paths
+        .iter()
+        .filter(|p| !seen.contains(p.as_path()))
+        .filter(|p| !cands.location_dirs.iter().any(|d| d.starts_with(p)))
+    {
         let name = p
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -540,6 +551,7 @@ fn leftover(index: &Index, c: &Candidate, shared: Option<String>, loaded: bool) 
             default_on,
             removal,
             note,
+            covered_by_cask: false,
         },
         logical,
     }
@@ -595,6 +607,7 @@ fn other_leftover(index: &Index, path: &Path, shared: Option<String>) -> Leftove
                 Some(n) => Some(format!("shared with {n}")),
                 None => admin.then(|| NOTE_ADMIN.to_string()),
             },
+            covered_by_cask: false,
         },
         logical,
     }

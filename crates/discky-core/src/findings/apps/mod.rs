@@ -41,6 +41,11 @@ pub const RULE_APP: &str = "apps";
 pub const RULE_LEFTOVERS: &str = "app-leftovers";
 /// `rule_id` of the orphan package receipts finding.
 pub const RULE_RECEIPTS: &str = "pkg-receipts";
+/// A leftover group is shown when its components total at least this many bytes
+/// allocated…
+const GROUP_MIN_BYTES: u64 = 1024 * 1024;
+/// …or when it has at least this many components.
+const GROUP_MIN_ITEMS: usize = 3;
 /// Apple's sealed apps (their bundle ids count as installed).
 const SEALED_APPS: &str = "/System/Applications";
 
@@ -266,20 +271,24 @@ fn app_finding(
         AppSource::Cask { token, .. } => input.casks.iter().find(|c| &c.token == token),
         _ => None,
     };
-    let zap_paths: Vec<PathBuf> = cask
-        .map(|c| {
-            let mut v: Vec<PathBuf> = c
-                .zap
-                .iter()
-                .flat_map(|d| d.trash.iter().chain(&d.delete).chain(&d.rmdir))
-                .flat_map(|p| cask::expand_zap_path(p, home))
-                .filter(|p| !p.starts_with(&app.bundle))
-                .collect();
-            v.sort();
-            v.dedup();
-            v
-        })
-        .unwrap_or_default();
+    // `trash`/`delete` remove whatever is there; `rmdir` only an empty folder.
+    let expand = |pick: fn(&cask::Directive) -> Vec<&String>| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = cask
+            .iter()
+            .flat_map(|c| &c.zap)
+            .flat_map(pick)
+            .flat_map(|p| cask::expand_zap_path(p, home))
+            .filter(|p| !p.starts_with(&app.bundle))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let zap_removed = expand(|d| d.trash.iter().chain(&d.delete).collect());
+    let zap_rmdir = expand(|d| d.rmdir.iter().collect());
+    let mut zap_paths: Vec<PathBuf> = zap_removed.iter().chain(&zap_rmdir).cloned().collect();
+    zap_paths.sort();
+    zap_paths.dedup();
     let cask_launchctl: Vec<String> = cask
         .map(|c| {
             c.uninstall
@@ -295,7 +304,12 @@ fn app_finding(
         zap_paths: &zap_paths,
         cask_launchctl: &cask_launchctl,
     };
-    let leftovers = leftovers::attach(index, cands, &q, installed);
+    let mut leftovers = leftovers::attach(index, cands, &q, installed);
+    for l in &mut leftovers {
+        l.component.covered_by_cask = l.component.path.as_deref().is_some_and(|p| {
+            zap_removed.iter().any(|z| p.starts_with(z)) || zap_rmdir.iter().any(|z| z == p)
+        });
+    }
 
     let running = app
         .bundle_id
@@ -322,6 +336,7 @@ fn app_finding(
         default_on: true,
         removal: ComponentRemoval::Trash,
         note: app.root_owned.then(|| NOTE_ADMIN.to_string()),
+        covered_by_cask: matches!(app.source, AppSource::Cask { .. }),
     }];
     if let Some(u) = &app.own_uninstaller {
         components.push(Component {
@@ -334,6 +349,7 @@ fn app_finding(
             default_on: false,
             removal: ComponentRemoval::None,
             note: Some("run first to remove what the vendor installed".to_string()),
+            covered_by_cask: false,
         });
     }
     let mut logical = f.logical;
@@ -360,6 +376,7 @@ fn app_finding(
         default_on: false,
         removal: ComponentRemoval::None,
         note: Some("never touched by Discky".to_string()),
+        covered_by_cask: false,
     });
 
     let selected = || components.iter().filter(|c| c.default_on);
@@ -469,13 +486,15 @@ fn receipt_component(id: &str, installed: Option<i64>) -> Component {
             pkg_id: id.to_string(),
         },
         note: Some(NOTE_ADMIN.to_string()),
+        covered_by_cask: false,
     }
 }
 
 /// One finding per vendor (first two bundle-id components) of unclaimed `~/Library`
 /// entries that no installed app, running app or loaded launchd job uses (by vendor), that
 /// do not name an installed app, and that are not macOS / toolchain / SDK files (see
-/// [`leftovers::bundle_vendor`] and `SYSTEM_VENDORS`). Each claims its entries.
+/// [`leftovers::bundle_vendor`] and `SYSTEM_VENDORS`). Only groups of at least 1 MiB
+/// allocated or 3 components are emitted; each emitted group claims its entries.
 fn leftover_groups(
     index: &Index,
     cands: &Candidates,
@@ -503,7 +522,14 @@ fn leftover_groups(
         if vendor_job_loaded(cands, &vendor) {
             continue;
         }
-        out.push(group_finding(index, &vendor, &items));
+        let f = group_finding(index, &vendor, &items);
+        let total: u64 = f.components.iter().map(|c| c.allocated).sum();
+        // Noise: one or two tiny files (a stray plist) are not worth a row; dropped groups
+        // claim nothing.
+        if total < GROUP_MIN_BYTES && f.components.len() < GROUP_MIN_ITEMS {
+            continue;
+        }
+        out.push(f);
         claimed.extend(items.iter().map(|c| c.node));
     }
     out
@@ -547,6 +573,7 @@ fn group_finding(index: &Index, vendor: &str, items: &[&leftovers::Candidate]) -
                 default_on: !big,
                 removal,
                 note: big.then(|| leftovers::NOTE_DOCUMENTS.to_string()),
+                covered_by_cask: false,
             };
             (component, logical)
         })

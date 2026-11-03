@@ -153,6 +153,11 @@ pub struct Component {
     pub removal: ComponentRemoval,
     /// E.g. "needs administrator password", "shared with Google Drive".
     pub note: Option<String>,
+    /// Removed by `brew uninstall --zap`; the planner emits no separate step for it. Set for
+    /// a cask app's bundle and for leftovers its cask's `zap` stanza names (equal to, or
+    /// under, a `trash`/`delete` path; equal to an `rmdir` path).
+    #[serde(default)]
+    pub covered_by_cask: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

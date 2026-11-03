@@ -336,6 +336,7 @@ fn component(
         default_on,
         removal: ComponentRemoval::Trash,
         note: None,
+        covered_by_cask: false,
     }
 }
 

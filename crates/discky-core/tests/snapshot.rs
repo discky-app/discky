@@ -169,6 +169,7 @@ fn format_3_round_trips_components() {
                 default_on: true,
                 removal: ComponentRemoval::Trash,
                 note: None,
+                covered_by_cask: true,
             },
             Component {
                 kind: ComponentKind::Receipt,
@@ -182,6 +183,7 @@ fn format_3_round_trips_components() {
                     pkg_id: "us.zoom.pkg".into(),
                 },
                 note: Some("needs administrator password".into()),
+                covered_by_cask: false,
             },
         ],
     }];
@@ -194,6 +196,12 @@ fn format_3_round_trips_components() {
     let l = Snapshot::load(&p).unwrap();
     assert_eq!(l.findings[0].removal, s.findings[0].removal);
     assert_eq!(l.findings[0].components, s.findings[0].components);
+    assert!(l.findings[0].components[0].covered_by_cask);
+    // JSON written before the field existed still reads (serde default).
+    let mut v = serde_json::to_value(&s.findings[0].components[1]).unwrap();
+    v.as_object_mut().unwrap().remove("covered_by_cask");
+    let c: Component = serde_json::from_value(v).unwrap();
+    assert!(!c.covered_by_cask);
 }
 
 #[test]
