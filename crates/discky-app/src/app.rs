@@ -139,8 +139,10 @@ impl AppView {
         let scan_events = cx.subscribe_in(&scan, window, Self::on_scan_msg);
         let app = cx.weak_entity();
         let overview_scan = scan.clone();
+        let settings_app = app.clone();
         let overview = cx.new(|cx| OverviewView::new(app, overview_scan, cx));
-        let settings = cx.new(|cx| SettingsView::new(start_settings_section(), window, cx));
+        let settings =
+            cx.new(|cx| SettingsView::new(start_settings_section(), settings_app, window, cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut view = AppView {

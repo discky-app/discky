@@ -23,7 +23,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 
-use crate::app::AppState;
+use crate::app::{AppState, AppView};
 use helpers::threshold_field_text;
 use model::{FdaStatus, MiseInfo};
 
@@ -84,6 +84,8 @@ impl Section {
 /// `Engine::config()` on every render, so a failed save shows the stored values again.
 pub struct SettingsView {
     section: Section,
+    /// The main view, for links that open another screen.
+    app: WeakEntity<AppView>,
     home: PathBuf,
     /// "Files larger than [MB]".
     large_input: Entity<InputState>,
@@ -103,14 +105,22 @@ pub struct SettingsView {
     fda: Option<FdaStatus>,
     /// `mise --version` result; outer `None` while checking.
     mise: Option<Option<MiseInfo>>,
+    /// `mise prune -n` is running.
+    prune_running: bool,
     _fda_task: Task<()>,
     _mise_task: Task<()>,
+    _prune_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsView {
     /// Build the screen showing `section`; the inputs start from the stored config.
-    pub fn new(section: Section, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        section: Section,
+        app: WeakEntity<AppView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let home = discky_core::paths::home_dir().unwrap_or_default();
         let config = cx.global::<AppState>().engine.config();
         let large_text = threshold_field_text(config.thresholds.large_file_bytes);
@@ -152,6 +162,7 @@ impl SettingsView {
         let mcp_binary = model::find_mcp_binary(&home, exe.as_deref());
         let mut view = SettingsView {
             section,
+            app,
             home,
             large_input,
             old_input,
@@ -162,8 +173,10 @@ impl SettingsView {
             mcp_binary,
             fda: None,
             mise: None,
+            prune_running: false,
             _fda_task: Task::ready(()),
             _mise_task: Task::ready(()),
+            _prune_task: Task::ready(()),
             _subscriptions: subscriptions,
         };
         view.on_shown(cx);
