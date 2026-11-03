@@ -294,13 +294,18 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
             verify_gone(paths, run_osascript(paths, admin_rm_script))
         }
         StepKind::Remove { paths } => verify_gone(paths, run_remove(paths)),
-        StepKind::Command { argv, cwd } => {
+        StepKind::Command { argv, cwd, env } => {
             let target = command_target(step, cwd.as_deref());
             let before = target.map(allocated_tree);
-            let outcome = if interactive {
+            let outcome = if interactive && !env.is_empty() {
+                Outcome::failed(
+                    String::new(),
+                    "admin command cannot set environment variables",
+                )
+            } else if interactive {
                 run_admin_command(argv, cwd.as_deref())
             } else {
-                run_command(argv, cwd.as_deref())
+                run_command(argv, cwd.as_deref(), env)
             };
             match (target, before) {
                 (Some(t), Some(before)) => measure_command(step, t, before, outcome),
@@ -585,12 +590,15 @@ fn is_gone(path: &Path) -> bool {
     matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
 }
 
-fn run_command(argv: &[String], cwd: Option<&Path>) -> Outcome {
+/// Run `argv` as the user, in `cwd` when set, with `env` added to the inherited
+/// environment.
+fn run_command(argv: &[String], cwd: Option<&Path>, env: &[(String, String)]) -> Outcome {
     let Some((program, args)) = argv.split_first() else {
         return Outcome::failed(String::new(), "Empty command");
     };
     let mut cmd = Command::new(program);
     cmd.args(args);
+    cmd.envs(env.iter().map(|(k, v)| (k, v)));
     if let Some(cwd) = cwd {
         if let Err(o) = check_absolute(&[cwd.to_path_buf()]) {
             return o;

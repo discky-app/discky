@@ -535,8 +535,13 @@ fn command_text_in(kind: &StepKind, flags: StepFlags, home: Option<&Path>) -> St
             format!("{}  # administrator prompt", paths("sudo rm -rf", p))
         }
         StepKind::Remove { paths: p } => paths("rm -rf", p),
-        StepKind::Command { argv, cwd } => {
-            let line = argv.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
+        StepKind::Command { argv, cwd, env } => {
+            let line = env
+                .iter()
+                .map(|(k, v)| format!("{k}={}", quote(v)))
+                .chain(argv.iter().map(|a| quote(a)))
+                .collect::<Vec<_>>()
+                .join(" ");
             match cwd {
                 Some(dir) => format!("cd {} && {line}", quote_path(dir, home)),
                 None => line,
@@ -621,6 +626,7 @@ mod tests {
         StepKind::Command {
             argv: argv.iter().map(|a| a.to_string()).collect(),
             cwd: None,
+            env: Vec::new(),
         }
     }
 
@@ -653,6 +659,7 @@ mod tests {
         let kind = StepKind::Command {
             argv: vec!["cargo".into(), "clean".into()],
             cwd: Some(PathBuf::from("/Users/me/My Projects/app")),
+            env: Vec::new(),
         };
         assert_eq!(text(kind), "cd ~/'My Projects/app' && cargo clean");
     }

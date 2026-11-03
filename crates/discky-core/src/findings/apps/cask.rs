@@ -309,6 +309,19 @@ pub fn installed_casks(brew: Option<&Path>) -> Vec<Cask> {
     read_caskroom(&room, tokens.as_deref())
 }
 
+/// The `uninstall.quit` bundle ids of cask `token`, read offline from the first default
+/// Caskroom that exists (`/opt/homebrew/Caskroom`, `/usr/local/Caskroom`; no `brew` run).
+/// Empty when the cask or its metadata is not found.
+pub fn caskroom_quit_ids(token: &str) -> Vec<String> {
+    DEFAULT_CASKROOMS
+        .iter()
+        .map(Path::new)
+        .find(|p| p.is_dir())
+        .and_then(|room| read_caskroom_entry(room, token.to_string()))
+        .map(|c| c.uninstall.into_iter().flat_map(|d| d.quit).collect())
+        .unwrap_or_default()
+}
+
 /// Offline cask records from a Caskroom: for each token (`tokens`, or every visible
 /// directory of `room`), `installed` is the newest version directory name; the stanzas
 /// come from the newest cached definition `.metadata/<ver>/<timestamp>/Casks/<token>.json`

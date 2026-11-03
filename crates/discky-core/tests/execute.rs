@@ -705,3 +705,22 @@ fn interactive_command_is_skipped_without_permission() {
     assert_eq!(rep.stopped_at, None);
     assert_eq!(rep.freed_total, 0);
 }
+
+#[test]
+fn command_env_reaches_the_child() {
+    let (d, paths, bin) = setup();
+    let marker = d.path().join("ran");
+    let f = command_finding(
+        d.path(),
+        &format!("test \"$DISCKY_T\" = yes && touch '{}'", marker.display()),
+        None,
+    );
+    let mut plan = plan_removal(&[&f], &Config::default());
+    let discky_core::plan::StepKind::Command { env, .. } = &mut plan.steps[0].kind else {
+        panic!("not a command");
+    };
+    env.push(("DISCKY_T".into(), "yes".into()));
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert!(matches!(rep.results[0].status, StepStatus::Done), "{rep:?}");
+    assert!(marker.exists());
+}

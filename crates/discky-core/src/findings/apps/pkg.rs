@@ -100,6 +100,34 @@ pub fn receipts(pkgutil: Option<&Path>) -> Vec<PkgReceipt> {
     out
 }
 
+/// Absolute paths of the files package `id` installed: `pkgutil --pkg-info` (for its
+/// volume and location) and `--files`, within one 5 s budget. Empty on any failure.
+/// Read-only.
+pub fn receipt_files(pkgutil: &Path, id: &str) -> Vec<PathBuf> {
+    let deadline = Instant::now() + PKGUTIL_BUDGET;
+    let run = |args: &[&str]| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        run_capture(pkgutil, args, left)
+    };
+    let Some((_, _, volume, location, _)) =
+        run(&["--pkg-info", id]).as_deref().and_then(parse_pkg_info)
+    else {
+        return Vec::new();
+    };
+    let Some(files) = run(&["--files", id]) else {
+        return Vec::new();
+    };
+    let base = volume.join(location);
+    files
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| base.join(l))
+        .collect()
+}
+
 /// Receipts that installed `bundle` or anything inside it.
 pub fn pkgs_for_bundle<'a>(receipts: &'a [PkgReceipt], bundle: &Path) -> Vec<&'a PkgReceipt> {
     receipts

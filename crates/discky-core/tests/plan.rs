@@ -438,7 +438,7 @@ fn mise_uninstall_plans_a_mise_command() {
     );
     let plan = plan_removal(&[&f], &Config::default());
     let s = &plan.steps[0];
-    let StepKind::Command { argv, cwd } = &s.kind else {
+    let StepKind::Command { argv, cwd, .. } = &s.kind else {
         panic!("not a command step");
     };
     assert!(argv[0] == "mise" || argv[0].ends_with("/mise"), "{argv:?}");

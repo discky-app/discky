@@ -468,6 +468,7 @@ mod tests {
             StepKind::Command {
                 argv: vec!["/opt/homebrew/bin/brew".into(), "cleanup".into()],
                 cwd: None,
+                env: Vec::new(),
             },
             StepFlags::TOOL_MISSING,
             None,
