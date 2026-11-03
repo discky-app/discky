@@ -57,12 +57,12 @@ pub const MAX_CHILDREN: usize = 400;
 /// have a side < `MIN_TILE_PX`, the remaining items become one `Rest` slot laid out with
 /// their combined weight. Rects tile `rect` exactly (areas ∝ weights).
 ///
-/// Pixel floor rule: an item's side estimate is its area share of `rect` divided by the longer
-/// side of `rect`; the first item whose estimate is below `MIN_TILE_PX` starts the tail. Since
-/// items are sorted descending, the tail is a suffix. The largest item is never merged, and a
-/// tail of exactly one item stays a plain `Item`.
+/// Pixel floor rule: an item's side estimate is `sqrt(area share in px^2)`, the side of the
+/// near-square tile squarified layout aims for; the first item whose estimate is below
+/// `MIN_TILE_PX` starts the tail. Since items are sorted descending, the tail is a suffix. The
+/// largest item is never merged; a tail of a single item is still a `Rest { count: 1, .. }`.
 pub fn squarify<K: Copy>(items: &[Item<K>], rect: Rect) -> Vec<Placed<K>> {
-    if !(rect.w > 0.0 && rect.h > 0.0) {
+    if !(rect.w.is_finite() && rect.h.is_finite() && rect.w > 0.0 && rect.h > 0.0) {
         return Vec::new();
     }
     let mut sorted: Vec<Item<K>> = items.iter().copied().filter(|i| i.weight > 0).collect();
@@ -73,18 +73,14 @@ pub fn squarify<K: Copy>(items: &[Item<K>], rect: Rect) -> Vec<Placed<K>> {
 
     let total: f64 = sorted.iter().map(|i| i.weight as f64).sum();
     let rect_area = f64::from(rect.w) * f64::from(rect.h);
-    let longer = f64::from(rect.w.max(rect.h));
     let floor = f64::from(MIN_TILE_PX);
 
     let mut keep = sorted.len().min(MAX_CHILDREN);
     for (i, item) in sorted.iter().enumerate().take(keep).skip(1) {
-        if item.weight as f64 / total * rect_area / longer < floor {
+        if (item.weight as f64 / total * rect_area).sqrt() < floor {
             keep = i;
             break;
         }
-    }
-    if sorted.len() - keep == 1 {
-        keep += 1;
     }
 
     let mut slots: Vec<(Slot<K>, f64)> = sorted[..keep]
@@ -93,7 +89,7 @@ pub fn squarify<K: Copy>(items: &[Item<K>], rect: Rect) -> Vec<Placed<K>> {
         .collect();
     if keep < sorted.len() {
         let tail = &sorted[keep..];
-        let weight: u64 = tail.iter().map(|i| i.weight).sum();
+        let weight: u64 = tail.iter().fold(0, |a, i| u64::saturating_add(a, i.weight));
         slots.push((
             Slot::Rest {
                 count: tail.len(),
@@ -297,6 +293,11 @@ mod tests {
         assert_eq!(rests[0].0 + n_items, 2_001);
         assert_eq!(rests[0].1, rests[0].0 as u64);
         assert!((total_area(&placed) - 20_000.0).abs() < 0.5);
+        let last = placed.last().expect("placed");
+        assert!(matches!(last.slot, Slot::Rest { .. }));
+        let expect = rests[0].1 as f64 / 12_000.0 * 20_000.0;
+        let got = f64::from(last.rect.w) * f64::from(last.rect.h);
+        assert!((got - expect).abs() < 0.5, "{got} vs {expect}");
     }
 
     #[test]
@@ -327,7 +328,7 @@ mod tests {
             w: 100.0,
             h: 100.0,
         };
-        let placed = squarify(&items(&[1000, 1, 1, 1]), rect);
+        let placed = squarify(&items(&[10_000, 1, 1, 1]), rect);
         assert_eq!(placed.len(), 2);
         assert_eq!(placed[0].slot, Slot::Item(0));
         assert_eq!(
@@ -338,6 +339,37 @@ mod tests {
             }
         );
         assert!((total_area(&placed) - 10_000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn lone_sub_floor_item_becomes_a_rest() {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let placed = squarify(&items(&[10_000, 1]), rect);
+        assert_eq!(placed.len(), 2);
+        assert_eq!(
+            placed[1].slot,
+            Slot::Rest {
+                count: 1,
+                weight: 1
+            }
+        );
+    }
+
+    #[test]
+    fn empty_and_all_zero_input_yield_nothing() {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        assert!(squarify::<usize>(&[], rect).is_empty());
+        assert!(squarify(&items(&[0, 0]), rect).is_empty());
     }
 
     #[test]
