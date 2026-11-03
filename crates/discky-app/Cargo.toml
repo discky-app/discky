@@ -1,0 +1,17 @@
+[package]
+name = "discky-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+discky-core = { path = "../discky-core" }
+gpui-kit.workspace = true
+smol.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[[bin]]
+name = "discky-app"
+path = "src/main.rs"
