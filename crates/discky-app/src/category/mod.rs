@@ -41,6 +41,9 @@ pub enum CategoryEvent {
     Inspect(Finding),
     /// "Remove…" (or backspace) with these checked finding ids.
     RemoveRequested(Vec<String>),
+    /// No row is selected any more (the selected finding is gone after a reload, or the
+    /// filter hides it): close the inspector.
+    Cleared,
 }
 
 /// One category's findings: toolbar (title, count, sort, filter), the table and, while
@@ -165,10 +168,16 @@ impl CategoryView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let TableEvent::SelectRow(ix) = event
-            && let Some(f) = table.read(cx).delegate().row(*ix).cloned()
-        {
-            cx.emit(CategoryEvent::Inspect(f));
+        match event {
+            TableEvent::SelectRow(ix) => {
+                if let Some(f) = table.read(cx).delegate().row(*ix).cloned() {
+                    cx.emit(CategoryEvent::Inspect(f));
+                }
+            }
+            // Emitted by `clear_selection`, which `update_rows` calls when the selected
+            // finding is no longer shown.
+            TableEvent::ClearSelection => cx.emit(CategoryEvent::Cleared),
+            _ => {}
         }
     }
 

@@ -25,6 +25,7 @@ use gpui_kit::*;
 
 use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
+use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent};
 use crate::overview::OverviewView;
 use crate::scan::{ScanController, ScanMsg};
 use crate::sidebar;
@@ -46,6 +47,8 @@ gpui_kit::actions!(
         RemoveSelected,
         /// Toggle the checkbox of the selected finding.
         ToggleCheck,
+        /// Close the inspector.
+        CloseInspector,
     ]
 );
 
@@ -100,13 +103,14 @@ pub struct AppView {
     overview: Entity<OverviewView>,
     /// One screen per category visited so far, created on first visit.
     categories: HashMap<Category, Entity<CategoryView>>,
-    /// The finding last selected in a category table.
-    inspected: Option<Finding>,
+    /// The right column showing the finding last selected in a category table.
+    inspector: Option<Entity<Inspector>>,
     scan: Entity<ScanController>,
     focus: FocusHandle,
     _appearance: Subscription,
     _scan_events: Subscription,
     _category_events: Vec<Subscription>,
+    _inspector_events: Option<Subscription>,
 }
 
 impl AppView {
@@ -123,18 +127,90 @@ impl AppView {
         let overview = cx.new(|cx| OverviewView::new(app, overview_scan, cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        AppView {
+        let mut view = AppView {
             route: start_route(),
             sidebar_collapsed: false,
             weights,
             overview,
             categories: HashMap::new(),
-            inspected: None,
+            inspector: None,
             scan,
             focus,
             _appearance: appearance,
             _scan_events: scan_events,
             _category_events: Vec::new(),
+            _inspector_events: None,
+        };
+        view.start_inspect(cx);
+        view
+    }
+
+    /// In debug builds, open the inspector on the finding named by `DISCKY_START_INSPECT`
+    /// (an id, absolute path or title, as `Engine::inspect` resolves it), so the panel can
+    /// be looked at without clicking a row.
+    fn start_inspect(&mut self, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        if let Ok(target) = std::env::var("DISCKY_START_INSPECT") {
+            let found = cx
+                .global::<AppState>()
+                .engine
+                .inspect(&target)
+                .and_then(|i| i.finding);
+            match found {
+                Some(f) => self.inspect(f, cx),
+                None => eprintln!("DISCKY_START_INSPECT: no finding `{target}`"),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = cx;
+    }
+
+    /// Show `f` in the inspector, opening it if needed. Nothing happens when it already
+    /// shows `f`: the table re-selects the same row after every reload or filter keystroke,
+    /// and the inspector keeps its state (and its plan) for it.
+    fn inspect(&mut self, f: Finding, cx: &mut Context<Self>) {
+        match &self.inspector {
+            Some(inspector) => {
+                if inspector.read(cx).finding_id() != &f.id {
+                    inspector.update(cx, |i, cx| i.set_finding(f, cx));
+                }
+            }
+            None => {
+                let inspector = cx.new(|cx| Inspector::new(f, cx));
+                self._inspector_events = Some(cx.subscribe(&inspector, Self::on_inspector_event));
+                self.inspector = Some(inspector);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Close the inspector; keyboard focus goes back to the category table.
+    fn close_inspector(&mut self, cx: &mut Context<Self>) {
+        if self.inspector.take().is_none() {
+            return;
+        }
+        self._inspector_events = None;
+        if let Route::Category(c) = self.route
+            && let Some(view) = self.categories.get(&c)
+        {
+            view.update(cx, |v, cx| v.request_focus(cx));
+        }
+        cx.notify();
+    }
+
+    fn on_inspector_event(
+        &mut self,
+        _: Entity<Inspector>,
+        event: &InspectorEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InspectorEvent::Close => self.close_inspector(cx),
+            InspectorEvent::RemoveRequested(id) => {
+                // Task 11: removal dialog
+                let ids = [id];
+                tracing::debug!(?ids, "removal requested");
+            }
         }
     }
 
@@ -176,6 +252,9 @@ impl AppView {
         for view in self.categories.values() {
             view.update(cx, |v, cx| v.reload(cx));
         }
+        if let Some(inspector) = &self.inspector {
+            inspector.update(cx, |i, cx| i.refresh(cx));
+        }
         cx.notify();
     }
 
@@ -205,11 +284,8 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            CategoryEvent::Inspect(finding) => {
-                self.inspected = Some(finding.clone());
-                // Task 10: open inspector
-                cx.notify();
-            }
+            CategoryEvent::Inspect(finding) => self.inspect(finding.clone(), cx),
+            CategoryEvent::Cleared => self.close_inspector(cx),
             CategoryEvent::RemoveRequested(ids) => {
                 // Task 11: removal dialog
                 tracing::debug!(?ids, "removal requested");
@@ -251,9 +327,11 @@ impl AppView {
         )
     }
 
-    /// Show `r` in the content area. The Overview re-reads the snapshot when it is shown.
+    /// Show `r` in the content area. The Overview re-reads the snapshot when it is shown;
+    /// the inspector closes on any route change.
     pub fn navigate(&mut self, r: Route, cx: &mut Context<Self>) {
         if self.route != r {
+            self.close_inspector(cx);
             self.route = r;
             match r {
                 Route::Overview => self.overview.update(cx, |o, cx| o.refresh(cx)),
@@ -333,8 +411,18 @@ impl Render for AppView {
                             .overflow_hidden()
                             .children(self.elsewhere_banner(cx))
                             .child(content),
-                    ),
-                // The inspector slot (Task 10) goes here, right of the content.
+                    )
+                    .children(self.inspector.clone().map(|inspector| {
+                        div()
+                            .flex_shrink_0()
+                            .w(px(400.))
+                            .h_full()
+                            .min_h_0()
+                            .border_l_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().background)
+                            .child(inspector)
+                    })),
             )
     }
 }
@@ -415,6 +503,7 @@ fn install_actions(cx: &mut App) {
         KeyBinding::new("cmd-f", FocusFilter, Some(CATEGORY_TABLE_CONTEXT)),
         KeyBinding::new("space", ToggleCheck, Some(CATEGORY_TABLE_CONTEXT)),
         KeyBinding::new("backspace", RemoveSelected, Some(CATEGORY_TABLE_CONTEXT)),
+        KeyBinding::new("escape", CloseInspector, Some(INSPECTOR_CONTEXT)),
     ]);
     cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
     // Also handled on the main view's root; this one serves the menu with nothing focused.

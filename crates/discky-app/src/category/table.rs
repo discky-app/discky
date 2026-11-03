@@ -211,7 +211,7 @@ impl FindingsDelegate {
 }
 
 /// The badge of `label`: its text and theme colour.
-fn badge(label: SafetyLabel, cx: &App) -> (&'static str, Hsla) {
+pub(crate) fn badge(label: SafetyLabel, cx: &App) -> (&'static str, Hsla) {
     let theme = cx.theme();
     match label {
         SafetyLabel::Regenerates => ("regenerates", theme.success),
@@ -223,7 +223,7 @@ fn badge(label: SafetyLabel, cx: &App) -> (&'static str, Hsla) {
 }
 
 /// A small pill with `text` in `color`.
-fn pill(text: &'static str, color: Hsla) -> Div {
+pub(crate) fn pill(text: impl Into<SharedString>, color: Hsla) -> Div {
     div()
         .flex_shrink_0()
         .px_1p5()
@@ -234,7 +234,7 @@ fn pill(text: &'static str, color: Hsla) -> Div {
         .text_color(color)
         .text_xs()
         .line_height(px(16.))
-        .child(text)
+        .child(text.into())
 }
 
 impl TableDelegate for FindingsDelegate {
