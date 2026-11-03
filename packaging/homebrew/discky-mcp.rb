@@ -2,6 +2,7 @@
 #
 # Untestable until the repository is public: OWNER is a placeholder for the GitHub
 # handle, and the tarball URL and sha256 below do not exist yet.
+# Covers the MCP server only; Discky.app is built with `cargo xtask install` (see README).
 # TODO: set OWNER, then fill sha256 after the first tag (v0.1.0).
 class DisckyMcp < Formula
   desc "MCP server that lets AI agents find and safely clear disk space on macOS"

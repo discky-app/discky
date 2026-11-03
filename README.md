@@ -1,12 +1,26 @@
 # Discky
 
+![Discky](assets/logo.png)
+
 Discky finds what is eating your Mac's disk and lets an AI agent clear it safely: a Rust scanner, a rule-based "what is this and is it safe to remove" engine, and an MCP server.
 
 ## Status
 
-Milestone 1: MCP server only; the GPUI app is in progress. Requires macOS 15 or newer (Apple Silicon or Intel, APFS).
+Milestone 2: Discky.app (Overview, categories, inspector, removal, settings) and the MCP server. Requires macOS 15 or newer (Apple Silicon or Intel, APFS).
 
-## Install
+## Build the app
+
+```sh
+cargo xtask install
+```
+
+This builds a release `target/Discky.app`, signs it and copies it to `/Applications/Discky.app`. `cargo xtask bundle` stops after signing; `cargo xtask icon` regenerates `assets/AppIcon.icns` and `assets/logo.png` from the pixel logo.
+
+Signing needs a stable identity, so that Full Disk Access survives rebuilds (macOS ties the grant to the signature). `xtask` picks the first `Apple Development` or `Developer ID Application` identity in your keychain; set `DISCKY_SIGN_IDENTITY="<name or SHA-1>"` to choose another. Without one it stops and explains how to create a self-signed Code Signing certificate in Keychain Access. `DISCKY_SIGN_IDENTITY=-` signs ad-hoc: fine for a quick try, but Full Disk Access has to be granted again after every rebuild.
+
+**Full Disk Access.** Without it macOS hides parts of `~/Library` (Mail, Safari, other apps' containers) from the scan. Grant it in System Settings → Privacy & Security → Full Disk Access (add Discky with `+`), then rescan.
+
+## Install the MCP server
 
 From source (Rust toolchain required):
 
@@ -180,7 +194,13 @@ A hidden flag runs one scan of the configured roots and prints the node count, d
 cargo run --release -p discky-mcp -- --self-test-scan
 ```
 
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15.
+Debug builds of the app read a few `DISCKY_START_*` variables so a screen can be opened without clicking: `DISCKY_START_ROUTE` (`overview`, `settings` or a category), `DISCKY_START_SETTINGS` (a settings page), `DISCKY_START_INSPECT` (a finding) and `DISCKY_START_REMOVE` (findings for the removal dialog). Release builds ignore them.
+
+```sh
+DISCKY_START_ROUTE=dev_caches cargo run -p discky-app
+```
+
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and checks that `cargo xtask icon` reproduces the committed icon.
 
 ## License
 
