@@ -143,25 +143,23 @@ impl PlanTools {
 }
 
 /// The zap stanza of `full_token` from the first default Caskroom (offline; no `brew`
-/// run). `rmdir` directives are left out: they remove empty folders only.
+/// run), `None` unless it was read from what brew will load (see
+/// [`cask::installed_zap`]). `rmdir` directives are left out: they remove empty folders only.
 fn caskroom_zap(full_token: &str, home: &Path) -> Option<ZapInfo> {
     let token = full_token.rsplit('/').next()?;
     let room = cask::DEFAULT_CASKROOMS
         .iter()
         .map(Path::new)
         .find(|p| p.is_dir())?;
-    let c = cask::read_caskroom(room, Some(&[token.to_string()]))
-        .into_iter()
-        .next()?;
-    let mut paths: Vec<PathBuf> = c
-        .zap
+    let zap = cask::installed_zap(room, token)?;
+    let mut paths: Vec<PathBuf> = zap
         .iter()
         .flat_map(|d| d.trash.iter().chain(&d.delete))
         .flat_map(|p| cask::expand_zap_path(p, home))
         .collect();
     paths.sort();
     paths.dedup();
-    let non_path_directives = c.zap.iter().any(|d| {
+    let non_path_directives = zap.iter().any(|d| {
         !d.pkgutil.is_empty()
             || !d.launchctl.is_empty()
             || d.script.is_some()
@@ -756,7 +754,8 @@ fn component_steps(
                 _ => {}
             },
             ComponentRemoval::Defaults { domain } => {
-                if protected_domain(domain) {
+                let (target, _) = defaults_target(c, domain);
+                if protected_domain(domain) || protected_domain(&target) {
                     out.warnings
                         .push(format!("Settings domain {domain} is never deleted"));
                     continue;
@@ -824,33 +823,48 @@ fn bootout_step(f: &Finding, i: usize, label: &str, system: bool) -> Step {
     s
 }
 
-/// Domains Discky never deletes: options (`-g`…), the global domain and Apple's own, in
-/// either the domain or (for a path) its last component, case-insensitively.
+/// Domains (or `defaults delete` targets) Discky never deletes: options (`-g`…), the
+/// global domain under any of its names, Apple's own (`com.apple.*`), a user domain
+/// holding a `/`, and a path other than a direct `/Library/Preferences/<domain>`.
+/// Names are compared case-insensitively, for a path by its last component.
 fn protected_domain(domain: &str) -> bool {
-    let leaf = domain.rsplit('/').next().unwrap_or(domain);
+    if domain.starts_with('/') {
+        let p = Path::new(domain);
+        if p.parent() != Some(Path::new(SYSTEM_PREFERENCES)) {
+            return true;
+        }
+    } else if domain.contains('/') {
+        return true;
+    }
+    let leaf = domain.rsplit('/').next().unwrap_or(domain).to_lowercase();
     leaf.is_empty()
-        || [domain, leaf].iter().any(|d| {
-            let d = d.to_lowercase();
-            d.starts_with('-')
-                || d == "nsglobaldomain"
-                || d.starts_with(".globalpreferences")
-                || d.starts_with("com.apple.")
-        })
+        || leaf == "."
+        || leaf == ".."
+        || leaf.starts_with('-')
+        || leaf == "nsglobaldomain"
+        || leaf == "apple global domain"
+        || leaf.starts_with(".globalpreferences")
+        || leaf.starts_with("com.apple.")
 }
 
-/// `defaults delete <domain>` as the user; a system domain (its plist under
-/// `/Library/Preferences`) is addressed by path and deleted as root.
-fn defaults_step(f: &Finding, i: usize, c: &Component, domain: &str) -> Step {
-    let system = c
-        .path
-        .as_deref()
-        .is_some_and(|p| p.starts_with(SYSTEM_PREFERENCES));
-    let target = match (&c.path, system) {
-        (Some(p), true) if !domain.starts_with('/') => {
-            p.with_extension("").to_string_lossy().into_owned()
+/// The argument of `defaults delete` for component `c` and whether it is a system domain:
+/// a domain given as a path, or a plist under `/Library/Preferences`, is addressed by
+/// its path without `.plist` and deleted as root; anything else is the user domain.
+fn defaults_target(c: &Component, domain: &str) -> (String, bool) {
+    if domain.starts_with('/') {
+        return (domain.to_string(), true);
+    }
+    match c.path.as_deref() {
+        Some(p) if p.starts_with(SYSTEM_PREFERENCES) => {
+            (p.with_extension("").to_string_lossy().into_owned(), true)
         }
-        _ => domain.to_string(),
-    };
+        _ => (domain.to_string(), false),
+    }
+}
+
+/// `defaults delete <target>` (see [`defaults_target`]); INTERACTIVE for a system domain.
+fn defaults_step(f: &Finding, i: usize, c: &Component, domain: &str) -> Step {
+    let (target, system) = defaults_target(c, domain);
     let mut s = command(
         f,
         format!("Delete settings domain {domain}"),

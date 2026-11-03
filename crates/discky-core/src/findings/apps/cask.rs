@@ -372,6 +372,43 @@ fn read_caskroom_entry(room: &Path, token: String) -> Option<Cask> {
     Some(cask)
 }
 
+/// The `zap` stanza brew will run for installed cask `token` in Caskroom `room`, or `None`
+/// when it cannot be known. Like brew, the newest `.metadata/<ver>/<timestamp>/`
+/// directory (by name, whatever it holds) is the definition: its `Casks/<token>.json`
+/// must parse. Otherwise `.metadata/INSTALL_RECEIPT.json` must carry
+/// `uninstall_artifacts` (which include `zap`). An `.rb`-only definition, an older JSON
+/// shadowed by a newer directory, or no metadata at all give `None`. A cask without a
+/// zap stanza gives `Some(vec![])`.
+pub fn installed_zap(room: &Path, token: &str) -> Option<Vec<Directive>> {
+    let meta = room.join(token).join(".metadata");
+    let newest = visible_dirs(&meta)
+        .into_iter()
+        .flat_map(|ver| {
+            visible_dirs(&meta.join(&ver))
+                .into_iter()
+                .map(move |ts| (ts, ver.clone()))
+        })
+        .max();
+    if let Some((ts, ver)) = newest
+        && let Some(c) = read_json(
+            &meta
+                .join(ver)
+                .join(ts)
+                .join("Casks")
+                .join(format!("{token}.json")),
+        )
+        .as_ref()
+        .and_then(cask_from_value)
+    {
+        return Some(c.zap);
+    }
+    let receipt = read_json(&meta.join("INSTALL_RECEIPT.json"))?;
+    let artifacts = receipt.get("uninstall_artifacts")?.as_array()?;
+    let mut c = Cask::default();
+    apply_artifacts(&mut c, artifacts);
+    Some(c.zap)
+}
+
 /// `.metadata/*/*/Casks/<token>.json` with the greatest timestamp directory name.
 fn newest_cached_definition(dir: &Path, token: &str) -> Option<Value> {
     let meta = dir.join(".metadata");

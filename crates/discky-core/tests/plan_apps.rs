@@ -620,9 +620,7 @@ fn preferences_use_defaults_delete() {
 
 #[test]
 fn system_preferences_domain_is_interactive() {
-    // Planned only, never executed: this plist exists on every Mac.
-    let plist = PathBuf::from("/Library/Preferences/SystemConfiguration/preferences.plist");
-    assert!(plist.exists());
+    // A domain given as a path under /Library/Preferences is system scope (planned only).
     let t = tempfile::tempdir().unwrap();
     let bundle = dir(t.path(), "X.app");
     let f = app(
@@ -633,10 +631,10 @@ fn system_preferences_domain_is_interactive() {
             off(trash_comp(ComponentKind::AppBundle, bundle.clone(), 10)),
             comp(
                 ComponentKind::Preferences,
-                Some(plist),
+                None,
                 3,
                 ComponentRemoval::Defaults {
-                    domain: "/Library/Preferences/SystemConfiguration/preferences".into(),
+                    domain: "/Library/Preferences/com.vendor.helper".into(),
                 },
             ),
         ],
@@ -648,7 +646,7 @@ fn system_preferences_domain_is_interactive() {
         [
             "/usr/bin/defaults",
             "delete",
-            "/Library/Preferences/SystemConfiguration/preferences"
+            "/Library/Preferences/com.vendor.helper"
         ]
     );
     assert!(p.steps[0].flags.contains(StepFlags::INTERACTIVE));
@@ -1038,6 +1036,9 @@ fn global_and_apple_domains_are_never_deleted() {
         "com.apple.finder",
         "/Library/Preferences/.GlobalPreferences",
         "/Library/Preferences/com.apple.TimeMachine",
+        "Apple Global Domain",
+        "/Library/Preferences/SystemConfiguration/preferences",
+        "com.vendor/../com.apple.finder",
     ] {
         components.push(comp(
             ComponentKind::Preferences,
@@ -1052,9 +1053,36 @@ fn global_and_apple_domains_are_never_deleted() {
     let p = plan(&f, None, &PlanTools::default());
     assert_eq!(p.steps.len(), 1, "{:#?}", p.steps);
     assert!(matches!(p.steps[0].kind, StepKind::Trash { .. }));
-    assert_eq!(p.steps[0].warnings.len(), 6, "{:?}", p.steps[0].warnings);
+    assert_eq!(p.steps[0].warnings.len(), 9, "{:?}", p.steps[0].warnings);
     assert_eq!(
         p.steps[0].warnings[3],
         "Settings domain com.apple.finder is never deleted"
+    );
+
+    // The final target is checked too: a plain domain whose plist sits in a subfolder
+    // of /Library/Preferences (planned only; the plist exists on every Mac).
+    let plist = PathBuf::from("/Library/Preferences/SystemConfiguration/preferences.plist");
+    assert!(plist.exists());
+    let f = app(
+        "X",
+        AppSource::Dragged,
+        &bundle,
+        vec![
+            trash_comp(ComponentKind::AppBundle, bundle.clone(), 10),
+            comp(
+                ComponentKind::Preferences,
+                Some(plist),
+                1,
+                ComponentRemoval::Defaults {
+                    domain: "preferences".into(),
+                },
+            ),
+        ],
+    );
+    let p = plan(&f, None, &PlanTools::default());
+    assert_eq!(p.steps.len(), 1, "{:#?}", p.steps);
+    assert_eq!(
+        p.steps[0].warnings,
+        ["Settings domain preferences is never deleted"]
     );
 }

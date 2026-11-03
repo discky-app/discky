@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use discky_core::findings::AppSource;
 use discky_core::findings::apps::cask::{
-    Script, cask_for_bundle, expand_zap_path, parse_casks, read_caskroom,
+    Script, cask_for_bundle, expand_zap_path, installed_zap, parse_casks, read_caskroom,
 };
 use discky_core::findings::apps::inventory::{app_bundles, app_bundles_in, read_bundle};
 use discky_core::findings::apps::last_used::{estimate_from, parse_mdfind_line, resolve};
@@ -603,4 +603,56 @@ fn inventory_on_this_mac() {
         "sources: {counts:?}; spotlight last-used: {spotlight}/{}",
         infos.len()
     );
+}
+
+/// `<room>/<token>/.metadata/<ver>/<ts>/Casks/<file>` with `body`.
+fn cached(room: &std::path::Path, token: &str, ts: &str, file: &str, body: &str) {
+    let d = room.join(format!("{token}/.metadata/1.0/{ts}/Casks"));
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join(file), body).unwrap();
+}
+
+const ZAP_JSON: &str = r#"{"token":"x","artifacts":[{"zap":[{"trash":["~/Library/Caches/x"]}]}]}"#;
+
+#[test]
+fn rb_only_cask_metadata_disables_zap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let room = tmp.path();
+    cached(room, "x", "20260101000000.000", "x.rb", "cask \"x\" do end");
+    assert_eq!(installed_zap(room, "x"), None);
+    // The install receipt's uninstall_artifacts are what brew records; they count.
+    std::fs::write(
+        room.join("x/.metadata/INSTALL_RECEIPT.json"),
+        r#"{"uninstall_artifacts":[{"zap":[{"trash":["~/a"]}]}]}"#,
+    )
+    .unwrap();
+    let zap = installed_zap(room, "x").unwrap();
+    assert_eq!(zap[0].trash, ["~/a"]);
+    // A receipt without uninstall_artifacts does not.
+    std::fs::write(room.join("x/.metadata/INSTALL_RECEIPT.json"), "{}").unwrap();
+    assert_eq!(installed_zap(room, "x"), None);
+    // No Caskroom entry at all.
+    assert_eq!(installed_zap(room, "missing"), None);
+}
+
+#[test]
+fn older_json_is_not_used_when_a_newer_dir_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let room = tmp.path();
+    cached(room, "x", "20250101000000.000", "x.json", ZAP_JSON);
+    assert_eq!(
+        installed_zap(room, "x").unwrap()[0].trash,
+        ["~/Library/Caches/x"]
+    );
+    cached(room, "x", "20260101000000.000", "x.rb", "cask \"x\" do end");
+    assert_eq!(installed_zap(room, "x"), None);
+    // A parseable JSON in the newest dir is used; a cask without zap is an empty stanza.
+    cached(
+        room,
+        "x",
+        "20270101000000.000",
+        "x.json",
+        r#"{"token":"x","artifacts":[]}"#,
+    );
+    assert_eq!(installed_zap(room, "x"), Some(Vec::new()));
 }
