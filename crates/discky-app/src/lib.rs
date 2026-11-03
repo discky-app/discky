@@ -5,6 +5,7 @@ pub mod category;
 pub mod duck;
 pub mod format;
 pub mod inspector;
+pub mod map;
 pub mod overview;
 pub mod removal;
 pub mod scan;
