@@ -1,10 +1,11 @@
 mod fixtures;
 use discky_core::plan::PlanId;
 use discky_core::plan::execute::ExecuteError;
+use discky_core::scan::{ScanEvent, ScanSink};
 use discky_core::{
     DisckyPaths, Engine, EngineOptions, ExecuteRequest, index::snapshot::Actor, scan::ScanStatus,
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// `DISCKY_HOME` is process-wide; tests set it and open the engine under this lock (the
@@ -92,6 +93,10 @@ fn scan_runs_async_persists_and_is_reloaded() {
     let e2 = reopen(&d, Actor::App);
     assert!(matches!(e2.snapshot().unwrap().meta.actor, Actor::Mcp));
     assert!(e2.last_error().is_none());
+    assert!(
+        e2.overview().exact_private_size.is_some(),
+        "known for a snapshot loaded from disk"
+    );
 }
 
 #[test]
@@ -314,4 +319,115 @@ fn execute_plan_rejects_unknown_id() {
         .execute_plan(&PlanId("nope".into()), request())
         .unwrap_err();
     assert!(matches!(err, ExecuteError::UnknownPlan(_)));
+}
+
+/// [`temp_opts`] engine scanning `d/tree` (built by the fixture).
+fn temp_engine(d: &tempfile::TempDir) -> Engine {
+    let root = d.path().join("tree");
+    if !root.exists() {
+        fixtures::build_tree(&root);
+    }
+    let e = Engine::open_with(temp_opts(d)).unwrap();
+    let mut c = e.config();
+    c.scan.roots = vec![root];
+    e.set_config(c).unwrap();
+    e
+}
+
+/// A sink collecting every event, and the events it collected.
+fn collecting_sink() -> (ScanSink, Arc<Mutex<Vec<ScanEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink_events = Arc::clone(&events);
+    let sink: ScanSink = Arc::new(move |ev| sink_events.lock().unwrap().push(ev));
+    (sink, events)
+}
+
+fn finished_count(events: &[ScanEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, ScanEvent::Finished(_)))
+        .count()
+}
+
+#[test]
+fn sink_receives_progress_then_exactly_one_finished() {
+    let d = tempfile::tempdir().unwrap();
+    let e = temp_engine(&d);
+    let (sink, events) = collecting_sink();
+    let id = e.start_scan_with(None, Some(sink));
+    let st = e.wait_scan(&id, Duration::from_secs(30));
+    assert!(matches!(st, ScanStatus::Done { .. }));
+    let events = events.lock().unwrap();
+    assert!(matches!(
+        events.last(),
+        Some(ScanEvent::Finished(ScanStatus::Done { .. }))
+    ));
+    assert_eq!(finished_count(&events), 1);
+    assert!(events.iter().any(|e| matches!(e, ScanEvent::Progress(_))));
+}
+
+#[test]
+fn cancel_scan_yields_cancelled_and_no_snapshot_file() {
+    let d = tempfile::tempdir().unwrap();
+    let e = temp_engine(&d);
+    let (sink, events) = collecting_sink();
+    let id = e.start_scan_with(None, Some(sink));
+    assert!(e.cancel_scan(&id), "a running scan accepts the cancel");
+    let st = e.wait_scan(&id, Duration::from_secs(30));
+    assert!(matches!(st, ScanStatus::Cancelled { .. }), "{st:?}");
+    assert!(!e.paths().snapshot.exists());
+    assert!(e.snapshot().is_none());
+    assert!(!e.cancel_scan(&id), "a finished scan cannot be cancelled");
+    assert!(!e.cancel_scan(&discky_core::scan::ScanId("nope".into())));
+    let events = events.lock().unwrap();
+    assert_eq!(finished_count(&events), 1);
+    assert!(matches!(
+        events.last(),
+        Some(ScanEvent::Finished(ScanStatus::Cancelled { .. }))
+    ));
+    let v = serde_json::to_value(&st).unwrap();
+    assert_eq!(v["kind"], "cancelled");
+}
+
+#[test]
+fn reload_snapshot_picks_up_newer_file() {
+    let d = tempfile::tempdir().unwrap();
+    let a = temp_engine(&d);
+    let b = Engine::open_with(temp_opts(&d)).unwrap();
+    assert!(b.snapshot_file_meta().is_none());
+    assert!(matches!(b.reload_snapshot(), Ok(false)), "no file yet");
+    let id = a.start_scan(None);
+    assert!(matches!(
+        a.wait_scan(&id, Duration::from_secs(30)),
+        ScanStatus::Done { .. }
+    ));
+    assert!(b.snapshot().is_none());
+    let meta = b.snapshot_file_meta().expect("a's snapshot is on disk");
+    assert_eq!(meta.created_at, a.snapshot().unwrap().meta.created_at);
+    assert!(matches!(b.reload_snapshot(), Ok(true)));
+    assert_eq!(b.snapshot().unwrap().meta, a.snapshot().unwrap().meta);
+    assert_eq!(
+        b.overview().exact_private_size,
+        Some(meta.exact_private_size),
+        "known for a snapshot loaded from disk"
+    );
+    assert!(matches!(b.reload_snapshot(), Ok(false)), "not newer");
+}
+
+#[test]
+fn joining_running_scan_delivers_current_progress() {
+    let d = tempfile::tempdir().unwrap();
+    let e = temp_engine(&d);
+    let a = e.start_scan_with(None, None);
+    let (sink, events) = collecting_sink();
+    let b = e.start_scan_with(None, Some(sink));
+    assert_eq!(a, b);
+    e.wait_scan(&a, Duration::from_secs(30));
+    let events = events.lock().unwrap();
+    assert!(
+        matches!(events.first(), Some(ScanEvent::Progress(_))),
+        "{events:?}"
+    );
+    assert_eq!(finished_count(&events), 1);
+    assert!(matches!(events.last(), Some(ScanEvent::Finished(_))));
 }

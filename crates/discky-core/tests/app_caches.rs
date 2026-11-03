@@ -11,6 +11,7 @@ fn scan(root: &std::path::Path) -> discky_core::index::Index {
             exclude: globset::GlobSet::empty(),
             threads: 0,
             exact_private_size: false,
+            cancel: None,
         },
         &|_| {},
     )

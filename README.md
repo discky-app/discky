@@ -71,7 +71,7 @@ Optional flags: `--home <dir>` (sets `DISCKY_HOME`) and `--log-level <filter>` (
 | --- | --- | --- |
 | `disk_overview` | Disk usage summary from the last scan: volume size and free space, bytes per category, bytes safe to free, and whether the snapshot is stale. Call this first. | None |
 | `scan` | Starts a scan of the configured roots (or `roots`) in the background and returns its id; with `wait_seconds` it waits for the result. | Reads the disk only, never removes anything |
-| `scan_status` | Status of a scan started with `scan`: running (with progress), done, failed or unknown. | None |
+| `scan_status` | Status of a scan started with `scan`: running (with progress), done, failed, cancelled or unknown. | None |
 | `findings` | Removable things found by the last scan, largest first, with size, safety label and removal method; filter by category, label, size or age. | None |
 | `tree` | The largest children of a directory in the last snapshot, with allocated and freed-if-deleted bytes. | None |
 | `search` | Search the last snapshot for files and directories by name glob, size, age, kind or parent path, largest first. | None |
@@ -94,7 +94,7 @@ Optional flags: `--home <dir>` (sets `DISCKY_HOME`) and `--log-level <filter>` (
 - **Trash by default.** `removal.mode` is `"trash"` unless you set `"permanent"`.
 - **Interactive steps are never run by the agent.** Steps that need an admin prompt are skipped.
 - **Official tools, no `rm` fallback.** Where a tool owns the data (for example `cargo cache --autoclean`), the rule runs that tool. If it is not installed, the step reports an install hint instead of falling back to `rm`.
-- **Honest sizes.** Every size is bytes allocated on disk. `freed_if_deleted` is what removing the item really frees; clones and hard links shared with files that stay are not counted. `disk_overview` reports `exact_private_size`: `true` when `freed_if_deleted` was measured exactly, `false` when it is clone-aware only.
+- **Honest sizes.** Every size is bytes allocated on disk. `freed_if_deleted` is what removing the item really frees; clones and hard links shared with files that stay are not counted. `disk_overview` reports `exact_private_size`: `true` when `freed_if_deleted` was measured exactly, `false` when it is clone-aware only; it is recorded in the snapshot, so it is `null` only before the first scan.
 - Paths labelled `do_not_touch` (Keychains, Mail, Messages, ...) are listed so you know they were seen, but have no removal method and are never removed.
 
 ## Files

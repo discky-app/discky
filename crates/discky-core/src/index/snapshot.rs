@@ -17,7 +17,8 @@ use crate::findings::Finding;
 use crate::index::Index;
 
 const MAGIC: &[u8; 8] = b"DISCKY01";
-pub const SNAPSHOT_FORMAT: u32 = 1;
+/// Version 2 added [`SnapshotMeta::exact_private_size`]; older files are `Incompatible`.
+pub const SNAPSHOT_FORMAT: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -55,6 +56,9 @@ pub struct SnapshotMeta {
     pub roots: Vec<PathBuf>,
     pub no_access: Vec<PathBuf>,
     pub node_count: u32,
+    /// Whether the scan measured exact private sizes (local snapshots were present) or was
+    /// clone-aware only; see `Overview::exact_private_size`.
+    pub exact_private_size: bool,
 }
 
 #[derive(Debug)]

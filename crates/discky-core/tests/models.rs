@@ -16,6 +16,7 @@ fn scan(root: &Path) -> Index {
             exclude: globset::GlobSet::empty(),
             threads: 0,
             exact_private_size: false,
+            cancel: None,
         },
         &|_| {},
     )

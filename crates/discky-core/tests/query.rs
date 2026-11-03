@@ -4,7 +4,7 @@ use discky_core::{
     findings::{Categorizer, Finding, FindingId, Removal},
     fs::attr::ObjKind,
     fs::walk::{ScanOptions, walk},
-    index::snapshot::{Actor, Snapshot, SnapshotMeta},
+    index::snapshot::{Actor, SNAPSHOT_FORMAT, Snapshot, SnapshotMeta},
     query::{SearchQuery, disk_overview, findings_in, search, tree},
     rules::{Category, RuleSet, SafetyLabel},
 };
@@ -16,6 +16,7 @@ fn snap(root: &std::path::Path) -> Snapshot {
             exclude: globset::GlobSet::empty(),
             threads: 0,
             exact_private_size: false,
+            cancel: None,
         },
         &|_| {},
     );
@@ -27,12 +28,13 @@ fn snap(root: &std::path::Path) -> Snapshot {
     .run_with_home(Some(root));
     Snapshot {
         meta: SnapshotMeta {
-            format_version: 1,
+            format_version: SNAPSHOT_FORMAT,
             created_at: 1,
             actor: Actor::App,
             roots: vec![root.into()],
             no_access: vec![],
             node_count: 0,
+            exact_private_size: false,
         },
         index: index.into(),
         findings,

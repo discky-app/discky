@@ -179,7 +179,7 @@ pub struct OverviewOut {
     /// Directories the scan could not read.
     pub no_access: usize,
     /// Whether `freed_if_deleted` was measured exactly (true) or clone-aware only
-    /// (false); null when unknown.
+    /// (false); null without a snapshot.
     pub exact_private_size: Option<bool>,
     /// Seconds since the last scan; null without one.
     pub snapshot_age_seconds: Option<u64>,
@@ -191,9 +191,9 @@ pub struct OverviewOut {
 pub struct ScanOut {
     /// Pass to `scan_status`.
     pub scan_id: String,
-    /// `{kind: "running" | "done" | "failed" | "unknown", ...}`; `running` carries
-    /// `progress {files, dirs, allocated, current}`, `done` carries `node_count`,
-    /// `findings`, `duration_ms`.
+    /// `{kind: "running" | "done" | "failed" | "cancelled" | "unknown", ...}`; `running`
+    /// carries `progress {files, dirs, allocated, current}`, `done` carries `node_count`,
+    /// `findings`, `duration_ms`; `cancelled` carries `duration_ms`.
     #[schemars(with = "Value")]
     pub status: discky_core::ScanStatus,
 }

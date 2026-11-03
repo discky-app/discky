@@ -199,7 +199,7 @@ impl DisckyServer {
 
     #[tool(
         name = "scan_status",
-        description = "Status of a scan started with `scan`: running (with progress), done, failed or unknown. No side effects."
+        description = "Status of a scan started with `scan`: running (with progress), done, failed, cancelled or unknown. No side effects."
     )]
     async fn scan_status(
         &self,

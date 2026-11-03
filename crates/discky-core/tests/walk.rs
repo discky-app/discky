@@ -10,6 +10,7 @@ fn opts(root: &std::path::Path) -> ScanOptions {
         exclude: globset::GlobSet::empty(),
         threads: 0,
         exact_private_size: false,
+        cancel: None,
     }
 }
 
@@ -170,4 +171,32 @@ fn missing_root_is_reported_not_fatal() {
     let idx = walk(&opts(&d.path().join("absent")), &|_| {});
     assert!(idx.node(idx.roots[0]).flags.contains(NodeFlags::NO_ACCESS));
     assert!(idx.errors.iter().any(|e| e.errno == libc::ENOENT));
+}
+
+#[test]
+fn cancel_flag_stops_walk_early() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let d = tempfile::tempdir().unwrap();
+    for i in 0..200 {
+        let dir = d.path().join(format!("d{i:03}"));
+        std::fs::create_dir(&dir).unwrap();
+        for j in 0..50 {
+            std::fs::write(dir.join(format!("f{j:02}")), b"x").unwrap();
+        }
+    }
+    let total = 1 + 200 + 200 * 50;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let o = ScanOptions {
+        cancel: Some(Arc::clone(&cancel)),
+        ..opts(d.path())
+    };
+    let idx = walk(&o, &|_| cancel.store(true, Ordering::Relaxed));
+    assert!(cancel.load(Ordering::Relaxed));
+    assert!(
+        idx.len() < total,
+        "cancelled walk indexed {} of {total}",
+        idx.len()
+    );
+    assert_eq!(idx.roots.len(), 1, "the partial index is still usable");
 }

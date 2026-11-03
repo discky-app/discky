@@ -1,11 +1,12 @@
 //! Background scan jobs: one `std::thread` per scan walks the roots, categorizes, saves the
-//! snapshot and swaps it into the engine's [`Current`] state.
+//! snapshot and swaps it into the engine's [`Current`] state. Progress and the final status
+//! are pushed to [`ScanSink`]s; a scan can be cancelled until it starts publishing.
 
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -62,15 +63,33 @@ pub enum ScanStatus {
     Failed {
         error: String,
     },
+    /// Stopped by `Engine::cancel_scan`: no snapshot was written or published.
+    Cancelled {
+        /// Unix seconds.
+        finished_at: i64,
+        duration_ms: u64,
+    },
     Unknown,
 }
+
+/// One event of a running scan, delivered to a [`ScanSink`].
+#[derive(Debug, Clone)]
+pub enum ScanEvent {
+    /// Live totals, at most every 50 ms while the walk runs.
+    Progress(Progress),
+    /// The terminal status (`Done`, `Failed` or `Cancelled`): sent exactly once, last.
+    Finished(ScanStatus),
+}
+
+/// Receives a scan's events, on the scan's thread (the `Progress` sent on joining a running
+/// scan arrives on the joining caller's thread). Keep it quick, e.g. forward to a channel;
+/// it must not start or join scans itself.
+pub type ScanSink = Arc<dyn Fn(ScanEvent) + Send + Sync>;
 
 /// What the engine currently serves; replaced as a whole when a scan finishes.
 #[derive(Debug, Default)]
 pub(crate) struct Current {
     pub snapshot: Option<Arc<Snapshot>>,
-    /// `None` when unknown (no snapshot, or one loaded from disk).
-    pub exact_private_size: Option<bool>,
 }
 
 /// Everything a scan needs, copied out of the engine at start.
@@ -83,50 +102,115 @@ pub(crate) struct ScanRequest {
     pub snapshot_path: PathBuf,
 }
 
-/// A started scan: live progress while running, its final status once finished.
-pub(crate) struct ScanJob {
+/// A started scan: live progress while running, its final status once finished. Cheap to
+/// clone; clones share the job.
+#[derive(Clone)]
+pub(crate) struct ScanJob(Arc<JobState>);
+
+struct JobState {
     started_at: i64,
-    progress: Arc<Mutex<Progress>>,
-    outcome: Arc<Mutex<Option<ScanStatus>>>,
+    progress: Mutex<Progress>,
+    outcome: Mutex<Option<ScanStatus>>,
+    /// Sinks still owed a `Finished`; emptied, under this lock, when `outcome` is set.
+    /// Lock order: `sinks`, then `outcome`.
+    sinks: Mutex<Vec<ScanSink>>,
+    cancel: Arc<AtomicBool>,
+    /// Set once the scan starts publishing; from then on a cancel is refused.
+    committed: Mutex<bool>,
 }
 
 impl ScanJob {
     pub fn status(&self) -> ScanStatus {
-        if let Some(done) = lock(&self.outcome).clone() {
+        if let Some(done) = lock(&self.0.outcome).clone() {
             return done;
         }
         ScanStatus::Running {
-            progress: lock(&self.progress).clone(),
-            started_at: self.started_at,
+            progress: lock(&self.0.progress).clone(),
+            started_at: self.0.started_at,
         }
     }
 
     pub fn is_running(&self) -> bool {
-        lock(&self.outcome).is_none()
+        lock(&self.0.outcome).is_none()
+    }
+
+    /// Deliver this job's events to `sink` from now on: the current `Progress` at once
+    /// (or, if the job has just finished, its `Finished`), then the rest.
+    pub fn join(&self, sink: ScanSink) {
+        let mut sinks = lock(&self.0.sinks);
+        let done = lock(&self.0.outcome).clone();
+        match done {
+            Some(status) => {
+                drop(sinks);
+                sink(ScanEvent::Finished(status));
+            }
+            None => {
+                // Under the `sinks` lock, so it cannot overtake the `Finished`.
+                sink(ScanEvent::Progress(lock(&self.0.progress).clone()));
+                sinks.push(sink);
+            }
+        }
+    }
+
+    /// Ask a running job to stop; false when it has finished or already started
+    /// publishing its snapshot.
+    pub fn request_cancel(&self) -> bool {
+        let committed = lock(&self.0.committed);
+        if *committed || !self.is_running() {
+            return false;
+        }
+        self.0.cancel.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Record the final status, then send it to every sink, each exactly once.
+    fn finish(&self, status: ScanStatus) {
+        let sinks = {
+            let mut sinks = lock(&self.0.sinks);
+            *lock(&self.0.outcome) = Some(status.clone());
+            std::mem::take(&mut *sinks)
+        };
+        for sink in sinks {
+            // A panicking sink must not keep the others from their `Finished`.
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                sink(ScanEvent::Finished(status.clone()))
+            }));
+        }
     }
 }
 
-/// Start `req` on a new thread; it publishes its snapshot into `current` when done.
-pub(crate) fn spawn(req: ScanRequest, current: Arc<RwLock<Current>>) -> (ScanId, ScanJob) {
-    let job = ScanJob {
+/// Start `req` on a new thread, `sink` (if any) receiving its events; it publishes its
+/// snapshot into `current` when done.
+pub(crate) fn spawn(
+    req: ScanRequest,
+    current: Arc<RwLock<Current>>,
+    sink: Option<ScanSink>,
+) -> (ScanId, ScanJob) {
+    let job = ScanJob(Arc::new(JobState {
         started_at: unix_now(),
-        progress: Arc::default(),
-        outcome: Arc::default(),
-    };
-    let progress = Arc::clone(&job.progress);
-    let outcome = Arc::clone(&job.outcome);
+        progress: Mutex::default(),
+        outcome: Mutex::default(),
+        sinks: Mutex::new(sink.into_iter().collect()),
+        cancel: Arc::default(),
+        committed: Mutex::new(false),
+    }));
+    let thread_job = job.clone();
     std::thread::spawn(move || {
-        let status = catch_unwind(AssertUnwindSafe(|| run(&req, &progress, &current)))
+        let status = catch_unwind(AssertUnwindSafe(|| run(&req, &thread_job.0, &current)))
             .unwrap_or_else(|panic| ScanStatus::Failed {
                 error: format!("Scan panicked: {}", panic_message(panic.as_ref())),
             });
-        *lock(&outcome) = Some(status);
+        thread_job.finish(status);
     });
     (ScanId::generate(), job)
 }
 
-fn run(req: &ScanRequest, progress: &Mutex<Progress>, current: &RwLock<Current>) -> ScanStatus {
+fn run(req: &ScanRequest, job: &JobState, current: &RwLock<Current>) -> ScanStatus {
     let started = Instant::now();
+    let cancelled = || ScanStatus::Cancelled {
+        finished_at: unix_now(),
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
     let exclude = match build_globs(&req.exclude) {
         Ok(g) => g,
         Err(error) => return ScanStatus::Failed { error },
@@ -137,8 +221,19 @@ fn run(req: &ScanRequest, progress: &Mutex<Progress>, current: &RwLock<Current>)
         exclude,
         threads: 0,
         exact_private_size: exact,
+        cancel: Some(Arc::clone(&job.cancel)),
     };
-    let index = walk(&opts, &|p| *lock(progress) = p.clone());
+    let on_progress = |p: &Progress| {
+        *lock(&job.progress) = p.clone();
+        let sinks = lock(&job.sinks).clone();
+        for sink in &sinks {
+            sink(ScanEvent::Progress(p.clone()));
+        }
+    };
+    let index = walk(&opts, &on_progress);
+    if job.cancel.load(Ordering::Relaxed) {
+        return cancelled();
+    }
     let findings = Categorizer {
         index: &index,
         rules: &req.rules,
@@ -153,10 +248,18 @@ fn run(req: &ScanRequest, progress: &Mutex<Progress>, current: &RwLock<Current>)
             roots: req.roots.clone(),
             no_access: index.errors.iter().map(|e| e.path.clone()).collect(),
             node_count: index.len() as u32,
+            exact_private_size: exact,
         },
         index: Arc::new(index),
         findings,
     };
+    {
+        let mut committed = lock(&job.committed);
+        if job.cancel.load(Ordering::Relaxed) {
+            return cancelled();
+        }
+        *committed = true;
+    }
     let saved = snapshot.save(&req.snapshot_path);
     let done = ScanStatus::Done {
         finished_at: unix_now(),
@@ -168,7 +271,6 @@ fn run(req: &ScanRequest, progress: &Mutex<Progress>, current: &RwLock<Current>)
     };
     *current.write().unwrap_or_else(|e| e.into_inner()) = Current {
         snapshot: Some(Arc::new(snapshot)),
-        exact_private_size: Some(exact),
     };
     match saved {
         Ok(()) => done,

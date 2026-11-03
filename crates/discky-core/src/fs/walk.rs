@@ -9,6 +9,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,6 +38,10 @@ pub struct ScanOptions {
     /// subtracted — the Engine enables exact mode when local snapshots exist. `true` asks
     /// the kernel for PRIVATESIZE on every entry, at about twice the listing cost.
     pub exact_private_size: bool,
+    /// Checked before scheduling each batch of subdirectories: once set, nothing new is
+    /// listed, the listings already under way are drained, and `walk` returns the partial
+    /// index (aggregates computed as usual).
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -61,8 +67,9 @@ struct Listing {
 }
 
 /// Scan `opts.roots` into an [`Index`]. Never fails: unreadable paths are flagged
-/// `NO_ACCESS` and listed in `Index::errors`. `on_progress` runs on the calling thread at
-/// most every 50 ms.
+/// `NO_ACCESS` and listed in `Index::errors`. `on_progress` runs on the calling thread
+/// after the first listing, then at most every 50 ms, and once more at the end. A set
+/// `opts.cancel` stops the walk early (see [`ScanOptions::cancel`]).
 pub fn walk(opts: &ScanOptions, on_progress: &(dyn Fn(&Progress) + Sync)) -> Index {
     // Best effort: without it a dataless file could be downloaded if touched, but the
     // walker never opens dataless entries anyway.
@@ -84,14 +91,21 @@ pub fn walk(opts: &ScanOptions, on_progress: &(dyn Fn(&Progress) + Sync)) -> Ind
         exclude: &opts.exclude,
         seen_links: HashSet::new(),
         progress: Progress::default(),
-        last_progress: Instant::now(),
+        last_progress: None,
     };
     let exact = opts.exact_private_size;
+    let cancelled = || {
+        opts.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+    };
     let (tx, rx) = channel::<Listing>();
     pool.in_place_scope(|s| {
         let mut pending = 0usize;
         for root in &opts.roots {
-            if let Some((id, path, dev)) = b.add_root(root) {
+            if let Some((id, path, dev)) = b.add_root(root)
+                && !cancelled()
+            {
                 spawn_list(s, &tx, id, path, dev, exact);
                 pending += 1;
             }
@@ -99,13 +113,20 @@ pub fn walk(opts: &ScanOptions, on_progress: &(dyn Fn(&Progress) + Sync)) -> Ind
         while pending > 0 {
             let listing = rx.recv().expect("workers hold a sender until they reply");
             pending -= 1;
-            for (id, path, dev) in b.add_listing(listing) {
+            let descend = b.add_listing(listing);
+            if b.last_progress
+                .is_none_or(|t| t.elapsed() >= PROGRESS_EVERY)
+            {
+                on_progress(&b.progress);
+                b.last_progress = Some(Instant::now());
+            }
+            // Cancelled: schedule nothing more; the listings under way still reply.
+            if cancelled() {
+                continue;
+            }
+            for (id, path, dev) in descend {
                 spawn_list(s, &tx, id, path, dev, exact);
                 pending += 1;
-            }
-            if b.last_progress.elapsed() >= PROGRESS_EVERY {
-                on_progress(&b.progress);
-                b.last_progress = Instant::now();
             }
         }
     });
@@ -146,7 +167,8 @@ struct Builder<'a> {
     /// `(st_dev, file_id)` of multiply-linked files already counted.
     seen_links: HashSet<(u64, u64)>,
     progress: Progress,
-    last_progress: Instant,
+    /// `None` until the first report, so the first listing reports at once.
+    last_progress: Option<Instant>,
 }
 
 impl Builder<'_> {

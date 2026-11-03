@@ -57,8 +57,9 @@ pub struct Overview {
     /// How the last scan measured `freed_if_deleted`: `Some(false)` = fast mode
     /// (clone-aware only; blocks also held by APFS local snapshots are counted as freed),
     /// `Some(true)` = exact mode (the kernel's private size, enabled when Time Machine
-    /// local snapshots exist). `None` when unknown: no snapshot, or a snapshot loaded from
-    /// disk (its format does not record the mode). Set by the `Engine`.
+    /// local snapshots exist). `None` only without a snapshot; recorded in
+    /// [`SnapshotMeta::exact_private_size`](crate::index::snapshot::SnapshotMeta), so it is
+    /// known for a snapshot loaded from disk too.
     pub exact_private_size: Option<bool>,
 }
 
@@ -184,7 +185,7 @@ pub fn disk_overview(snap: Option<&Snapshot>) -> Overview {
             .map(|f| f.freed_if_deleted)
             .sum(),
         no_access: snap.meta.no_access.len(),
-        exact_private_size: None,
+        exact_private_size: Some(snap.meta.exact_private_size),
     }
 }
 

@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::config::{Config, ConfigError};
 use crate::findings::{Finding, FindingId};
 use crate::history::{self, HistoryRecord};
-use crate::index::snapshot::{Actor, Snapshot, SnapshotError};
+use crate::index::snapshot::{Actor, Snapshot, SnapshotError, SnapshotMeta};
 use crate::paths::DisckyPaths;
 use crate::plan::execute::{
     self, ExecuteError, ExecuteOptions, ExecutionReport, StepSink, StepStatus,
@@ -20,7 +20,7 @@ use crate::plan::execute::{
 use crate::plan::{Fingerprint, Plan, PlanId, StepKind, plan_removal};
 use crate::query::{self, Overview, QueryError, SearchQuery, TreeEntry};
 use crate::rules::{Category, RuleSet, SafetyLabel};
-use crate::scan::{self, Current, ScanId, ScanJob, ScanRequest, ScanStatus, lock};
+use crate::scan::{self, Current, ScanId, ScanJob, ScanRequest, ScanSink, ScanStatus, lock};
 
 /// Plans kept for [`Engine::get_plan`].
 const PLAN_HISTORY: usize = 20;
@@ -137,10 +137,7 @@ impl Engine {
             rules: Arc::new(RuleSet::builtin()),
             actor,
             trash_bin,
-            current: Arc::new(RwLock::new(Current {
-                snapshot,
-                exact_private_size: None,
-            })),
+            current: Arc::new(RwLock::new(Current { snapshot })),
             scans: Mutex::default(),
             plans: Mutex::default(),
             last_error: Mutex::new(last_error),
@@ -184,12 +181,63 @@ impl Engine {
         self.read_current().snapshot.clone()
     }
 
-    /// Start a scan of `roots` (default: the configured roots) on a background thread.
-    /// While a scan is running, returns that scan's id instead of starting another.
+    /// The header of the snapshot file on disk; `None` if it is missing, unreadable or
+    /// incompatible. Cheap: the body is not read.
+    pub fn snapshot_file_meta(&self) -> Option<SnapshotMeta> {
+        Snapshot::peek_meta(&self.paths.snapshot).ok()
+    }
+
+    /// Load the snapshot file if its `created_at` is newer than the in-memory snapshot's
+    /// (or there is none), e.g. after the other process scanned. `Ok(true)` when it
+    /// replaced the current snapshot; `Ok(false)` when the file is missing or not newer,
+    /// or a scan of this engine published meanwhile.
+    pub fn reload_snapshot(&self) -> Result<bool, SnapshotError> {
+        let old = self.snapshot();
+        let newer = |created_at: i64| old.as_ref().is_none_or(|o| created_at > o.meta.created_at);
+        match Snapshot::peek_meta(&self.paths.snapshot) {
+            Ok(meta) if newer(meta.created_at) => {}
+            Ok(_) => return Ok(false),
+            Err(SnapshotError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        }
+        let loaded = Snapshot::load(&self.paths.snapshot)?;
+        if !newer(loaded.meta.created_at) {
+            return Ok(false);
+        }
+        let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
+        // A scan that published meanwhile is fresher: keep it.
+        let unchanged = match (&current.snapshot, &old) {
+            (Some(now), Some(old)) => Arc::ptr_eq(now, old),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            return Ok(false);
+        }
+        current.snapshot = Some(Arc::new(loaded));
+        Ok(true)
+    }
+
+    /// [`Engine::start_scan_with`] without a sink.
     pub fn start_scan(&self, roots: Option<Vec<PathBuf>>) -> ScanId {
+        self.start_scan_with(roots, None)
+    }
+
+    /// Start a scan of `roots` (default: the configured roots) on a background thread.
+    /// While a scan is running, joins it instead: returns its id and `roots` is ignored.
+    /// `sink` gets every `Progress` (at most every 50 ms) and exactly one `Finished`;
+    /// joining a running scan delivers its current `Progress` to `sink` immediately.
+    pub fn start_scan_with(&self, roots: Option<Vec<PathBuf>>, sink: Option<ScanSink>) -> ScanId {
         let mut scans = lock(&self.scans);
-        if let Some((id, _)) = scans.iter().find(|(_, j)| j.is_running()) {
-            return id.clone();
+        if let Some((id, job)) = scans.iter().find(|(_, j)| j.is_running()) {
+            let (id, job) = (id.clone(), job.clone());
+            drop(scans);
+            if let Some(sink) = sink {
+                job.join(sink);
+            }
+            return id;
         }
         let config = self.config();
         let req = ScanRequest {
@@ -200,9 +248,17 @@ impl Engine {
             actor: self.actor,
             snapshot_path: self.paths.snapshot.clone(),
         };
-        let (id, job) = scan::spawn(req, Arc::clone(&self.current));
+        let (id, job) = scan::spawn(req, Arc::clone(&self.current), sink);
         scans.insert(id.clone(), job);
         id
+    }
+
+    /// True if the scan `id` was running and is now asked to stop: its status becomes
+    /// `Cancelled` and no snapshot is written. False for an unknown or finished scan, or
+    /// one already saving its snapshot.
+    pub fn cancel_scan(&self, id: &ScanId) -> bool {
+        let job = lock(&self.scans).get(id).cloned();
+        job.is_some_and(|j| j.request_cancel())
     }
 
     pub fn scan_status(&self, id: &ScanId) -> ScanStatus {
@@ -225,10 +281,7 @@ impl Engine {
     }
 
     pub fn overview(&self) -> Overview {
-        let current = self.read_current();
-        let mut o = query::disk_overview(current.snapshot.as_deref());
-        o.exact_private_size = current.snapshot.as_ref().and(current.exact_private_size);
-        o
+        query::disk_overview(self.snapshot().as_deref())
     }
 
     /// [`query::findings_in`] over the current snapshot, cloned; empty without one.
@@ -472,7 +525,7 @@ mod tests {
     use super::*;
     use crate::findings::Removal;
     use crate::fs::walk::{ScanOptions, walk};
-    use crate::index::snapshot::SnapshotMeta;
+    use crate::index::snapshot::{SNAPSHOT_FORMAT, SnapshotMeta};
     use crate::plan::{Step, StepFlags};
 
     fn ollama_finding(id: &str) -> Finding {
@@ -504,17 +557,19 @@ mod tests {
                 exclude: globset::GlobSet::empty(),
                 threads: 0,
                 exact_private_size: false,
+                cancel: None,
             },
             &|_| {},
         );
         let snapshot = Snapshot {
             meta: SnapshotMeta {
-                format_version: 1,
+                format_version: SNAPSHOT_FORMAT,
                 created_at: 1,
                 actor: Actor::Mcp,
                 roots: vec![d.path().into()],
                 no_access: vec![],
                 node_count: 0,
+                exact_private_size: false,
             },
             index: Arc::new(index),
             findings: vec![ollama_finding("a:1b"), ollama_finding("b:1b")],
@@ -531,7 +586,6 @@ mod tests {
             trash_bin: PathBuf::from(TRASH_BIN),
             current: Arc::new(RwLock::new(Current {
                 snapshot: Some(Arc::new(snapshot)),
-                exact_private_size: None,
             })),
             scans: Mutex::default(),
             plans: Mutex::default(),
