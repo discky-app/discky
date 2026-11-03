@@ -8,6 +8,7 @@
 //! component is still protected because every removal decides by `lstat`.
 
 use std::io::{self, Read};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -65,14 +66,30 @@ pub struct ExecutionReport {
 }
 
 /// No `Default`: the caller must choose `actor` and `allow_interactive` deliberately.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExecuteOptions {
+    /// Run `INTERACTIVE` steps (quitting apps, Finder/administrator prompts) instead of
+    /// skipping them.
     pub allow_interactive: bool,
     /// Run only these step indices; the rest are `NotRun`.
     pub only_steps: Option<Vec<usize>>,
     pub actor: Actor,
     /// Normally `/usr/bin/trash`.
     pub trash_bin: PathBuf,
+    /// Receives a `Started` and a `Finished` event for every step that runs.
+    pub on_step: Option<StepSink>,
+}
+
+impl std::fmt::Debug for ExecuteOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecuteOptions")
+            .field("allow_interactive", &self.allow_interactive)
+            .field("only_steps", &self.only_steps)
+            .field("actor", &self.actor)
+            .field("trash_bin", &self.trash_bin)
+            .field("on_step", &self.on_step.as_ref().map(|_| "<sink>"))
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,10 +104,13 @@ pub enum ExecuteError {
     Io(#[from] io::Error),
 }
 
-/// Progress of a running plan, delivered to a [`StepSink`].
+/// Progress of a running plan, delivered to a [`StepSink`]. Steps that do not run
+/// (`NotRun`) emit nothing.
 #[derive(Debug, Clone)]
 pub enum StepEvent {
+    /// Step `index` is about to run.
     Started { index: usize },
+    /// The step's final result, as it appears in the [`ExecutionReport`].
     Finished(StepResult),
 }
 
@@ -142,6 +162,7 @@ impl Outcome {
 /// outside the plan, `Err(PlanStale)` and a log that cannot be opened are reported before
 /// any side effect. A history write that fails after a step ran
 /// stops the plan at that step (noted in its `reason`) and the report is still returned.
+/// Each step that runs is reported to `opts.on_step` as it starts and finishes.
 pub fn execute_plan(
     plan: &Plan,
     opts: &ExecuteOptions,
@@ -172,6 +193,7 @@ pub fn execute_plan(
             results.push(not_run(step.index));
             continue;
         }
+        emit(opts, StepEvent::Started { index: step.index });
         let mut outcome = run_step(step, opts);
         let freed = match outcome.status {
             StepStatus::Done if outcome.freed_nothing => 0,
@@ -192,13 +214,15 @@ pub fn execute_plan(
             });
             stopped_at = Some(step.index);
         }
-        results.push(StepResult {
+        let result = StepResult {
             index: step.index,
             status: outcome.status,
             output: outcome.output,
             freed,
             reason: outcome.reason,
-        });
+        };
+        emit(opts, StepEvent::Finished(result.clone()));
+        results.push(result);
     }
     Ok(ExecutionReport {
         plan: plan.id.clone(),
@@ -208,6 +232,14 @@ pub fn execute_plan(
         stopped_at,
         log_path: paths.log.clone(),
     })
+}
+
+/// Deliver `event` to the sink, if any. A panicking sink is ignored: it must not abort
+/// a plan halfway through.
+fn emit(opts: &ExecuteOptions, event: StepEvent) {
+    if let Some(sink) = &opts.on_step {
+        let _ = catch_unwind(AssertUnwindSafe(|| sink(event)));
+    }
 }
 
 /// The first fingerprint whose path no longer matches its planned state.
@@ -233,7 +265,8 @@ fn not_run(index: usize) -> StepResult {
 }
 
 fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
-    if step.flags.contains(StepFlags::INTERACTIVE) && !opts.allow_interactive {
+    let interactive = step.flags.contains(StepFlags::INTERACTIVE);
+    if interactive && !opts.allow_interactive {
         return Outcome {
             status: StepStatus::Skipped,
             output: String::new(),
@@ -251,7 +284,13 @@ fn run_step(step: &Step, opts: &ExecuteOptions) -> Outcome {
     }
     match &step.kind {
         StepKind::Quit { bundle_id } => run_quit(bundle_id),
+        StepKind::Trash { paths } if interactive => {
+            verify_gone(paths, run_osascript(paths, finder_delete_script))
+        }
         StepKind::Trash { paths } => verify_gone(paths, run_trash(&opts.trash_bin, paths)),
+        StepKind::Remove { paths } if interactive => {
+            verify_gone(paths, run_osascript(paths, admin_rm_script))
+        }
         StepKind::Remove { paths } => verify_gone(paths, run_remove(paths)),
         StepKind::Command { argv, cwd } => {
             let target = command_target(step, cwd.as_deref());
@@ -387,6 +426,62 @@ fn run_remove(paths: &[PathBuf]) -> Outcome {
     Outcome::done(String::new())
 }
 
+/// Trash or remove `paths` through `osascript -e <script(present paths)>`, for paths that
+/// need an administrator: Finder or `do shell script` asks for the password itself.
+fn run_osascript(paths: &[PathBuf], script: fn(&[PathBuf]) -> String) -> Outcome {
+    if let Err(o) = check_absolute(paths) {
+        return o;
+    }
+    let present: Vec<PathBuf> = paths.iter().filter(|p| !is_gone(p)).cloned().collect();
+    if present.is_empty() {
+        return already_absent(String::new());
+    }
+    let mut cmd = Command::new("osascript");
+    cmd.arg("-e").arg(script(&present));
+    process_outcome(&mut cmd, "osascript")
+}
+
+/// `s` as the inside of an AppleScript string literal.
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `s` as one POSIX shell word, single-quoted.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// AppleScript moving `paths` to the Trash through Finder (which prompts for an
+/// administrator password itself for items the user cannot move).
+pub(crate) fn finder_delete_script(paths: &[PathBuf]) -> String {
+    let files: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            format!(
+                "POSIX file \"{}\"",
+                applescript_escape(&p.to_string_lossy())
+            )
+        })
+        .collect();
+    format!(
+        "tell application \"Finder\" to delete {{{}}}",
+        files.join(", ")
+    )
+}
+
+/// AppleScript running `/bin/rm -rf <paths>` with administrator privileges (the system
+/// prompts for the password). Paths are shell-quoted, then AppleScript-escaped.
+pub(crate) fn admin_rm_script(paths: &[PathBuf]) -> String {
+    let words: Vec<String> = paths
+        .iter()
+        .map(|p| shell_quote(&p.to_string_lossy()))
+        .collect();
+    format!(
+        "do shell script \"{}\" with administrator privileges",
+        applescript_escape(&format!("/bin/rm -rf {}", words.join(" ")))
+    )
+}
+
 /// A `Done` trash/remove whose paths still exist (by `lstat`; any error other than
 /// "not found" counts as still there) becomes `Failed`.
 fn verify_gone(paths: &[PathBuf], outcome: Outcome) -> Outcome {
@@ -430,7 +525,7 @@ fn run_command(argv: &[String], cwd: Option<&Path>) -> Outcome {
 fn run_quit(bundle_id: &str) -> Outcome {
     let script = format!(
         "tell application id \"{}\" to quit",
-        bundle_id.replace('\\', "\\\\").replace('"', "\\\"")
+        applescript_escape(bundle_id)
     );
     let mut cmd = Command::new("osascript");
     cmd.args(["-e", &script]);
@@ -601,4 +696,36 @@ fn expected_trash_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
         .filter_map(|p| p.file_name())
         .map(|n| trash.join(n))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finder_script_quotes_paths() {
+        let s = finder_delete_script(&[PathBuf::from(r#"/Library/Logs/A "B"/x\y"#)]);
+        assert_eq!(
+            s,
+            r#"tell application "Finder" to delete {POSIX file "/Library/Logs/A \"B\"/x\\y"}"#
+        );
+    }
+
+    #[test]
+    fn finder_script_lists_every_path() {
+        let s = finder_delete_script(&[PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(
+            s,
+            r#"tell application "Finder" to delete {POSIX file "/a", POSIX file "/b"}"#
+        );
+    }
+
+    #[test]
+    fn admin_rm_script_shell_and_applescript_quotes() {
+        let s = admin_rm_script(&[PathBuf::from("/Library/It's \"x\"")]);
+        assert_eq!(
+            s,
+            r#"do shell script "/bin/rm -rf '/Library/It'\\''s \"x\"'" with administrator privileges"#
+        );
+    }
 }

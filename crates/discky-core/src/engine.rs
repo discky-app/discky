@@ -422,12 +422,12 @@ impl Engine {
         let plan = self
             .get_plan(id)
             .ok_or_else(|| ExecuteError::UnknownPlan(id.0.clone()))?;
-        // `req.on_step` is not delivered yet.
         let opts = ExecuteOptions {
             allow_interactive: req.allow_interactive,
             only_steps: req.only_steps,
             actor: self.actor,
             trash_bin: self.trash_bin.clone(),
+            on_step: req.on_step,
         };
         let report = execute::execute_plan(&plan, &opts, &self.paths)?;
         let done: Vec<_> = report

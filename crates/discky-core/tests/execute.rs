@@ -5,7 +5,7 @@ use discky_core::{
     history,
     index::snapshot::Actor,
     plan::{
-        execute::{ExecuteError, ExecuteOptions, StepStatus, execute_plan},
+        execute::{ExecuteError, ExecuteOptions, StepEvent, StepSink, StepStatus, execute_plan},
         plan_removal,
     },
     rules::{Category, SafetyLabel},
@@ -62,7 +62,16 @@ fn opts(actor: Actor, bin: std::path::PathBuf) -> ExecuteOptions {
         only_steps: None,
         actor,
         trash_bin: bin,
+        on_step: None,
     }
+}
+
+/// A sink that records every event, and the events it recorded.
+fn recording_sink() -> (StepSink, std::sync::Arc<std::sync::Mutex<Vec<StepEvent>>>) {
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_events = std::sync::Arc::clone(&events);
+    let sink: StepSink = std::sync::Arc::new(move |e| sink_events.lock().unwrap().push(e));
+    (sink, events)
 }
 
 #[test]
@@ -130,7 +139,93 @@ fn failed_command_stops_the_plan() {
 }
 
 #[test]
-fn interactive_steps_are_skipped_without_permission() {
+fn step_events_arrive_in_order() {
+    let (d, paths, bin) = setup();
+    let dirs: Vec<_> = ["a", "b", "c"].iter().map(|n| d.path().join(n)).collect();
+    for p in &dirs {
+        std::fs::create_dir(p).unwrap();
+    }
+    let findings: Vec<Finding> = dirs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| Finding {
+            id: FindingId(format!("f{i}")),
+            ..trash_finding(p)
+        })
+        .collect();
+    let plan = plan_removal(&findings.iter().collect::<Vec<_>>(), &Config::default());
+    let (sink, events) = recording_sink();
+    let mut o = opts(Actor::App, bin);
+    o.only_steps = Some(vec![0, 1]);
+    o.on_step = Some(sink);
+    let rep = execute_plan(&plan, &o, &paths).unwrap();
+    let events = events.lock().unwrap();
+    // The unselected (`NotRun`) step emits nothing.
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert!(matches!(events[0], StepEvent::Started { index: 0 }));
+    let StepEvent::Finished(r0) = &events[1] else {
+        panic!("{:?}", events[1])
+    };
+    assert_eq!(r0.index, 0);
+    assert_eq!(r0.status, StepStatus::Done);
+    assert_eq!(r0.freed, rep.results[0].freed);
+    assert!(matches!(events[2], StepEvent::Started { index: 1 }));
+    let StepEvent::Finished(r1) = &events[3] else {
+        panic!("{:?}", events[3])
+    };
+    assert_eq!(r1.index, 1);
+    assert_eq!(r1.status, StepStatus::Done);
+    assert_eq!(rep.results[2].status, StepStatus::NotRun);
+}
+
+#[test]
+fn finished_event_carries_the_history_failure_reason() {
+    let (d, paths, bin) = setup();
+    // As in `failed_history_write_stops_the_plan_but_returns_the_report`: the step
+    // replaces the log file with a directory, so the append right after it fails.
+    let log = paths.log.display().to_string();
+    let f1 = command_finding(d.path(), &format!("rm -f '{log}' && mkdir '{log}'"), None);
+    let plan = plan_removal(&[&f1], &Config::default());
+    let (sink, events) = recording_sink();
+    let mut o = opts(Actor::App, bin);
+    o.on_step = Some(sink);
+    let rep = execute_plan(&plan, &o, &paths).unwrap();
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    let StepEvent::Finished(r) = &events[1] else {
+        panic!("{events:?}")
+    };
+    assert!(
+        r.reason
+            .as_deref()
+            .unwrap()
+            .starts_with("History write failed:")
+    );
+    assert_eq!(r.reason, rep.results[0].reason);
+}
+
+#[test]
+fn a_panicking_sink_does_not_stop_the_plan() {
+    let (d, paths, bin) = setup();
+    let a = d.path().join("a");
+    let b = d.path().join("b");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    let fb = Finding {
+        id: FindingId("f2".into()),
+        ..trash_finding(&b)
+    };
+    let plan = plan_removal(&[&trash_finding(&a), &fb], &Config::default());
+    let mut o = opts(Actor::App, bin);
+    o.on_step = Some(std::sync::Arc::new(|_| panic!("sink panic")));
+    let rep = execute_plan(&plan, &o, &paths).unwrap();
+    assert_eq!(rep.results[0].status, StepStatus::Done);
+    assert_eq!(rep.results[1].status, StepStatus::Done);
+    assert!(!a.exists() && !b.exists());
+}
+
+#[test]
+fn interactive_trash_is_skipped_without_permission() {
     let (d, paths, bin) = setup();
     // Inside a read-only dir: removing it would need an admin prompt.
     let ro = d.path().join("ro");
