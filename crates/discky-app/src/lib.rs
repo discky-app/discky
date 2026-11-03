@@ -7,6 +7,7 @@ pub mod format;
 pub mod inspector;
 pub mod map;
 pub mod overview;
+pub mod palette;
 pub mod removal;
 pub mod scan;
 pub mod settings;

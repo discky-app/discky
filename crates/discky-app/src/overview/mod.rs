@@ -17,6 +17,7 @@ use gpui_kit::*;
 use crate::app::{AppState, AppView, Rescan, Route};
 use crate::duck::{DuckScene, logo_element};
 use crate::format;
+use crate::palette;
 use crate::scan::{ScanController, ScanMsg};
 use model::{BarSegment, CategoryCard, OverviewModel};
 
@@ -376,14 +377,7 @@ fn rescan_button(id: &'static str, label: &'static str) -> Button {
 fn segment_color(s: &BarSegment, cx: &App) -> Hsla {
     let t = cx.theme();
     match s.category {
-        Some(Category::Apps) => t.chart_1,
-        Some(Category::AppCaches) => t.chart_2,
-        Some(Category::Models) => t.chart_3,
-        Some(Category::DevCaches) => t.chart_4,
-        Some(Category::ProjectBuilds) => t.chart_5,
-        // The theme has five numbered chart colours. No red here: it would read as danger.
-        Some(Category::LanguageVersions) => t.chart_bullish,
-        Some(Category::LargeOld) => t.warning,
+        Some(c) => palette::category_color(c, cx),
         None if s.label == "Free" => t.background,
         None => t.muted,
     }
