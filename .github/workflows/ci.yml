@@ -16,7 +16,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo build -p discky-app
-      # Regenerates the app icon (checks iconutil on macos-15); a stale committed icon fails.
+      # Regenerates the app icon (smoke-tests iconutil on macos-15). Only logo.png is
+      # byte-checked: iconutil's .icns bytes may differ between macOS versions.
       - run: cargo xtask icon
-      - run: git diff --exit-code assets/
+      - run: git diff --exit-code assets/logo.png
+      - run: test -s assets/AppIcon.icns
       # `cargo xtask bundle` stays out of CI: it needs a codesigning identity.

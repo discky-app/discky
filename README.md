@@ -200,7 +200,7 @@ Debug builds of the app read a few `DISCKY_START_*` variables so a screen can be
 DISCKY_START_ROUTE=dev_caches cargo run -p discky-app
 ```
 
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and checks that `cargo xtask icon` reproduces the committed icon.
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty.
 
 ## License
 
