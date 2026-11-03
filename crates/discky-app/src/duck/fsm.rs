@@ -29,6 +29,12 @@ const THROW: Duration = Duration::from_millis(250);
 const SHOVE: Duration = Duration::from_millis(600);
 /// The lid closes over this long before the scene ends.
 const CLOSING: Duration = Duration::from_millis(600);
+/// Walking/dragging speed multiplier once the scan has finished.
+///
+/// Worst case from `on_finished` to `Done` (the duck at the turn point, x = -0.15):
+/// - walk trip: 1.0 stage / 1.4 per s = 0.71 s + throw 0.25 s + closing 0.6 s = 1.56 s;
+/// - drag trip: 1.0 stage / 0.8 per s = 1.25 s + shove 0.6 s + closing 0.6 s = 2.45 s.
+const FINISH_SPEEDUP: f32 = 4.0;
 
 /// Where the scene is.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -95,7 +101,7 @@ pub struct DuckFsm {
     waited: Duration,
     /// Time in the current timed state, or towards the next walk frame.
     clock: Duration,
-    /// `on_finished` arrived: finish the trip at double speed, then close.
+    /// `on_finished` arrived: hurry to the bin at [`FINISH_SPEEDUP`], then close.
     finishing: bool,
     /// Latest cumulative counters.
     files: u64,
@@ -203,11 +209,21 @@ impl DuckFsm {
     }
 
     /// The scan ended: before the grace period nothing is ever shown;
-    /// otherwise the current trip finishes at double speed and the lid closes.
+    /// otherwise the duck hurries to the bin ([`FINISH_SPEEDUP`]), turning
+    /// around at once if it was heading away, drops its load and the lid closes.
     pub fn on_finished(&mut self) {
         match self.state {
             State::Hidden => self.enter(State::Done),
             State::Done | State::Closing => {}
+            State::WalkOut => {
+                self.finishing = true;
+                self.last_stack = 1;
+                self.enter(State::WalkBack { stack: 1 });
+            }
+            State::DragOut => {
+                self.finishing = true;
+                self.enter(State::DragBack);
+            }
             _ => self.finishing = true,
         }
     }
@@ -216,9 +232,8 @@ impl DuckFsm {
     /// ticking (waiting out the grace period, animating, or the tick that
     /// reached `Done`), `false` before the first progress and once `Done`.
     pub fn tick(&mut self, dt: Duration) -> bool {
-        let speed = if self.finishing { 2 } else { 1 };
-        let step = dt * speed;
-        let secs = step.as_secs_f32();
+        let speedup = if self.finishing { FINISH_SPEEDUP } else { 1.0 };
+        let secs = dt.as_secs_f32() * speedup;
         match self.state {
             State::Hidden => {
                 if !self.started {
@@ -232,7 +247,7 @@ impl DuckFsm {
                 }
             }
             State::WalkOut | State::DragOut => {
-                self.advance_frame(step);
+                self.advance_frame(dt);
                 self.x -= WALK_SPEED * secs;
                 if self.x <= OFF_X {
                     self.x = OFF_X;
@@ -245,7 +260,7 @@ impl DuckFsm {
                 } else {
                     WALK_SPEED
                 };
-                self.advance_frame(step);
+                self.advance_frame(dt);
                 self.x += v * secs;
                 if self.x >= BIN_X {
                     self.x = BIN_X;
@@ -264,7 +279,7 @@ impl DuckFsm {
                     SHOVE
                 };
                 let n = frames(self.pose()).len();
-                self.clock += step;
+                self.clock += dt;
                 if self.clock >= total {
                     self.next_trip();
                 } else {
@@ -506,11 +521,28 @@ mod tests {
 
     #[test]
     fn finish_closes_bin_then_done() {
+        // Worst case for a walk trip: just turned off-stage, heading back.
         let mut fsm = visible_fsm(Thresholds::default(), 100);
         assert!(fsm.bin_open);
+        assert!(run(&mut fsm, 10.0, |f| f.state == State::WalkOut));
+        assert!(run(&mut fsm, 10.0, |f| f.x < 0.0));
         fsm.on_finished();
+        assert_eq!(fsm.state, State::WalkBack { stack: 1 }, "turns around");
+        assert!(run(&mut fsm, 2.0, |f| f.state == State::Done));
+
+        // Worst case overall: heading out for a crate, past the stage edge.
+        let mut fsm = visible_fsm(Thresholds::default(), 100);
+        fsm.on_progress(
+            &progress(80_000, "/Users/me/Library/Caches/x"),
+            Path::new(HOME),
+        );
+        assert!(run(&mut fsm, 10.0, |f| f.state == State::DragOut));
+        assert!(run(&mut fsm, 10.0, |f| f.x < 0.0));
+        fsm.on_finished();
+        assert_eq!(fsm.state, State::DragBack, "turns around");
         let mut saw_closing = false;
-        let reached = run(&mut fsm, 3.0, |f| {
+        // 1.25 s drag + 0.6 s shove + 0.6 s closing = 2.45 s (see FINISH_SPEEDUP).
+        let reached = run(&mut fsm, 2.5, |f| {
             saw_closing |= f.state == State::Closing;
             f.state == State::Done
         });
