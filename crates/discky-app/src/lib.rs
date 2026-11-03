@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod format;
+pub mod overview;
 pub mod sidebar;
 
 pub use app::run;

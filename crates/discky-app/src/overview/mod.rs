@@ -1,0 +1,318 @@
+//! The Overview screen (mockup A): hero number, disk bar and category cards.
+
+pub mod model;
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use discky_core::rules::Category;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+
+use crate::app::{AppState, AppView, Rescan, Route};
+use crate::format;
+use model::{BarSegment, CategoryCard, OverviewModel};
+
+/// The Overview screen. It never changes the route itself: clicks go to
+/// [`AppView::navigate`].
+pub struct OverviewView {
+    model: OverviewModel,
+    app: WeakEntity<AppView>,
+}
+
+impl OverviewView {
+    /// Build the screen from the current snapshot; `app` receives navigation.
+    pub fn new(app: WeakEntity<AppView>, cx: &mut Context<Self>) -> Self {
+        OverviewView {
+            model: current_model(cx),
+            app,
+        }
+    }
+
+    /// Rebuild the model from the engine's current snapshot (route shown, scan finished).
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.model = current_model(cx);
+        cx.notify();
+    }
+
+    /// A click handler that shows `cat`'s screen.
+    fn go_to(&self, cat: Category) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+        let app = self.app.clone();
+        move |_, _, cx| {
+            // The app view is gone only while its window closes; nothing to show then.
+            let _ = app.update(cx, |v, cx| v.navigate(Route::Category(cat), cx));
+        }
+    }
+
+    fn toolbar(&self, cx: &App) -> impl IntoElement {
+        let m = &self.model;
+        let label = if m.scanned_line.is_some() {
+            "Rescan"
+        } else {
+            "Scan now"
+        };
+        h_flex()
+            .w_full()
+            .justify_between()
+            .gap_4()
+            .child(div().text_xl().font_semibold().child("Overview"))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(m.volume_line.clone())
+                    .when_some(m.scanned_line.clone(), |this, s| this.child(s))
+                    .child(rescan_button("rescan", label)),
+            )
+    }
+
+    fn hero(&self, cx: &App) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let m = &self.model;
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .items_baseline()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_3xl()
+                            .font_bold()
+                            .child(format::bytes(m.safe_to_free)),
+                    )
+                    .child(div().text_lg().child("can be freed safely")),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("findings that regenerate on their own"),
+            )
+            .when(!m.exact_note.is_empty(), |this| {
+                this.child(div().text_xs().text_color(muted).child(m.exact_note))
+            })
+    }
+
+    fn disk_bar(&self, cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        let segments = self.model.bar.iter().filter(|s| s.label != "Free");
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(px(14.))
+                    .rounded(theme.radius)
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme.border)
+                    // Free space is the bar's own background.
+                    .bg(theme.background)
+                    .children(segments.map(|s| {
+                        div()
+                            .h_full()
+                            .w(relative(s.fraction))
+                            .bg(segment_color(s, cx))
+                    })),
+            )
+            .child(h_flex().flex_wrap().gap_x_4().gap_y_1().text_xs().children(
+                self.model.bar.iter().map(|s| {
+                    h_flex()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .size(px(8.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(segment_color(s, cx)),
+                        )
+                        .child(s.label.clone())
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child(format::bytes(s.bytes)),
+                        )
+                }),
+            ))
+    }
+
+    fn card(&self, ix: usize, card: &CategoryCard, cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        let header = format!(
+            "{} · {} · {} {}",
+            card.category,
+            format::bytes(card.total),
+            card.count,
+            if card.count == 1 { "item" } else { "items" }
+        );
+        v_flex()
+            .p_4()
+            .gap_1()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .child(div().pb_1().text_sm().font_semibold().child(header))
+            .children(card.top.iter().enumerate().map(|(row, f)| {
+                h_flex()
+                    .id(SharedString::from(format!("card-{ix}-row-{row}")))
+                    .gap_2()
+                    .px_1()
+                    .py_0p5()
+                    .rounded(theme.radius)
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.accent))
+                    .on_click(self.go_to(card.category))
+                    .child(div().flex_shrink_0().child(f.title.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(f.subtitle.clone().unwrap_or_default()),
+                    )
+                    .child(div().flex_shrink_0().child(format::bytes(f.allocated)))
+            }))
+            .when(card.more > 0, |this| {
+                this.child(
+                    h_flex().pt_1().child(
+                        Button::new(SharedString::from(format!("card-{ix}-more")))
+                            .link()
+                            .small()
+                            .label(format!("{} more →", card.more))
+                            .on_click(self.go_to(card.category)),
+                    ),
+                )
+            })
+    }
+
+    fn empty_state(&self, cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .py_16()
+            // Task 8: logo_element(128.)
+            .child(
+                Icon::new(IconName::HardDrive)
+                    .size(px(128.))
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().text_xl().font_semibold().child("No scan yet"))
+            .child(rescan_button("scan-now", "Scan now").primary())
+            .when(self.model.no_access > 0, |this| {
+                let app = self.app.clone();
+                this.child(
+                    h_flex()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "{} folders could not be read ·",
+                            self.model.no_access
+                        ))
+                        .child(
+                            Button::new("disk-access")
+                                .link()
+                                .small()
+                                .label("Settings → Disk access")
+                                .on_click(move |_, _, cx| {
+                                    let _ = app.update(cx, |v, cx| v.navigate(Route::Settings, cx));
+                                }),
+                        ),
+                )
+            })
+    }
+}
+
+impl Render for OverviewView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let has_snapshot = self.model.scanned_line.is_some();
+        let cards = self
+            .model
+            .cards
+            .iter()
+            .enumerate()
+            .map(|(ix, c)| self.card(ix, c, cx));
+        div()
+            .id("overview")
+            .flex_1()
+            .h_full()
+            .overflow_y_scrollbar()
+            .child(
+                v_flex()
+                    .p_6()
+                    .gap_6()
+                    .min_h_full()
+                    .when_some(self.model.last_error.clone(), |this, e| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(theme.warning)
+                                .bg(theme.warning.opacity(0.1))
+                                .text_sm()
+                                .child(Icon::new(IconName::TriangleAlert).text_color(theme.warning))
+                                .child(div().flex_1().child(e)),
+                        )
+                    })
+                    .child(self.toolbar(cx))
+                    .when(has_snapshot, |this| {
+                        this.child(self.hero(cx))
+                            .child(self.disk_bar(cx))
+                            .child(div().grid().grid_cols(2).gap_4().children(cards))
+                    })
+                    .when(!has_snapshot, |this| this.child(self.empty_state(cx))),
+            )
+    }
+}
+
+/// The model for the engine in [`AppState`], now.
+fn current_model(cx: &App) -> OverviewModel {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    model::build(&cx.global::<AppState>().engine, now)
+}
+
+/// A button that dispatches [`Rescan`].
+fn rescan_button(id: &'static str, label: &'static str) -> Button {
+    Button::new(id)
+        .small()
+        .label(label)
+        // Task 6 handles `Rescan` (the scan controller); until then nothing happens.
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(Rescan), cx))
+}
+
+/// The colour of a bar segment: `chart_*` per category in sidebar order, `muted` for
+/// "Other scanned", the bar background for "Free".
+fn segment_color(s: &BarSegment, cx: &App) -> Hsla {
+    let t = cx.theme();
+    match s.category {
+        Some(Category::Apps) => t.chart_1,
+        Some(Category::AppCaches) => t.chart_2,
+        Some(Category::Models) => t.chart_3,
+        Some(Category::DevCaches) => t.chart_4,
+        Some(Category::ProjectBuilds) => t.chart_5,
+        // The theme has five numbered chart colours; the other two chart colours finish
+        // the set.
+        Some(Category::LanguageVersions) => t.chart_bullish,
+        Some(Category::LargeOld) => t.chart_bearish,
+        None if s.label == "Free" => t.background,
+        None => t.muted,
+    }
+}

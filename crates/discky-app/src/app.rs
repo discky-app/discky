@@ -18,6 +18,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::overview::OverviewView;
 use crate::sidebar;
 
 gpui_kit::actions!(
@@ -75,6 +76,7 @@ pub struct AppView {
     sidebar_collapsed: bool,
     /// `Overview::by_category`, shown as sidebar weights.
     weights: Vec<(Category, u64)>,
+    overview: Entity<OverviewView>,
     focus: FocusHandle,
     _appearance: Subscription,
 }
@@ -86,21 +88,27 @@ impl AppView {
             Theme::sync_system_appearance(Some(window), cx);
         });
         let weights = cx.global::<AppState>().engine.overview().by_category;
+        let app = cx.weak_entity();
+        let overview = cx.new(|cx| OverviewView::new(app, cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         AppView {
             route: Route::Overview,
             sidebar_collapsed: false,
             weights,
+            overview,
             focus,
             _appearance: appearance,
         }
     }
 
-    /// Show `r` in the content area.
+    /// Show `r` in the content area. The Overview re-reads the snapshot when it is shown.
     pub fn navigate(&mut self, r: Route, cx: &mut Context<Self>) {
         if self.route != r {
             self.route = r;
+            if r == Route::Overview {
+                self.overview.update(cx, |o, cx| o.refresh(cx));
+            }
             cx.notify();
         }
     }
@@ -110,6 +118,18 @@ impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.route.title();
         let muted = cx.theme().muted_foreground;
+        let content = match self.route {
+            Route::Overview => self.overview.clone().into_any_element(),
+            // Placeholders until the Category and Settings screens exist.
+            Route::Category(_) | Route::Settings => v_flex()
+                .flex_1()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .text_color(muted)
+                .child(title.clone())
+                .into_any_element(),
+        };
         v_flex()
             .id("app")
             .size_full()
@@ -143,15 +163,7 @@ impl Render for AppView {
                         self.sidebar_collapsed,
                         cx.weak_entity(),
                     ))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .h_full()
-                            .items_center()
-                            .justify_center()
-                            .text_color(muted)
-                            .child(title),
-                    ),
+                    .child(content),
                 // The inspector slot (Task 10) goes here, right of the content.
             )
     }
