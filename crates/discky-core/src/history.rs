@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::DisckyPaths;
 use crate::index::snapshot::Actor;
-use crate::plan::PlanId;
 use crate::plan::execute::StepStatus;
+use crate::plan::{PlanId, Step, StepKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRecord {
@@ -20,7 +20,8 @@ pub struct HistoryRecord {
     pub actor: Actor,
     pub plan: PlanId,
     pub step: usize,
-    /// `quit`, `trash`, `remove`, `command` or `ollama_delete`.
+    /// `quit`, `trash`, `remove`, `command`, `ollama_delete`, or `interrupted` (see
+    /// [`append_interrupted`]).
     pub kind: String,
     pub paths: Vec<PathBuf>,
     pub argv: Option<Vec<String>>,
@@ -53,6 +54,48 @@ pub fn append(paths: &DisckyPaths, rec: &HistoryRecord) -> io::Result<()> {
     let mut f = open_log(paths)?;
     f.write_all(line.as_bytes())?;
     f.sync_data()
+}
+
+/// Why an [`append_interrupted`] record exists.
+pub const INTERRUPTED_REASON: &str = "Interrupted: Discky quit while this step was running";
+
+/// Record that `step` of `plan` was running when the process quit (Dock Quit, logout,
+/// restart): kind `interrupted`, status `Failed`, nothing freed. Whether the step's paths
+/// are gone is unknown; the next scan tells.
+pub fn append_interrupted(
+    paths: &DisckyPaths,
+    plan: &PlanId,
+    step: &Step,
+    actor: Actor,
+) -> io::Result<()> {
+    let (step_paths, argv) = match &step.kind {
+        StepKind::Trash { paths } | StepKind::Remove { paths } => (paths.clone(), None),
+        StepKind::Command { argv, .. } => (
+            step.fingerprints.iter().map(|f| f.path.clone()).collect(),
+            Some(argv.clone()),
+        ),
+        StepKind::Quit { .. } | StepKind::OllamaDelete { .. } => (Vec::new(), None),
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    append(
+        paths,
+        &HistoryRecord {
+            ts,
+            actor,
+            plan: plan.clone(),
+            step: step.index,
+            kind: "interrupted".to_string(),
+            paths: step_paths,
+            argv,
+            status: StepStatus::Failed,
+            freed: 0,
+            output_tail: String::new(),
+            trash_paths: Vec::new(),
+            reason: Some(INTERRUPTED_REASON.to_string()),
+        },
+    )
 }
 
 /// Up to `limit` records, newest first. A missing log is empty; lines that do not parse
@@ -113,4 +156,50 @@ fn allocated(path: &Path) -> u64 {
         .map(|e| allocated(&e.path()))
         .sum::<u64>();
     own + children
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::findings::FindingId;
+    use crate::plan::{Step, StepFlags, StepKind};
+
+    #[test]
+    fn append_interrupted_round_trips() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = DisckyPaths {
+            config: d.path().join("config.toml"),
+            snapshot: d.path().join("snapshot.bin"),
+            log: d.path().join("logs").join("removals.log"),
+        };
+        let step = Step {
+            index: 2,
+            finding: FindingId("f".into()),
+            description: String::new(),
+            kind: StepKind::Remove {
+                paths: vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            },
+            freed: Some(10),
+            freed_note: None,
+            flags: StepFlags::empty(),
+            warnings: vec![],
+            fingerprints: vec![],
+        };
+        append_interrupted(&paths, &PlanId("p1".into()), &step, Actor::App).unwrap();
+        let recs = read(&paths, 10).unwrap();
+        assert_eq!(recs.len(), 1);
+        let r = &recs[0];
+        assert_eq!(r.kind, "interrupted");
+        assert_eq!(r.status, StepStatus::Failed);
+        assert_eq!(r.plan, PlanId("p1".into()));
+        assert_eq!(r.step, 2);
+        assert_eq!(r.actor, Actor::App);
+        assert_eq!(r.paths, [PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]);
+        assert_eq!(r.freed, 0);
+        assert!(r.trash_paths.is_empty());
+        assert_eq!(
+            r.reason.as_deref(),
+            Some("Interrupted: Discky quit while this step was running")
+        );
+    }
 }

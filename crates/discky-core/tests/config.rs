@@ -89,3 +89,25 @@ fn save_is_atomic_no_tmp_left_behind() {
     assert!(tmp.is_empty(), "left behind: {tmp:?}");
     assert_eq!(Config::load(&paths).unwrap(), c);
 }
+
+#[test]
+fn save_keeps_a_symlinked_config_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("dotfiles").join("discky.toml");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, "[mcp]\nallow_agent_delete = false\n").unwrap();
+    let paths = DisckyPaths {
+        config: dir.path().join("config.toml"),
+        snapshot: dir.path().join("snapshot.bin"),
+        log: dir.path().join("removals.log"),
+    };
+    std::os::unix::fs::symlink(&real, &paths.config).unwrap();
+    let mut c = Config::load(&paths).unwrap();
+    c.mcp.allow_agent_delete = true;
+    c.save(&paths).unwrap();
+    let meta = std::fs::symlink_metadata(&paths.config).unwrap();
+    assert!(meta.file_type().is_symlink(), "config.toml was replaced");
+    assert!(Config::load(&paths).unwrap().mcp.allow_agent_delete);
+    let target = std::fs::read_to_string(&real).unwrap();
+    assert!(target.contains("allow_agent_delete = true"), "{target}");
+}

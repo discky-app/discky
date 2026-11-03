@@ -29,7 +29,7 @@ const OLLAMA_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
 const INTERACTIVE_REASON: &str = "Needs an interactive session; run from Discky.app";
 /// Absolute, never looked up through `PATH`: it may show an administrator prompt.
-const OSASCRIPT: &str = "/usr/bin/osascript";
+pub const OSASCRIPT: &str = "/usr/bin/osascript";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -430,11 +430,18 @@ fn run_remove(paths: &[PathBuf]) -> Outcome {
 
 /// Trash or remove `paths` through `osascript -e <script(present paths)>`, for paths that
 /// need an administrator: Finder or `do shell script` asks for the password itself.
-/// Fails closed on a path that is not valid UTF-8: a lossy conversion could name a
-/// different path.
+/// Fails closed on a path that is not valid UTF-8 (a lossy conversion could name a
+/// different path) and on one ending in `/` (`rm -rf dir/` follows a symlinked `dir`).
 fn run_osascript(paths: &[PathBuf], script: impl Fn(&[&str]) -> String) -> Outcome {
     if let Err(o) = check_absolute(paths) {
         return o;
+    }
+    let slash = |p: &&PathBuf| {
+        let b = p.as_os_str().as_encoded_bytes();
+        b.len() > 1 && b.ends_with(b"/")
+    };
+    if paths.iter().any(|p| slash(&p)) {
+        return Outcome::failed(String::new(), "path ends with a slash");
     }
     let mut utf8 = Vec::with_capacity(paths.len());
     for p in paths {
@@ -754,6 +761,18 @@ mod tests {
             o.reason.as_deref(),
             Some("path is not valid UTF-8: /tmp/\u{fffd}")
         );
+        assert!(!built.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn trailing_slash_path_fails_before_any_script() {
+        let built = std::sync::atomic::AtomicBool::new(false);
+        let o = run_osascript(&[PathBuf::from("/tmp/discky-x/")], |_: &[&str]| {
+            built.store(true, std::sync::atomic::Ordering::SeqCst);
+            String::new()
+        });
+        assert_eq!(o.status, StepStatus::Failed);
+        assert_eq!(o.reason.as_deref(), Some("path ends with a slash"));
         assert!(!built.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

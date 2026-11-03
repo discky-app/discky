@@ -111,7 +111,8 @@ impl Engine {
 
     /// Load the config and the snapshot if one is usable, from `opts.paths`. A missing or
     /// incompatible snapshot is ignored; any other load error is ignored too but kept in
-    /// [`Engine::last_error`].
+    /// [`Engine::last_error`]. Findings whose path no longer exists (removed by an earlier
+    /// run) are dropped from the loaded snapshot; the file is not rewritten.
     pub fn open_with(opts: EngineOptions) -> Result<Engine, EngineError> {
         let EngineOptions {
             paths,
@@ -121,7 +122,7 @@ impl Engine {
         let config = Config::load(&paths)?;
         let mut last_error = None;
         let snapshot = match Snapshot::load(&paths.snapshot) {
-            Ok(s) => Some(Arc::new(s)),
+            Ok(s) => Some(Arc::new(drop_gone(s))),
             Err(SnapshotError::Incompatible) => None,
             Err(SnapshotError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
@@ -512,6 +513,17 @@ impl Engine {
     }
 }
 
+/// `snapshot` without the findings whose `path` is gone (`lstat` says not found). Path-less
+/// findings (Ollama models) are kept.
+fn drop_gone(mut snapshot: Snapshot) -> Snapshot {
+    snapshot.findings.retain(|f| {
+        f.path.as_ref().is_none_or(|p| {
+            !matches!(std::fs::symlink_metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        })
+    });
+    snapshot
+}
+
 /// The [`TreeEntry`] for `path` itself, taken from its parent's listing (or, for a scan
 /// root, from a search below it).
 fn tree_entry(snap: &Snapshot, path: &Path) -> Option<TreeEntry> {
@@ -556,6 +568,59 @@ mod tests {
             removal: Removal::OllamaDelete { model: id.into() },
             flags: vec![],
         }
+    }
+
+    #[test]
+    fn reopen_drops_findings_whose_path_is_gone() {
+        let d = tempfile::tempdir().unwrap();
+        let (kept, gone) = (d.path().join("kept"), d.path().join("gone"));
+        std::fs::write(&kept, b"k").unwrap();
+        std::fs::write(&gone, b"g").unwrap();
+        let with_path = |id: &str, p: &Path| Finding {
+            path: Some(p.to_path_buf()),
+            ..ollama_finding(id)
+        };
+        let paths = DisckyPaths {
+            config: d.path().join("config.toml"),
+            snapshot: d.path().join("snapshot.bin"),
+            log: d.path().join("removals.log"),
+        };
+        let snapshot = Snapshot {
+            meta: SnapshotMeta {
+                format_version: SNAPSHOT_FORMAT,
+                created_at: 1,
+                actor: Actor::Mcp,
+                roots: vec![d.path().into()],
+                no_access: vec![],
+                node_count: 0,
+                exact_private_size: false,
+            },
+            index: Arc::new(crate::index::Index::default()),
+            findings: vec![
+                with_path("kept", &kept),
+                with_path("gone", &gone),
+                ollama_finding("model:1b"),
+            ],
+        };
+        snapshot.save(&paths.snapshot).unwrap();
+        let on_disk = std::fs::read(&paths.snapshot).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+        let engine = Engine::open_with(EngineOptions {
+            paths: paths.clone(),
+            actor: Actor::App,
+            trash_bin: PathBuf::from(TRASH_BIN),
+        })
+        .unwrap();
+        let left: Vec<_> = engine
+            .snapshot()
+            .unwrap()
+            .findings
+            .iter()
+            .map(|f| f.id.0.clone())
+            .collect();
+        assert_eq!(left, ["kept", "model:1b"]);
+        // The snapshot file is not rewritten.
+        assert_eq!(std::fs::read(&paths.snapshot).unwrap(), on_disk);
     }
 
     #[test]
