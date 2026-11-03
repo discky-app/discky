@@ -7,7 +7,7 @@ pub mod model;
 use std::path::PathBuf;
 use std::process::Command;
 
-use discky_core::plan::execute::{ExecuteError, ExecutionReport, StepEvent, StepSink};
+use discky_core::plan::execute::{ExecuteError, ExecutionReport, OSASCRIPT, StepEvent, StepSink};
 use discky_core::{Config, ExecuteRequest};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
@@ -23,7 +23,8 @@ use gpui_kit::*;
 use crate::app::AppState;
 use crate::format;
 use model::{
-    Phase, RemovalModel, RowStatus, RunToken, StepRow, TRASH_OVERRIDDEN_NOTE, show_empty_trash,
+    INTERACTIVE_SKIPPED_NOTE, Phase, RemovalModel, RowStatus, RunToken, StepRow,
+    TRASH_OVERRIDDEN_NOTE, allow_interactive, show_empty_trash,
 };
 
 /// Width of the dialog.
@@ -32,8 +33,6 @@ const DIALOG_WIDTH: f32 = 640.;
 const ROWS_MAX_HEIGHT: f32 = 380.;
 /// Lines of a failed step's output shown before that block scrolls.
 const OUTPUT_LINES: f32 = 8.;
-/// Absolute, never looked up through `PATH`.
-const OSASCRIPT: &str = "/usr/bin/osascript";
 
 /// What the dialog tells the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,7 +48,7 @@ pub struct RemovalDialog {
     /// "Empty Trash" is running.
     emptying: bool,
     /// Trash steps run a `DISCKY_TRASH_BIN` override, not the system `trash`: no
-    /// "Empty Trash".
+    /// "Empty Trash", and interactive steps are skipped.
     trash_overridden: bool,
     /// Held while the plan executes; sets the app-wide [`model::RunFlag`].
     running: Option<RunToken>,
@@ -138,7 +137,7 @@ impl RemovalDialog {
         }
     }
 
-    /// "Re-plan" after Stale: plan the same ids again.
+    /// "Re-plan" after Stale or Expired: plan the same ids again.
     fn replan(&mut self, cx: &mut Context<Self>) {
         self.model.replan();
         self.plan(cx);
@@ -154,30 +153,52 @@ impl RemovalDialog {
         let Some(plan_id) = self.model.plan.as_ref().map(|p| p.id.clone()) else {
             return;
         };
-        let engine = cx.global::<AppState>().engine.clone();
+        let state = cx.global::<AppState>();
+        let engine = state.engine.clone();
+        let flag = state.removal_running.clone();
+        let steps = self
+            .model
+            .plan
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.steps.clone());
         let (ev_tx, ev_rx) = smol::channel::unbounded::<StepEvent>();
         let (res_tx, res_rx) = smol::channel::bounded::<Result<ExecutionReport, ExecuteError>>(1);
-        // Never panics: a closed channel (dialog gone) just drops the event.
+        // Never panics: a closed channel (dialog gone) just drops the event. The running
+        // step is kept in the app-wide flag, so a quit Discky cannot refuse logs it.
+        let sink_plan = plan_id.clone();
+        let sink_flag = flag.clone();
         let sink: StepSink = std::sync::Arc::new(move |ev| {
+            match &ev {
+                StepEvent::Started { index } => sink_flag.set_current(
+                    steps
+                        .iter()
+                        .find(|s| s.index == *index)
+                        .map(|s| (sink_plan.clone(), s.clone())),
+                ),
+                StepEvent::Finished(_) => sink_flag.set_current(None),
+            }
             let _ = ev_tx.send_blocking(ev);
         });
         let req = ExecuteRequest {
-            allow_interactive: true,
+            allow_interactive: allow_interactive(self.trash_overridden),
             only_steps: None,
             on_step: Some(sink),
         };
+        // Counted before the thread starts, so a quit at any point sees the run.
+        let token = flag.start();
         let spawned = std::thread::Builder::new()
             .name("discky-removal".into())
             .spawn(move || {
                 let _ = res_tx.send_blocking(engine.execute_plan(&plan_id, req));
             });
         if let Err(e) = spawned {
+            drop(token);
             self.model.phase = Phase::Error(format!("Cannot start the removal: {e}"));
             cx.notify();
             return;
         }
         self.model.start();
-        self.running = Some(cx.global::<AppState>().removal_running.start());
+        self.running = Some(token);
         self._pump = cx.spawn_in(window, async move |this, cx| {
             // The event channel closes when the run ends and drops the sink.
             while let Ok(ev) = ev_rx.recv().await {
@@ -222,6 +243,42 @@ impl RemovalDialog {
         }
         cx.emit(RemovalEvent::Ran);
         cx.notify();
+    }
+
+    /// "Empty Trash": confirm first, since Finder empties everything in the Trash.
+    fn confirm_empty_trash(view: Entity<Self>, window: &mut Window, cx: &mut App) {
+        window.open_dialog(cx, move |dialog, _, _| {
+            let v = view.clone();
+            dialog
+                .title("Empty the Trash?")
+                .w(px(420.))
+                .child(
+                    div()
+                        .text_sm()
+                        .whitespace_normal()
+                        .child("This empties everything in the Trash, including items Discky did not put there."),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("empty-trash-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("empty-trash-confirm")
+                                .danger()
+                                .label("Empty Trash")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    v.update(cx, |d, cx| d.empty_trash(window, cx));
+                                }),
+                        ),
+                )
+        });
     }
 
     /// "Empty Trash": ask Finder to empty it, off the main thread, then toast the outcome.
@@ -307,7 +364,7 @@ impl RemovalDialog {
                             .label("Empty Trash")
                             .disabled(self.emptying)
                             .on_click(move |_, window, cx| {
-                                v.update(cx, |d, cx| d.empty_trash(window, cx));
+                                Self::confirm_empty_trash(v.clone(), window, cx);
                             })
                             .into_any_element(),
                     );
@@ -315,7 +372,7 @@ impl RemovalDialog {
                 buttons.push(close().primary().into_any_element());
                 buttons
             }
-            Phase::Stale { .. } => {
+            Phase::Stale { .. } | Phase::Expired => {
                 let v = view.clone();
                 vec![
                     close().into_any_element(),
@@ -448,6 +505,13 @@ impl Render for RemovalDialog {
                     ))
                     .into_any_element(),
             ),
+            Phase::Expired => Some(
+                div()
+                    .text_sm()
+                    .text_color(warning)
+                    .child("This plan has expired; Re-plan to plan the items again")
+                    .into_any_element(),
+            ),
             Phase::Error(msg) => Some(
                 div()
                     .text_sm()
@@ -495,6 +559,14 @@ impl Render for RemovalDialog {
             })
             .when(self.model.plan.is_some(), |this| {
                 this.child(div().text_sm().text_color(muted).child(self.model.header()))
+            })
+            .when(self.trash_overridden, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(INTERACTIVE_SKIPPED_NOTE),
+                )
             })
             .child(body)
             .children(status)

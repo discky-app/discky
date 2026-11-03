@@ -204,6 +204,12 @@ impl FindingsDelegate {
         self.selection.summary(&self.all)
     }
 
+    /// How many checked findings the filter hides (they still count in [`Self::summary`]).
+    pub fn hidden_checked(&self) -> usize {
+        let shown = self.selection.summary(&self.rows).count;
+        self.summary().count.saturating_sub(shown)
+    }
+
     /// The checked ids, for `Engine::plan`.
     pub fn checked_ids(&self) -> Vec<String> {
         self.selection.ids()
@@ -395,9 +401,31 @@ impl TableDelegate for FindingsDelegate {
 #[cfg(test)]
 mod tests {
     // Explicit imports, like the crate's other test modules (see `app.rs`).
-    use super::{SortBy, filter, flex_widths, sort};
+    use super::{FindingsDelegate, SortBy, filter, flex_widths, sort};
     use crate::category::fixtures::finding;
     use std::path::PathBuf;
+
+    #[test]
+    fn hidden_checked_counts_checked_rows_the_filter_hides() {
+        let mut d = FindingsDelegate::new(PathBuf::from("/Users/me"));
+        d.set_findings(
+            vec![
+                finding("alpha", "Alpha", 3),
+                finding("beta", "Beta", 2),
+                finding("gamma", "Gamma", 1),
+            ],
+            0,
+        );
+        assert!(d.toggle_row(0));
+        assert!(d.toggle_row(1));
+        assert_eq!(d.hidden_checked(), 0);
+        d.set_needle("alpha");
+        assert_eq!(d.hidden_checked(), 1);
+        d.set_needle("gamma");
+        assert_eq!(d.hidden_checked(), 2);
+        d.set_needle("");
+        assert_eq!(d.hidden_checked(), 0);
+    }
 
     fn titles(rows: &[discky_core::findings::Finding]) -> Vec<&str> {
         rows.iter().map(|f| f.title.as_str()).collect()

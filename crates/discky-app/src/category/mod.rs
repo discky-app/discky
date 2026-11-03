@@ -319,7 +319,8 @@ impl CategoryView {
     /// "Selected N · X frees → Trash" with Show in Finder and Remove…, while something is
     /// checked.
     fn action_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let summary = self.table.read(cx).delegate().summary();
+        let delegate = self.table.read(cx).delegate();
+        let (summary, hidden) = (delegate.summary(), delegate.hidden_checked());
         if summary.count == 0 {
             return None;
         }
@@ -346,11 +347,7 @@ impl CategoryView {
                         .flex_1()
                         .min_w_0()
                         .gap_1()
-                        .child(format!(
-                            "Selected {} · {} frees",
-                            format::count(summary.count as u64),
-                            format::bytes(summary.frees)
-                        ))
+                        .child(selection_text(summary.count, summary.frees, hidden))
                         .child(div().text_color(target_color).child(target)),
                 )
                 .child(
@@ -449,6 +446,36 @@ impl Render for CategoryView {
 }
 
 /// Findings for the unit tests of this module.
+/// "Selected N · X frees", plus " · M hidden by filter" when the filter hides checked rows.
+fn selection_text(count: usize, frees: u64, hidden: usize) -> String {
+    let mut s = format!(
+        "Selected {} · {} frees",
+        format::count(count as u64),
+        format::bytes(frees)
+    );
+    if hidden > 0 {
+        s.push_str(&format!(
+            " · {} hidden by filter",
+            format::count(hidden as u64)
+        ));
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection_text;
+
+    #[test]
+    fn selection_text_mentions_rows_hidden_by_the_filter() {
+        assert_eq!(selection_text(3, 5_000_000, 0), "Selected 3 · 5 MB frees");
+        assert_eq!(
+            selection_text(3, 5_000_000, 2),
+            "Selected 3 · 5 MB frees · 2 hidden by filter"
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     use std::path::PathBuf;

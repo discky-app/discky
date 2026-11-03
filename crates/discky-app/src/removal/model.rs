@@ -2,17 +2,17 @@
 //! statuses while the plan runs, and the result.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use discky_core::plan::execute::{
     ExecuteError, ExecutionReport, StepEvent, StepResult, StepStatus,
 };
-use discky_core::plan::{Plan, Step, StepFlags, StepKind};
+use discky_core::plan::{Plan, PlanId, Step, StepFlags, StepKind};
 use discky_core::{Config, RemovalMode};
 
 use crate::format;
-use crate::inspector::command_text;
+use crate::inspector::command_text_for;
 
 /// Where the dialog is in its life.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +27,9 @@ pub enum Phase {
     Finished(Summary),
     /// The executor refused: `path` changed since planning.
     Stale { path: PathBuf },
+    /// The executor no longer knows the plan (it was dropped from the engine's recent
+    /// plans): Re-plan, like Stale.
+    Expired,
     /// Planning or execution failed for another reason.
     Error(String),
 }
@@ -36,7 +39,7 @@ pub enum Phase {
 pub struct StepRow {
     pub index: usize,
     pub description: String,
-    /// The shell form of the step (see `inspector::command_text`).
+    /// The shell form of the step (see `inspector::command_text_for`).
     pub command: String,
     /// Planned bytes; after the step finished, what it actually freed.
     pub freed: Option<u64>,
@@ -145,8 +148,8 @@ impl RemovalModel {
     }
 
     /// Record the executor's result: every row takes its final status from the report and
-    /// the phase becomes [`Phase::Finished`]; a changed path gives [`Phase::Stale`] (Re-plan),
-    /// any other error [`Phase::Error`].
+    /// the phase becomes [`Phase::Finished`]; a changed path gives [`Phase::Stale`] and an
+    /// unknown plan [`Phase::Expired`] (both offer Re-plan), any other error [`Phase::Error`].
     pub fn finish(&mut self, r: Result<ExecutionReport, ExecuteError>) {
         self.phase = match r {
             Ok(report) => {
@@ -161,6 +164,7 @@ impl RemovalModel {
                 })
             }
             Err(ExecuteError::PlanStale { path }) => Phase::Stale { path },
+            Err(ExecuteError::UnknownPlan(_)) => Phase::Expired,
             Err(e) => Phase::Error(e.to_string()),
         };
     }
@@ -211,18 +215,22 @@ impl RemovalModel {
         self.phase = Phase::Running { current: None };
     }
 
-    /// Plan the same ids again (after Stale): back to [`Phase::Planning`].
+    /// Plan the same ids again (after Stale or Expired): back to [`Phase::Planning`].
     pub fn replan(&mut self) {
         self.plan = None;
         self.rows.clear();
         self.phase = Phase::Planning;
     }
 
-    /// The success toast after a run: "Freed X", or "Freed X, Y in the Trash".
+    /// The success toast after a run: "Freed X", or "Freed X, Y in the Trash". None for a
+    /// run that stopped without freeing anything (its warning toast says enough).
     pub fn freed_message(&self) -> Option<String> {
         let Phase::Finished(s) = &self.phase else {
             return None;
         };
+        if s.freed == 0 && s.stopped_at.is_some() {
+            return None;
+        }
         let mut msg = format!("Freed {}", format::bytes(s.freed));
         if s.trashed > 0 {
             msg.push_str(&format!(", {} in the Trash", format::bytes(s.trashed)));
@@ -291,7 +299,7 @@ fn row(step: &Step) -> StepRow {
     StepRow {
         index: step.index,
         description: step.description.clone(),
-        command: command_text(&step.kind),
+        command: command_text_for(step),
         freed: step.freed,
         notes,
         status: RowStatus::Pending,
@@ -307,44 +315,95 @@ pub fn show_empty_trash(trashed: u64, remind_trash: bool, trash_overridden: bool
     trashed > 0 && remind_trash && !trash_overridden
 }
 
+/// Whether the plan runs its `INTERACTIVE` steps (Finder, administrator prompts, Quit): not
+/// with a `DISCKY_TRASH_BIN` override, which is for tests and development, where those
+/// routes would still reach real data.
+pub fn allow_interactive(trash_overridden: bool) -> bool {
+    !trash_overridden
+}
+
+/// Shown in the dialog when the trash binary is overridden.
+pub const INTERACTIVE_SKIPPED_NOTE: &str =
+    "Trash bin overridden (DISCKY_TRASH_BIN): interactive steps are skipped";
+
 /// Shown instead of "Empty Trash" when the trash binary is overridden.
 pub const TRASH_OVERRIDDEN_NOTE: &str =
     "Trash bin overridden (DISCKY_TRASH_BIN); Empty Trash disabled";
 
+/// Why a scan (⌘R, the menu, the Overview) is refused while a plan runs.
+pub const SCAN_BLOCKED_MESSAGE: &str =
+    "A removal is running; wait for it to finish before scanning";
+
+/// Why a second removal dialog is refused while a plan runs.
+pub const REMOVAL_BUSY_MESSAGE: &str = "A removal is already running";
+
 /// Why closing the window or quitting is refused while a plan runs.
 pub const BUSY_MESSAGE: &str = "A removal is running; wait for it to finish before closing";
 
-/// App-wide "a removal is running" flag; quitting and closing the window are refused
-/// while it is set, so a step is never cut off part-way.
+/// App-wide "a removal is running" state: a count of running plans (quitting, closing the
+/// window, scanning and a second removal are refused while it is non-zero, so a step is
+/// never cut off part-way) and the step running right now, which a quit Discky cannot
+/// refuse (Dock, logout) records as interrupted.
 #[derive(Clone, Debug, Default)]
-pub struct RunFlag(Arc<AtomicBool>);
+pub struct RunFlag(Arc<RunState>);
+
+#[derive(Debug, Default)]
+struct RunState {
+    running: AtomicUsize,
+    current: Mutex<Option<(PlanId, Step)>>,
+}
 
 impl RunFlag {
     /// A plan is executing.
     pub fn is_running(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.running.load(Ordering::SeqCst) > 0
     }
 
-    /// Mark a run as started; the flag clears when the returned token is dropped.
+    /// Mark a run as started; it counts until the returned token is dropped.
     pub fn start(&self) -> RunToken {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.running.fetch_add(1, Ordering::SeqCst);
         RunToken(self.0.clone())
+    }
+
+    /// The step that started running (`Some`), or none since the last one finished.
+    /// Called from the executing thread.
+    pub fn set_current(&self, step: Option<(PlanId, Step)>) {
+        *self.0.current.lock().unwrap_or_else(|e| e.into_inner()) = step;
+    }
+
+    /// The step to record as interrupted when the app quits now: the current step, while
+    /// a run is in progress.
+    pub fn interrupted(&self) -> Option<(PlanId, Step)> {
+        if !self.is_running() {
+            return None;
+        }
+        self.0
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
-/// Held for the length of a run; dropping it clears its [`RunFlag`].
+/// Held for the length of a run; dropping it takes the run off its [`RunFlag`].
 #[derive(Debug)]
-pub struct RunToken(Arc<AtomicBool>);
+pub struct RunToken(Arc<RunState>);
 
 impl Drop for RunToken {
+    /// The last run ended: no step is running any more (also when the executor never
+    /// reported its last step finished).
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        if self.0.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            *self.0.current.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Phase, RemovalModel, RowStatus, RunFlag, Summary, show_empty_trash};
+    use super::{
+        Phase, RemovalModel, RowStatus, RunFlag, Summary, allow_interactive, show_empty_trash,
+    };
     use discky_core::findings::FindingId;
     use discky_core::plan::execute::{
         ExecuteError, ExecutionReport, StepEvent, StepResult, StepStatus,
@@ -438,7 +497,7 @@ mod tests {
         let r0 = &m.rows[0];
         assert_eq!(r0.index, 0);
         assert_eq!(r0.description, "Step 0");
-        assert_eq!(r0.command, "trash /Library/Logs/X");
+        assert_eq!(r0.command, "Finder → Trash: /Library/Logs/X");
         assert_eq!(r0.freed, Some(5));
         assert_eq!(r0.status, RowStatus::Pending);
         assert_eq!(r0.notes, ["Needs an administrator password", "Permanent"]);
@@ -507,11 +566,11 @@ mod tests {
 
         let mut m = RemovalModel::from_plan(p, &Config::default());
         m.finish(Err(ExecuteError::UnknownPlan("p".into())));
-        assert!(
-            matches!(&m.phase, Phase::Error(msg) if msg.contains("unknown or expired")),
-            "{:?}",
-            m.phase
-        );
+        assert_eq!(m.phase, Phase::Expired);
+        assert!(!m.can_run());
+        assert!(m.closable());
+        m.replan();
+        assert_eq!(m.phase, Phase::Planning);
 
         let m = RemovalModel::planning(vec!["a".into(), "b".into()], &Config::default());
         assert_eq!(m.phase, Phase::Planning);
@@ -629,6 +688,78 @@ mod tests {
         assert!(!show_empty_trash(5, true, true));
         assert!(!show_empty_trash(0, true, false));
         assert!(!show_empty_trash(5, false, false));
+    }
+
+    #[test]
+    fn stopped_run_that_freed_nothing_has_no_success_toast() {
+        let p = plan(vec![trash(0, "/tmp/a", StepFlags::empty(), 10)], &[]);
+        let mut m = RemovalModel::from_plan(p, &Config::default());
+        let mut failed = result(0, StepStatus::Failed, 0);
+        failed.reason = Some("exit 1".into());
+        m.finish(Ok(ExecutionReport {
+            plan: PlanId("p".into()),
+            results: vec![failed],
+            freed_total: 0,
+            trashed_bytes: 0,
+            stopped_at: Some(0),
+            log_path: PathBuf::from("/tmp/home/removals.log"),
+        }));
+        assert_eq!(m.freed_message(), None);
+        assert_eq!(
+            m.stop_message().as_deref(),
+            Some("Stopped at step 1: exit 1")
+        );
+
+        // A run that finished but freed nothing (already absent) still says so.
+        let p = plan(vec![trash(0, "/tmp/a", StepFlags::empty(), 10)], &[]);
+        let mut m = RemovalModel::from_plan(p, &Config::default());
+        m.finish(Ok(ExecutionReport {
+            plan: PlanId("p".into()),
+            results: vec![result(0, StepStatus::Done, 0)],
+            freed_total: 0,
+            trashed_bytes: 0,
+            stopped_at: None,
+            log_path: PathBuf::from("/tmp/home/removals.log"),
+        }));
+        assert_eq!(m.freed_message().as_deref(), Some("Freed 0 B"));
+    }
+
+    #[test]
+    fn interactive_steps_are_skipped_when_the_trash_bin_is_overridden() {
+        assert!(allow_interactive(false));
+        assert!(!allow_interactive(true));
+    }
+
+    #[test]
+    fn run_flag_counts_tokens() {
+        let flag = RunFlag::default();
+        let a = flag.start();
+        let b = flag.start();
+        drop(a);
+        assert!(flag.is_running());
+        drop(b);
+        assert!(!flag.is_running());
+    }
+
+    #[test]
+    fn run_flag_reports_the_running_step_only_while_running() {
+        let flag = RunFlag::default();
+        let s = trash(1, "/tmp/a", StepFlags::empty(), 1);
+        flag.set_current(Some((PlanId("p".into()), s.clone())));
+        // Nothing runs: nothing to record as interrupted.
+        assert!(flag.interrupted().is_none());
+        let token = flag.start();
+        let (plan, step) = flag.interrupted().unwrap();
+        assert_eq!(plan, PlanId("p".into()));
+        assert_eq!(step.index, 1);
+        flag.set_current(None);
+        assert!(flag.interrupted().is_none());
+        flag.set_current(Some((PlanId("p".into()), s)));
+        drop(token);
+        assert!(flag.interrupted().is_none());
+        // A stale step from an earlier run is not reported by the next one.
+        let _next = flag.start();
+        assert!(flag.interrupted().is_none());
     }
 
     #[test]

@@ -82,7 +82,9 @@ impl DuckScene {
                     fast_forward(&mut self.fsm);
                 }
             }
-            ScanMsg::Refreshed | ScanMsg::SnapshotUpdatedElsewhere(_) => return,
+            ScanMsg::Refreshed
+            | ScanMsg::SnapshotUpdatedElsewhere(_)
+            | ScanMsg::RefusedDuringRemoval => return,
         }
         cx.notify();
     }

@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use discky_core::Inspection;
 use discky_core::findings::{Finding, FindingId, Removal};
-use discky_core::plan::{Plan, StepFlags, StepKind};
+use discky_core::plan::{Plan, Step, StepFlags, StepKind};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
@@ -493,7 +493,7 @@ pub fn command_lines(plan: &Plan) -> Vec<CommandLine> {
             });
         }
         CommandLine {
-            text: command_text_in(&step.kind, home.as_deref()),
+            text: command_text_in(&step.kind, step.flags, home.as_deref()),
             comment,
         }
     });
@@ -504,13 +504,20 @@ pub fn command_lines(plan: &Plan) -> Vec<CommandLine> {
     steps.chain(skipped).collect()
 }
 
-/// The shell form of `kind`, with paths shown relative to the home directory.
-pub fn command_text(kind: &StepKind) -> String {
-    command_text_in(kind, discky_core::paths::home_dir().as_deref())
+/// The shell form of `step` as it really runs, with paths shown relative to the home
+/// directory: an `INTERACTIVE` Trash step goes through Finder, an `INTERACTIVE` Remove
+/// step runs `rm -rf` behind an administrator prompt.
+pub fn command_text_for(step: &Step) -> String {
+    command_text_in(
+        &step.kind,
+        step.flags,
+        discky_core::paths::home_dir().as_deref(),
+    )
 }
 
-/// [`command_text`] with an explicit home directory (`None`: paths stay absolute).
-fn command_text_in(kind: &StepKind, home: Option<&Path>) -> String {
+/// [`command_text_for`] with an explicit home directory (`None`: paths stay absolute).
+fn command_text_in(kind: &StepKind, flags: StepFlags, home: Option<&Path>) -> String {
+    let interactive = flags.contains(StepFlags::INTERACTIVE);
     let paths = |program: &str, paths: &[PathBuf]| {
         std::iter::once(program.to_string())
             .chain(paths.iter().map(|p| quote_path(p, home)))
@@ -522,7 +529,11 @@ fn command_text_in(kind: &StepKind, home: Option<&Path>) -> String {
             "osascript -e {}",
             quote(&format!("tell application id \"{bundle_id}\" to quit"))
         ),
+        StepKind::Trash { paths: p } if interactive => paths("Finder → Trash:", p),
         StepKind::Trash { paths: p } => paths("trash", p),
+        StepKind::Remove { paths: p } if interactive => {
+            format!("{}  # administrator prompt", paths("sudo rm -rf", p))
+        }
         StepKind::Remove { paths: p } => paths("rm -rf", p),
         StepKind::Command { argv, cwd } => {
             let line = argv.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
@@ -567,7 +578,7 @@ fn quote_path(p: &Path, home: Option<&Path>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandLine, command_lines, command_text_in};
+    use super::{CommandLine, command_lines, command_text_for, command_text_in};
     use discky_core::findings::FindingId;
     use discky_core::plan::{Plan, PlanId, Step, StepFlags, StepKind};
     use std::path::{Path, PathBuf};
@@ -575,7 +586,7 @@ mod tests {
     const HOME: &str = "/Users/me";
 
     fn text(kind: StepKind) -> String {
-        command_text_in(&kind, Some(Path::new(HOME)))
+        command_text_in(&kind, StepFlags::empty(), Some(Path::new(HOME)))
     }
 
     fn step(kind: StepKind, flags: StepFlags, warnings: &[&str]) -> Step {
@@ -679,6 +690,38 @@ mod tests {
     }
 
     #[test]
+    fn interactive_steps_show_their_real_route() {
+        let home = Some(Path::new(HOME));
+        let trash = StepKind::Trash {
+            paths: vec![
+                PathBuf::from("/Library/Logs/Y Z"),
+                PathBuf::from("/Users/me/Library/Caches/x"),
+            ],
+        };
+        assert_eq!(
+            command_text_in(&trash, StepFlags::INTERACTIVE, home),
+            "Finder → Trash: '/Library/Logs/Y Z' ~/Library/Caches/x"
+        );
+        let remove = StepKind::Remove {
+            paths: vec![PathBuf::from("/Library/Logs/X")],
+        };
+        assert_eq!(
+            command_text_in(&remove, StepFlags::INTERACTIVE | StepFlags::PERMANENT, home),
+            "sudo rm -rf /Library/Logs/X  # administrator prompt"
+        );
+        // A Quit step is interactive too, but only asks the app.
+        let quit = StepKind::Quit {
+            bundle_id: "com.example.App".into(),
+        };
+        assert_eq!(
+            command_text_in(&quit, StepFlags::INTERACTIVE, home),
+            text(quit.clone())
+        );
+        let s = step(remove, StepFlags::INTERACTIVE, &[]);
+        assert!(command_text_for(&s).starts_with("sudo rm -rf "));
+    }
+
+    #[test]
     fn command_lines_annotate_flags() {
         let p = plan(
             vec![
@@ -711,7 +754,10 @@ mod tests {
         assert!(first.contains("needs administrator password"), "{first}");
         assert!(first.contains("permanent"), "{first}");
         assert_eq!(first, "needs administrator password · permanent");
-        assert_eq!(lines[0].text, "rm -rf /Library/Logs/X");
+        assert_eq!(
+            lines[0].text,
+            "sudo rm -rf /Library/Logs/X  # administrator prompt"
+        );
         assert_eq!(
             lines[1].comment.as_deref(),
             Some("tool not installed: uv not found. brew install uv")

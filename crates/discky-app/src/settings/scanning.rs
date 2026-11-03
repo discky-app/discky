@@ -27,8 +27,16 @@ impl SettingsView {
                         let root = root.clone();
                         this.save(
                             |c| {
-                                if c.scan.roots.len() > 1 {
-                                    c.scan.roots.retain(|r| r != &root);
+                                // By index: removing by value would drop every duplicate
+                                // of the root, possibly the last one.
+                                let at = match c.scan.roots.get(ix) {
+                                    Some(r) if r == &root => Some(ix),
+                                    _ => c.scan.roots.iter().position(|r| r == &root),
+                                };
+                                if c.scan.roots.len() > 1
+                                    && let Some(at) = at
+                                {
+                                    c.scan.roots.remove(at);
                                 }
                             },
                             window,

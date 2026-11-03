@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use discky_core::findings::Finding;
+use discky_core::history;
 use discky_core::index::snapshot::Actor;
 use discky_core::paths::display;
 use discky_core::rules::Category;
@@ -27,7 +28,7 @@ use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
 use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent};
 use crate::overview::OverviewView;
-use crate::removal::model::{BUSY_MESSAGE, RunFlag};
+use crate::removal::model::{BUSY_MESSAGE, REMOVAL_BUSY_MESSAGE, RunFlag, SCAN_BLOCKED_MESSAGE};
 use crate::removal::{self, RemovalDialog, RemovalEvent};
 use crate::scan::{ScanController, ScanMsg};
 use crate::settings::{Section, SettingsView};
@@ -61,7 +62,8 @@ pub const CATEGORY_TABLE_CONTEXT: &str = "CategoryTable";
 /// Global application state shared by every view.
 pub struct AppState {
     pub engine: Arc<Engine>,
-    /// Set while a removal plan executes; closing the window and quitting wait for it.
+    /// Set while a removal plan executes; closing the window, quitting, scanning and a
+    /// second removal wait for it.
     pub removal_running: RunFlag,
 }
 
@@ -206,8 +208,13 @@ impl AppView {
         let _ = (window, cx);
     }
 
-    /// Open the removal dialog for `ids` (it plans them afresh).
+    /// Open the removal dialog for `ids` (it plans them afresh); refused while a removal
+    /// runs, so one run's dialog and flag are never replaced by another's.
     fn open_removal(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if removal_running(cx) {
+            window.push_notification(Notification::warning(REMOVAL_BUSY_MESSAGE), cx);
+            return;
+        }
         let dialog = removal::open(ids, window, cx);
         self._removal_events = Some(cx.subscribe(&dialog, Self::on_removal_event));
         self.removal = Some(dialog);
@@ -228,9 +235,8 @@ impl AppView {
                     let present = cx
                         .global::<AppState>()
                         .engine
-                        .inspect(&id)
-                        .and_then(|i| i.finding)
-                        .is_some_and(|f| f.id.0 == id);
+                        .snapshot()
+                        .is_some_and(|s| s.findings.iter().any(|f| f.id.0 == id));
                     if !present {
                         self.close_inspector(cx);
                     }
@@ -316,6 +322,9 @@ impl AppView {
             }
             ScanMsg::Finished(ScanStatus::Running { .. } | ScanStatus::Unknown) => {}
             ScanMsg::SnapshotUpdatedElsewhere(_) => cx.notify(),
+            ScanMsg::RefusedDuringRemoval => {
+                window.push_notification(Notification::warning(SCAN_BLOCKED_MESSAGE), cx);
+            }
         }
     }
 
@@ -544,6 +553,13 @@ pub fn run(self_check: bool) {
                 }
             })
             .detach();
+            // ⌘Q and the menu refuse while a removal runs, but the Dock's Quit, logout and
+            // restart cannot be refused through gpui: log the step they cut off.
+            cx.on_app_quit(|cx| {
+                record_interrupted_step(cx);
+                async {}
+            })
+            .detach();
 
             // Open the first window synchronously: opening it from a spawned task busy-loops
             // when launched through LaunchServices.
@@ -618,6 +634,20 @@ fn install_actions(cx: &mut App) {
 fn removal_running(cx: &App) -> bool {
     cx.try_global::<AppState>()
         .is_some_and(|s| s.removal_running.is_running())
+}
+
+/// The app is quitting: if a removal step is running, append an `interrupted` record for
+/// it to the removal log (written right here; quit handlers get only ~200 ms).
+fn record_interrupted_step(cx: &App) {
+    let Some(state) = cx.try_global::<AppState>() else {
+        return;
+    };
+    if let Some((plan, step)) = state.removal_running.interrupted() {
+        let paths = state.engine.paths();
+        if let Err(e) = history::append_interrupted(paths, &plan, &step, Actor::App) {
+            eprintln!("Cannot log the interrupted removal step: {e}");
+        }
+    }
 }
 
 /// Quit, unless a removal is running: then say so in the active window and stay, so a

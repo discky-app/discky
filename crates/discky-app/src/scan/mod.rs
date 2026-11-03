@@ -43,6 +43,8 @@ pub enum ScanMsg {
     Refreshed,
     /// The snapshot file is newer than ours and was written by the other process.
     SnapshotUpdatedElsewhere(SnapshotMeta),
+    /// A scan was asked for while a removal runs, and refused.
+    RefusedDuringRemoval,
 }
 
 /// Owns the app's scan: start, cancel, progress, and the snapshot-file watcher.
@@ -110,9 +112,15 @@ impl ScanController {
     }
 
     /// Start a scan of the configured roots (or join the one already running) and pump its
-    /// events. Does nothing while a scan started here is running.
+    /// events. Does nothing while a scan started here is running; refused (with
+    /// [`ScanMsg::RefusedDuringRemoval`]) while a removal runs, so the snapshot the removal
+    /// trims is not replaced under it.
     pub fn start(&mut self, cx: &mut Context<Self>) {
         if self.is_running() {
+            return;
+        }
+        if cx.global::<AppState>().removal_running.is_running() {
+            cx.emit(ScanMsg::RefusedDuringRemoval);
             return;
         }
         let (tx, rx) = smol::channel::unbounded::<ScanEvent>();
