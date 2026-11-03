@@ -97,6 +97,29 @@ impl OverviewView {
             .when(!m.exact_note.is_empty(), |this| {
                 this.child(div().text_xs().text_color(muted).child(m.exact_note))
             })
+            // Only a scan can find unreadable folders, so this never shows without one.
+            .when(self.model.no_access > 0, |this| {
+                let app = self.app.clone();
+                this.child(
+                    h_flex()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(match self.model.no_access {
+                            1 => "1 folder could not be read ·".to_string(),
+                            n => format!("{n} folders could not be read ·"),
+                        })
+                        .child(
+                            Button::new("disk-access")
+                                .link()
+                                .small()
+                                .label("Settings → Disk access")
+                                .on_click(move |_, _, cx| {
+                                    let _ = app.update(cx, |v, cx| v.navigate(Route::Settings, cx));
+                                }),
+                        ),
+                )
+            })
     }
 
     fn disk_bar(&self, cx: &App) -> impl IntoElement {
@@ -210,28 +233,6 @@ impl OverviewView {
             )
             .child(div().text_xl().font_semibold().child("No scan yet"))
             .child(rescan_button("scan-now", "Scan now").primary())
-            .when(self.model.no_access > 0, |this| {
-                let app = self.app.clone();
-                this.child(
-                    h_flex()
-                        .gap_1()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(format!(
-                            "{} folders could not be read ·",
-                            self.model.no_access
-                        ))
-                        .child(
-                            Button::new("disk-access")
-                                .link()
-                                .small()
-                                .label("Settings → Disk access")
-                                .on_click(move |_, _, cx| {
-                                    let _ = app.update(cx, |v, cx| v.navigate(Route::Settings, cx));
-                                }),
-                        ),
-                )
-            })
     }
 }
 

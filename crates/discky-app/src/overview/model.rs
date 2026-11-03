@@ -336,6 +336,24 @@ mod tests {
     }
 
     #[test]
+    fn no_access_is_kept_alongside_cards() {
+        let mut ov = overview(vec![(Category::Models, 2 * GB)], 10 * GB);
+        ov.no_access = 7;
+        let pages = |c: Category| {
+            if c == Category::Models {
+                (vec![finding(0, c, 2 * GB)], 1)
+            } else {
+                (Vec::new(), 0)
+            }
+        };
+        let m = build_from(&ov, pages, None, 1_000);
+        assert_eq!(m.no_access, 7);
+        assert!(m.scanned_line.is_some());
+        assert_eq!(m.cards.len(), 1);
+        assert_eq!(m.cards[0].more, 0);
+    }
+
+    #[test]
     fn bar_fractions_sum_to_one_or_less() {
         // Category totals larger than the scan, and a scan larger than the disk: the bar
         // still never overflows.
