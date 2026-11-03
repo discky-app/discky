@@ -1459,6 +1459,7 @@ name = "discky-app"
 version = "0.1.0"
 dependencies = [
  "discky-core",
+ "globset",
  "gpui-kit",
  "libc",
  "serde_json",

@@ -30,6 +30,7 @@ use crate::overview::OverviewView;
 use crate::removal::model::{BUSY_MESSAGE, RunFlag};
 use crate::removal::{self, RemovalDialog, RemovalEvent};
 use crate::scan::{ScanController, ScanMsg};
+use crate::settings::{Section, SettingsView};
 use crate::sidebar;
 
 gpui_kit::actions!(
@@ -105,6 +106,7 @@ pub struct AppView {
     /// `Overview::by_category`, shown as sidebar weights.
     weights: Vec<(Category, u64)>,
     overview: Entity<OverviewView>,
+    settings: Entity<SettingsView>,
     /// One screen per category visited so far, created on first visit.
     categories: HashMap<Category, Entity<CategoryView>>,
     /// The right column showing the finding last selected in a category table.
@@ -133,6 +135,7 @@ impl AppView {
         let app = cx.weak_entity();
         let overview_scan = scan.clone();
         let overview = cx.new(|cx| OverviewView::new(app, overview_scan, cx));
+        let settings = cx.new(|cx| SettingsView::new(start_settings_section(), window, cx));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut view = AppView {
@@ -140,6 +143,7 @@ impl AppView {
             sidebar_collapsed: false,
             weights,
             overview,
+            settings,
             categories: HashMap::new(),
             inspector: None,
             removal: None,
@@ -408,10 +412,16 @@ impl AppView {
                         view.update(cx, |v, cx| v.request_focus(cx));
                     }
                 }
-                Route::Settings => {}
+                Route::Settings => self.settings.update(cx, |s, cx| s.on_shown(cx)),
             }
             cx.notify();
         }
+    }
+
+    /// Show Settings at `section` (⌘, and the menu open Removal; About opens About).
+    pub fn open_settings(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.settings.update(cx, |s, cx| s.set_section(section, cx));
+        self.navigate(Route::Settings, cx);
     }
 }
 
@@ -422,15 +432,7 @@ impl Render for AppView {
         let content = match self.route {
             Route::Overview => self.overview.clone().into_any_element(),
             Route::Category(c) => self.category_view(c, window, cx).into_any_element(),
-            // Placeholder until the Settings screen exists.
-            Route::Settings => v_flex()
-                .flex_1()
-                .h_full()
-                .items_center()
-                .justify_center()
-                .text_color(muted)
-                .child(title.clone())
-                .into_any_element(),
+            Route::Settings => self.settings.clone().into_any_element(),
         };
         v_flex()
             .id("app")
@@ -442,12 +444,11 @@ impl Render for AppView {
                 this.scan.update(cx, |s, cx| s.start(cx));
             }))
             .on_action(
-                cx.listener(|this, _: &OpenSettings, _, cx| this.navigate(Route::Settings, cx)),
+                cx.listener(|this, _: &OpenSettings, _, cx| {
+                    this.open_settings(Section::Removal, cx)
+                }),
             )
-            .on_action(cx.listener(|this, _: &About, _, cx| {
-                // The About page lives in Settings.
-                this.navigate(Route::Settings, cx)
-            }))
+            .on_action(cx.listener(|this, _: &About, _, cx| this.open_settings(Section::About, cx)))
             .child(
                 TitleBar::new().child(
                     h_flex()
@@ -513,6 +514,20 @@ fn start_route() -> Route {
         }
     }
     Route::Overview
+}
+
+/// The Settings page shown first: Removal, or in debug builds the section named by
+/// `DISCKY_START_SETTINGS` (`scanning`, `removal`, `version_manager`, `mcp`, `disk_access`,
+/// `about`), so a page can be looked at without clicking to it.
+fn start_settings_section() -> Section {
+    #[cfg(debug_assertions)]
+    if let Ok(name) = std::env::var("DISCKY_START_SETTINGS") {
+        match Section::parse(&name) {
+            Some(s) => return s,
+            None => eprintln!("DISCKY_START_SETTINGS: unknown section `{name}`"),
+        }
+    }
+    Section::Removal
 }
 
 /// Run Discky.app. With `self_check`, quit one second after the window opened and print
