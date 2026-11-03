@@ -69,6 +69,33 @@ impl ComponentSelection {
     }
 }
 
+/// Whether `a` and `b` list the same parts in the same order (kind, path, removal), so
+/// a selection made for one applies to the other.
+pub fn same_parts(a: &[Component], b: &[Component]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.kind == y.kind && x.path == y.path && x.removal == y.removal)
+}
+
+/// Whether a selection made on the `shown` components still names the same parts in the
+/// snapshot's `current` ones (`None`: the finding is gone).
+pub fn selection_current(shown: &[Component], current: Option<&[Component]>) -> bool {
+    current.is_some_and(|c| same_parts(shown, c))
+}
+
+/// Whether "Remove…" is available: the finding can be removed, it is not being refreshed
+/// (its component indices could be stale), and when components can be checked at least
+/// one is.
+pub fn remove_enabled(
+    checkable: bool,
+    has_selectable: bool,
+    count: usize,
+    refreshing: bool,
+) -> bool {
+    checkable && !refreshing && (!has_selectable || count > 0)
+}
+
 /// Whether `c` can be part of a removal (not a shown-only component).
 pub fn selectable(c: &Component) -> bool {
     c.removal != ComponentRemoval::None
@@ -260,5 +287,33 @@ mod tests {
             kind_label(&ComponentKind::ApplicationSupport),
             "Application Support"
         );
+    }
+
+    #[test]
+    fn remove_disabled_while_loading() {
+        use super::remove_enabled;
+        assert!(remove_enabled(true, true, 2, false));
+        assert!(!remove_enabled(true, true, 2, true));
+        assert!(!remove_enabled(true, true, 0, false));
+        assert!(!remove_enabled(false, true, 2, false));
+        // A mise version: nothing selectable, still removable.
+        assert!(remove_enabled(true, false, 0, false));
+    }
+
+    #[test]
+    fn changed_parts_invalidate_the_selection() {
+        use super::{same_parts, selection_current};
+        let shown = app();
+        let mut resized = app();
+        resized[1].allocated = 999;
+        resized[1].freed_if_deleted = 999;
+        assert!(same_parts(&shown, &resized));
+        assert!(selection_current(&shown, Some(&resized)));
+        // Component 0 removed: every later index shifts.
+        assert!(!selection_current(&shown, Some(&shown[1..])));
+        let mut moved = app();
+        moved.swap(1, 2);
+        assert!(!selection_current(&shown, Some(&moved)));
+        assert!(!selection_current(&shown, None));
     }
 }

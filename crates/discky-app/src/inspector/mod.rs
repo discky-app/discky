@@ -9,9 +9,11 @@ use discky_core::plan::Plan;
 use discky_core::{Inspection, PlanItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -26,13 +28,18 @@ use crate::app::{AppState, CloseInspector};
 use crate::category::selection::is_checkable;
 use crate::category::table::{badge, pill};
 use crate::format;
-use selection::{component_note, kind_tag, selectable};
+use selection::{
+    component_note, kind_tag, remove_enabled, same_parts, selectable, selection_current,
+};
 
 /// Key context of the inspector; Escape closes it while it has focus.
 pub const INSPECTOR_CONTEXT: &str = "Inspector";
 
 /// Width of the label column of the metadata rows.
 const LABEL_WIDTH: f32 = 84.;
+
+/// The toast when "Remove…" finds the finding's components changed since they were shown.
+const FINDING_CHANGED: &str = "Finding changed; review the selection";
 
 /// Quiet time after a component toggle before the plan preview is recomputed, so rapid
 /// toggles plan once.
@@ -153,6 +160,32 @@ impl Inspector {
         self.finding.components.iter().any(selectable)
     }
 
+    /// The fresh finding is still being loaded while components are shown: their indices
+    /// may not match the current snapshot yet.
+    fn refreshing(&self) -> bool {
+        self.loading && !self.finding.components.is_empty()
+    }
+
+    /// "Remove…": hand the selection to the removal dialog, unless the snapshot's finding
+    /// no longer has the components on screen (then warn and reload them).
+    fn request_removal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let snap = cx.global::<AppState>().engine.snapshot();
+        let current = snap.as_ref().and_then(|s| {
+            s.findings
+                .iter()
+                .find(|f| f.id == self.finding.id)
+                .map(|f| f.components.as_slice())
+        });
+        if !self.finding.components.is_empty()
+            && !selection_current(&self.finding.components, current)
+        {
+            window.push_notification(Notification::warning(FINDING_CHANGED), cx);
+            self.refresh(cx);
+            return;
+        }
+        cx.emit(InspectorEvent::RemoveItems(vec![self.plan_request()]));
+    }
+
     /// Check or uncheck component `i` and recompute the preview after the debounce.
     fn set_component(&mut self, i: usize, on: bool, cx: &mut Context<Self>) {
         if self.selection.set(i, on, &self.finding.components) {
@@ -166,8 +199,11 @@ impl Inspector {
     }
 
     /// Run `Engine::inspect` on the background executor and recompute the plan preview.
+    /// A finding with components is planned only once the fresh finding is adopted, so the
+    /// checked indices never meet a newer component list than the one on screen.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
+        let deferred = !self.finding.components.is_empty();
         let engine = cx.global::<AppState>().engine.clone();
         let id = self.finding.id.clone();
         let target = id.0.clone();
@@ -178,18 +214,21 @@ impl Inspector {
                 if this.finding.id != id {
                     return;
                 }
-                if let Some(f) = inspection.as_ref().and_then(|i| i.finding.clone())
-                    && f.id == id
-                    && this.adopt(f)
-                {
-                    this.replan(Duration::ZERO, cx);
-                }
+                let reset = match inspection.as_ref().and_then(|i| i.finding.clone()) {
+                    Some(f) if f.id == id => this.adopt(f),
+                    _ => false,
+                };
                 this.inspection = inspection;
                 this.loading = false;
+                if deferred || reset {
+                    this.replan(Duration::ZERO, cx);
+                }
                 cx.notify();
             });
         });
-        self.replan(Duration::ZERO, cx);
+        if !deferred {
+            self.replan(Duration::ZERO, cx);
+        }
         cx.notify();
     }
 
@@ -594,7 +633,8 @@ impl Inspector {
                 format::bytes(bytes)
             ))
         });
-        let disabled = !is_checkable(&self.finding) || (selectable && count == 0);
+        let refreshing = self.refreshing();
+        let disabled = !remove_enabled(is_checkable(&self.finding), selectable, count, refreshing);
         v_flex()
             .flex_shrink_0()
             .gap_1()
@@ -604,27 +644,25 @@ impl Inspector {
             .border_color(border)
             .children(summary)
             .child(
-                h_flex().justify_end().child(
-                    Button::new("inspector-remove")
-                        .small()
-                        .danger()
-                        .label("Remove…")
-                        .disabled(disabled)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            cx.emit(InspectorEvent::RemoveItems(vec![this.plan_request()]));
-                        })),
-                ),
+                h_flex()
+                    .justify_end()
+                    .items_center()
+                    .gap_2()
+                    .when(refreshing, |this| {
+                        this.child(div().text_xs().text_color(muted).child("Refreshing…"))
+                    })
+                    .child(
+                        Button::new("inspector-remove")
+                            .small()
+                            .danger()
+                            .label("Remove…")
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_removal(window, cx);
+                            })),
+                    ),
             )
     }
-}
-
-/// Whether `a` and `b` list the same parts in the same order (kind, path, removal), so
-/// a selection made for one applies to the other.
-fn same_parts(a: &[Component], b: &[Component]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.kind == y.kind && x.path == y.path && x.removal == y.removal)
 }
 
 /// A small uppercase section heading ("CONTENTS · TOP 20").

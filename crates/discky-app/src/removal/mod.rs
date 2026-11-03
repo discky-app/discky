@@ -115,16 +115,18 @@ impl RemovalDialog {
         let engine = cx.global::<AppState>().engine.clone();
         let items = self.model.items.clone();
         let work = cx.background_spawn(async move {
-            let plan = engine.plan_items(&items).map_err(|e| e.to_string());
-            let titles = engine
-                .snapshot()
-                .map_or_else(FindingTitles::default, |snap| {
-                    FindingTitles::from_findings(
+            // Titles come from the very snapshot the plan was made from.
+            let (plan, titles) = match engine.plan_items_with_snapshot(&items) {
+                Ok((plan, snap)) => {
+                    let titles = FindingTitles::from_findings(
                         snap.findings
                             .iter()
                             .filter(|f| items.iter().any(|i| i.id == f.id.0)),
-                    )
-                });
+                    );
+                    (Ok(plan), titles)
+                }
+                Err(e) => (Err(e.to_string()), FindingTitles::default()),
+            };
             (plan, titles, engine.config())
         });
         self._plan = cx.spawn(async move |this, cx| {

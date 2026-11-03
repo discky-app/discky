@@ -403,6 +403,15 @@ impl Engine {
     /// position); ids not in the snapshot, and selections naming unknown components, are
     /// listed in `Plan::skipped`. The plan is kept for [`Engine::get_plan`].
     pub fn plan_items(&self, items: &[PlanItem]) -> Result<Plan, EngineError> {
+        self.plan_items_with_snapshot(items).map(|(plan, _)| plan)
+    }
+
+    /// [`Engine::plan_items`], also returning the snapshot the plan was made from, so a
+    /// caller can label steps from the same findings (not from a newer snapshot).
+    pub fn plan_items_with_snapshot(
+        &self,
+        items: &[PlanItem],
+    ) -> Result<(Plan, Arc<Snapshot>), EngineError> {
         let snap = self.snapshot().ok_or(EngineError::NoSnapshot)?;
         let mut seen = std::collections::HashSet::new();
         let items: Vec<PlanItem> = items
@@ -421,7 +430,8 @@ impl Engine {
         while plans.len() > PLAN_HISTORY {
             plans.pop_front();
         }
-        Ok(plan)
+        drop(plans);
+        Ok((plan, snap))
     }
 
     /// What `mise prune` would remove: the output of `mise prune -n` (a dry run; mise
