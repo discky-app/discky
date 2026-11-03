@@ -83,6 +83,8 @@ command = "/opt/homebrew/bin/discky-mcp"
 }
 ```
 
+Applications and Language versions findings list their removable parts as `components` (see `inspect`); an agent can pass `components` to `plan_removal` to remove only some of them, and steps that need an administrator or quit an app are skipped for agents (run them in Discky.app).
+
 Optional flags: `--home <dir>` (sets `DISCKY_HOME`) and `--log-level <filter>` (stderr logs, default `warn`).
 
 ## Tools
@@ -96,7 +98,7 @@ Optional flags: `--home <dir>` (sets `DISCKY_HOME`) and `--log-level <filter>` (
 | `tree` | The largest children of a directory in the last snapshot, with allocated and freed-if-deleted bytes. | None |
 | `search` | Search the last snapshot for files and directories by name glob, size, age, kind or parent path, largest first. | None |
 | `inspect` | Everything known about a finding id, an absolute path or an app name: the finding, its rule explanation, size and largest children. | None |
-| `plan_removal` | Plans the removal of the given findings and returns the ordered steps and the bytes they free. | Removes nothing |
+| `plan_removal` | Plans the removal of the given findings (optionally only chosen `components` of an app or language version) and returns the ordered steps and the bytes they free. | Removes nothing |
 | `execute_plan` | Runs a plan from `plan_removal` (moving items to the Trash or deleting them, per the user's settings). Refused unless the user enabled agent deletion in Discky settings; steps needing an admin prompt are skipped. | **Deletes files** |
 | `history` | Removals Discky has run, newest first, and the items it moved to the Trash that are still there. | None |
 

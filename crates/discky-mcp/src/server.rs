@@ -8,7 +8,8 @@ use discky_core::plan::execute::{ExecuteError, StepStatus};
 use discky_core::plan::{PlanId, StepFlags, StepKind};
 use discky_core::query::{QueryError, SearchQuery};
 use discky_core::{
-    Config, DisckyPaths, Engine, EngineError, ExecuteRequest, RemovalMode, ScanId, ScanStatus,
+    Config, DisckyPaths, Engine, EngineError, ExecuteRequest, PlanItem, RemovalMode, ScanId,
+    ScanStatus,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{IntoCallToolResult, schema_for_output};
@@ -41,7 +42,7 @@ const UNKNOWN_PLAN: &str =
     "Unknown plan id (plans are kept for this server session only). Call plan_removal again.";
 const DELETE_DISABLED: &str = "Agent deletion is disabled. Enable it in Discky → Settings → MCP server (`mcp.allow_agent_delete = true` in config.toml)";
 
-const INSTRUCTIONS: &str = "Discky is a macOS disk-cleanup tool: it scans the disk, finds removable things (caches, build outputs, models, large old files) and removes them safely. Call `disk_overview` first; if it reports `stale: true`, call `scan` (pass `wait_seconds` up to 60, or poll `scan_status`). All sizes are bytes actually allocated on disk, and `freed_if_deleted` is what deleting really frees (clones and hard links shared elsewhere are not counted). Always call `plan_removal` and show the plan to the user before `execute_plan`; `execute_plan` is disabled until the user enables agent deletion in Discky settings. Never guess paths: use `findings`, `tree`, `search` and `inspect`.";
+const INSTRUCTIONS: &str = "Discky is a macOS disk-cleanup tool: it scans the disk, finds removable things (caches, build outputs, models, large old files) and removes them safely. Call `disk_overview` first; if it reports `stale: true`, call `scan` (pass `wait_seconds` up to 60, or poll `scan_status`). All sizes are bytes actually allocated on disk, and `freed_if_deleted` is what deleting really frees (clones and hard links shared elsewhere are not counted). Always call `plan_removal` and show the plan to the user before `execute_plan`; `execute_plan` is disabled until the user enables agent deletion in Discky settings. Never guess paths: use `findings`, `tree`, `search` and `inspect`. Applications and Language versions findings carry `components` (see `inspect`); pass `components` to `plan_removal` to remove only some of them. Steps that need an administrator or quit an app are skipped for agents (run them in Discky.app).";
 
 #[derive(Clone)]
 pub struct DisckyServer {
@@ -223,7 +224,10 @@ impl DisckyServer {
             page(p.limit, 25),
         );
         Json(FindingsOut {
-            items: items.into_iter().map(FindingOut::from).collect(),
+            items: items
+                .into_iter()
+                .map(|f| FindingOut::new(f, false))
+                .collect(),
             total,
             offset,
         })
@@ -295,7 +299,7 @@ impl DisckyServer {
     ) -> Result<Json<InspectOut>, String> {
         let i = self.engine.inspect(&p.target).ok_or(NO_SNAPSHOT)?;
         Ok(Json(InspectOut {
-            finding: i.finding.map(FindingOut::from),
+            finding: i.finding.map(|f| FindingOut::new(f, true)),
             entry: i.entry,
             children: i.children,
             rule: i.rule,
@@ -306,7 +310,7 @@ impl DisckyServer {
 
     #[tool(
         name = "plan_removal",
-        description = "Plans the removal of the given findings and returns the ordered steps and the bytes they free. Removes nothing; show the plan to the user, then call `execute_plan`."
+        description = "Plans the removal of the given findings (optionally only some of their `components`) and returns the ordered steps and the bytes they free. Removes nothing; show the plan to the user, then call `execute_plan`."
     )]
     async fn plan_removal(
         &self,
@@ -314,7 +318,21 @@ impl DisckyServer {
     ) -> Result<Json<PlanOut>, String> {
         self.reload_config_strict()?;
         let engine = Arc::clone(&self.engine);
-        let plan = blocking(move || engine.plan(&p.finding_ids))
+        let mut by_id = p.components.unwrap_or_default();
+        let items: Vec<PlanItem> = p
+            .finding_ids
+            .into_iter()
+            .map(|id| PlanItem {
+                components: by_id.remove(&id),
+                id,
+            })
+            .collect();
+        if let Some(extra) = by_id.keys().min() {
+            return Err(format!(
+                "components refers to an id not in finding_ids: {extra}"
+            ));
+        }
+        let plan = blocking(move || engine.plan_items(&items))
             .await?
             .map_err(engine_error)?;
         let mut v = plan.to_json();

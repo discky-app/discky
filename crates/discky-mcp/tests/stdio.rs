@@ -482,3 +482,87 @@ fn a_trash_bin_override_is_announced_on_stderr() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn plan_removal_with_components_selects_steps() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path();
+    let app = home.join("Applications/Demo.app/Contents");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.example.demo</string>
+<key>CFBundleName</key><string>Demo</string>
+</dict></plist>"#,
+    )
+    .unwrap();
+    for rel in [
+        "Library/Application Support/com.example.demo/data.bin",
+        "Library/Caches/com.example.demo/c.bin",
+    ] {
+        let p = home.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![7u8; 8192]).unwrap();
+    }
+    std::fs::write(
+        home.join("config.toml"),
+        // The apps pass only runs when the index covers `/Applications` (read-only scan);
+        // the fake app lives under the scratch `~/Applications`.
+        format!(
+            "[scan]\nroots = [\"{}\", \"/Applications\"]\n",
+            home.display()
+        ),
+    )
+    .unwrap();
+    let mut m = Mcp::start(home);
+    m.initialize();
+    let sc = m.tool("scan", json!({"wait_seconds": 60}));
+    assert_eq!(sc["status"]["kind"], "done", "{sc}");
+    let f = m.tool("findings", json!({"category": "apps", "limit": 200}));
+    let items: Vec<&Value> = f["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["title"] == "Demo")
+        .collect();
+    assert_eq!(items.len(), 1, "{f}");
+    assert!(items[0]["components_count"].as_u64().unwrap() >= 3, "{f}");
+    assert!(items[0].get("components").is_none());
+    let id = items[0]["id"].as_str().unwrap().to_string();
+
+    let i = m.tool("inspect", json!({"target": &id}));
+    let comps = i["finding"]["components"].as_array().unwrap();
+    let find = |kind: &str| {
+        comps
+            .iter()
+            .find(|c| c["kind"] == kind)
+            .unwrap_or_else(|| panic!("no {kind} component in {i}"))
+    };
+    let caches = find("caches")["index"].as_u64().unwrap();
+    let bundle = find("app_bundle")["index"].as_u64().unwrap();
+    assert_ne!(caches, bundle);
+    assert!(find("caches")["human_size"].is_string());
+
+    let p = m.tool(
+        "plan_removal",
+        json!({"finding_ids": [&id], "components": {&id: [caches]}}),
+    );
+    let steps = p["steps"].as_array().unwrap();
+    let trash: Vec<_> = steps.iter().filter(|s| s["kind"] == "trash").collect();
+    assert_eq!(trash.len(), 1, "{p}");
+    assert!(
+        trash[0].to_string().contains("Caches/com.example.demo"),
+        "{p}"
+    );
+    let all = p["steps"].to_string();
+    assert!(!all.contains("Application Support"), "{p}");
+    assert!(!all.contains("Demo.app"), "{p}");
+
+    let r = m.call(
+        "tools/call",
+        json!({"name": "plan_removal", "arguments": {"finding_ids": [&id], "components": {"nope": [0]}}}),
+    );
+    assert_eq!(r["result"]["isError"], true, "{r}");
+}
