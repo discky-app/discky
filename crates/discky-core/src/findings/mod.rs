@@ -1,7 +1,8 @@
 //! Findings: removable things with an honest size, a safety label and a removal method.
 //!
-//! [`Categorizer::run`] turns an [`Index`] into findings in five passes — model stores ([`models`]), rule
-//! paths/globs, per-app `~/Library` folders ([`app_caches`]), project build dirs ([`builds`]), large & old ([`large_old`]). Each pass
+//! [`Categorizer::run`] turns an [`Index`] into findings in six passes — model stores ([`models`]), rule
+//! paths/globs, installed apps and leftovers of removed ones ([`apps`]), per-app `~/Library` folders
+//! ([`app_caches`]), project build dirs ([`builds`]), large & old ([`large_old`]). Each pass
 //! records the node of every finding it emits in a shared `claimed` set; a node is
 //! claimed when it or any ancestor is in that set (see [`is_claimed`]). Passes walk the
 //! tree top-down with [`walk_unclaimed`] and never enter a claimed subtree, so nothing
@@ -213,6 +214,11 @@ impl Categorizer<'_> {
         }
         out.extend(rule_pass(self.index, self.rules, &mut claimed));
         if let Some(home) = home {
+            // Before App caches: leftover groups of removed apps claim their folders.
+            if apps::applies(self.index) {
+                let running = crate::tools::running_app_bundle_ids();
+                out.extend(apps::find(self.index, home, &mut claimed, &running));
+            }
             out.extend(app_caches::find(self.index, home, &mut claimed));
         }
         out.extend(builds::find(self.index, self.rules, home, &mut claimed));
