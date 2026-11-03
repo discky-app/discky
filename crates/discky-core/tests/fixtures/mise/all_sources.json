@@ -1,0 +1,142 @@
+{
+  "node": [
+    {
+      "version": "20.11.0",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/node/20.11.0",
+      "sources": [
+        {
+          "type": ".tool-versions",
+          "path": "/Users/alxgol/OneDrive/Projects/ai-reviewer/.tool-versions",
+          "requested_version": "20.11.0"
+        }
+      ],
+      "installed": true,
+      "active": true
+    },
+    {
+      "version": "22.16.0",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/node/22.16.0",
+      "sources": [
+        {
+          "type": "mise.toml",
+          "path": "/Users/alxgol/.config/mise/config.toml",
+          "requested_version": "22.16.0"
+        },
+        {
+          "type": "idiomatic-version-file",
+          "path": "/Users/alxgol/OneDrive/Projects/dfuture.co/.node-version",
+          "requested_version": "22.16.0"
+        }
+      ],
+      "installed": true,
+      "active": true
+    },
+    {
+      "version": "24.18.1",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/node/24.18.1",
+      "sources": [
+        {
+          "type": "idiomatic-version-file",
+          "path": "/Users/alxgol/OneDrive/Projects/fireflies-downloader/.node-version",
+          "requested_version": "24.18.1"
+        }
+      ],
+      "installed": true,
+      "active": true
+    },
+    {
+      "version": "25.8.2",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/node/25.8.2",
+      "sources": [
+        {
+          "type": "idiomatic-version-file",
+          "path": "/Users/alxgol/OneDrive/Projects/Pyrus Cross Dashboard/.node-version",
+          "requested_version": "25.8.2"
+        }
+      ],
+      "installed": true,
+      "active": true
+    }
+  ],
+  "pnpm": [
+    {
+      "version": "12.15.0",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/pnpm/12.15.0",
+      "sources": [
+        {
+          "type": "mise.toml",
+          "path": "/Users/alxgol/.config/mise/config.toml",
+          "requested_version": "latest"
+        }
+      ],
+      "installed": true,
+      "active": true
+    }
+  ],
+  "python": [
+    {
+      "version": "3.12.15",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/python/3.12.15",
+      "sources": [
+        {
+          "type": "mise.toml",
+          "path": "/Users/alxgol/.config/mise/config.toml",
+          "requested_version": "3.12"
+        }
+      ],
+      "installed": true,
+      "active": true
+    }
+  ],
+  "ruby": [
+    {
+      "version": "2.4.2",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/ruby/2.4.2",
+      "sources": [
+        {
+          "type": ".tool-versions",
+          "path": "/Users/alxgol/OneDrive/Projects/quess/.tool-versions",
+          "requested_version": "2.4.2"
+        },
+        {
+          "type": "idiomatic-version-file",
+          "path": "/Users/alxgol/OneDrive/Projects/quess/.ruby-version",
+          "requested_version": "2.4.2"
+        }
+      ],
+      "installed": false,
+      "active": false
+    },
+    {
+      "version": "3.1.3",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/ruby/3.1.3",
+      "sources": [
+        {
+          "type": "idiomatic-version-file",
+          "path": "/Users/alxgol/OneDrive/Projects/rmo/.ruby-version",
+          "requested_version": "3.1.3"
+        },
+        {
+          "type": "idiomatic-version-file",
+          "path": "/Users/alxgol/OneDrive/Projects/rmo/Gemfile",
+          "requested_version": "3.1.3"
+        }
+      ],
+      "installed": false,
+      "active": false
+    },
+    {
+      "version": "3.4.12",
+      "install_path": "/Users/alxgol/.local/share/mise/installs/ruby/3.4.12",
+      "sources": [
+        {
+          "type": "mise.toml",
+          "path": "/Users/alxgol/.config/mise/config.toml",
+          "requested_version": "3.4.12"
+        }
+      ],
+      "installed": true,
+      "active": true
+    }
+  ]
+}

@@ -424,6 +424,23 @@ impl Engine {
         Ok(plan)
     }
 
+    /// What `mise prune` would remove: the output of `mise prune -n` (a dry run; mise
+    /// reports on stderr, so both streams are returned, trimmed), bounded to 5 s.
+    /// `Err("mise is not installed")` without mise; `Err("mise prune -n failed or timed
+    /// out")` on a non-zero exit or timeout.
+    pub fn mise_prune_dry_run(&self) -> Result<String, String> {
+        let mise =
+            crate::tools::tool_path("mise").ok_or_else(|| "mise is not installed".to_string())?;
+        crate::tools::run_capture_all(
+            &mise,
+            &["prune", "-n"],
+            &[("NO_COLOR", "1")],
+            Duration::from_secs(5),
+        )
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| "mise prune -n failed or timed out".to_string())
+    }
+
     pub fn get_plan(&self, id: &PlanId) -> Option<Plan> {
         lock(&self.plans).iter().find(|p| &p.id == id).cloned()
     }

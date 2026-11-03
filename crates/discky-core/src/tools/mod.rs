@@ -94,23 +94,54 @@ pub fn run_capture_env(
     envs: &[(&str, &str)],
     timeout: Duration,
 ) -> Option<String> {
+    capture(program, args, envs, timeout, false)
+}
+
+/// [`run_capture_env`], returning stdout followed by stderr (for tools such as
+/// `mise prune -n` that report on stderr).
+pub fn run_capture_all(
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> Option<String> {
+    capture(program, args, envs, timeout, true)
+}
+
+/// Drain `pipe` on a helper thread; the receiver gets `None` on a read error.
+fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<Option<Vec<u8>>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let ok = pipe.read_to_end(&mut buf).is_ok();
+        let _ = tx.send(ok.then_some(buf));
+    });
+    rx
+}
+
+fn capture(
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+    with_stderr: bool,
+) -> Option<String> {
     let deadline = Instant::now() + timeout;
     let mut cmd = Command::new(program);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(if with_stderr {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     for (k, v) in envs {
         cmd.env(k, v);
     }
     let mut child = cmd.spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let ok = stdout.read_to_end(&mut buf).is_ok();
-        let _ = tx.send(ok.then_some(buf));
-    });
+    let rx = drain(child.stdout.take()?);
+    let rx_err = child.stderr.take().map(drain);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -128,7 +159,11 @@ pub fn run_capture_env(
     // A grandchild could keep the pipe open after the child exits: wait no longer than the
     // remaining budget (at least one poll interval).
     let left = deadline.saturating_duration_since(Instant::now()).max(POLL);
-    let bytes = rx.recv_timeout(left).ok()??;
+    let mut bytes = rx.recv_timeout(left).ok()??;
+    if let Some(rx_err) = rx_err {
+        let left = deadline.saturating_duration_since(Instant::now()).max(POLL);
+        bytes.extend(rx_err.recv_timeout(left).ok()??);
+    }
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 

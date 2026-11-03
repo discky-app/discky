@@ -29,7 +29,7 @@ const SH: &str = "/bin/sh";
 /// System settings live here; deleting their domain needs root.
 const SYSTEM_PREFERENCES: &str = "/Library/Preferences";
 /// Rule id of mise version findings; a `Removal::None` one is the global version.
-const RULE_MISE_VERSION: &str = "mise-version";
+const RULE_MISE_VERSION: &str = crate::findings::mise::RULE_ID;
 /// Skip reason of a mise version that is set globally.
 pub const GLOBAL_MISE_VERSION: &str =
     "Global version — change it in ~/.config/mise/config.toml first";

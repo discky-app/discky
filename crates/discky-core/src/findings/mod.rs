@@ -1,7 +1,8 @@
 //! Findings: removable things with an honest size, a safety label and a removal method.
 //!
-//! [`Categorizer::run`] turns an [`Index`] into findings in six passes — model stores ([`models`]), rule
-//! paths/globs, installed apps and leftovers of removed ones ([`apps`]), per-app `~/Library` folders
+//! [`Categorizer::run`] turns an [`Index`] into findings in seven passes — model stores ([`models`]), rule
+//! paths/globs, installed apps and leftovers of removed ones ([`apps`]), mise language versions
+//! ([`mise`]), per-app `~/Library` folders
 //! ([`app_caches`]), project build dirs ([`builds`]), large & old ([`large_old`]). Each pass
 //! records the node of every finding it emits in a shared `claimed` set; a node is
 //! claimed when it or any ancestor is in that set (see [`is_claimed`]). Passes walk the
@@ -12,6 +13,7 @@ pub mod app_caches;
 pub mod apps;
 pub mod builds;
 pub mod large_old;
+pub mod mise;
 pub mod models;
 
 use std::collections::HashSet;
@@ -26,8 +28,8 @@ use crate::index::{Index, NodeFlags, NodeId};
 use crate::rules::{Category, Rule, RuleSet, SafetyLabel};
 
 /// Stable identifier: 16 hex chars of `xxh3_64("{kind}:{key}")`, where `kind` is
-/// `"path"`, `"ollama"`, `"hf"`, `"lmstudio"` or `"omlx"` and `key` the absolute path or
-/// model name. The same thing gets the same id across scans.
+/// `"path"`, `"ollama"`, `"hf"`, `"lmstudio"`, `"omlx"` or `"mise"` and `key` the absolute
+/// path, model name or `tool@version`. The same thing gets the same id across scans.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FindingId(pub String);
@@ -227,6 +229,14 @@ impl Categorizer<'_> {
                 let running = crate::tools::running_app_bundle_ids();
                 out.extend(apps::find(self.index, home, &mut claimed, &running));
             }
+            // After apps, before App caches: each version claims its install dir.
+            let mise_bin = crate::tools::tool_path("mise");
+            out.extend(mise::find(
+                self.index,
+                home,
+                mise_bin.as_deref(),
+                &mut claimed,
+            ));
             out.extend(app_caches::find(self.index, home, &mut claimed));
         }
         out.extend(builds::find(self.index, self.rules, home, &mut claimed));
