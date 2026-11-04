@@ -108,12 +108,16 @@ The map refuses to remove, and says why:
 
 ### Connect to your agent
 
-`discky-mcp` speaks MCP over stdio. Use the cask's symlink (`/opt/homebrew/bin/discky-mcp`) or the `cargo install` path (`~/.cargo/bin/discky-mcp`; some clients need it written out absolutely). Settings → MCP in the app shows the exact line for the binary it found.
+`discky-mcp` speaks MCP over stdio. Use the cask's symlink (`/opt/homebrew/bin/discky-mcp`), the copy inside the app (`/Applications/Discky.app/Contents/MacOS/discky-mcp`) or the `cargo install` path (`~/.cargo/bin/discky-mcp`; some clients need it written out absolutely).
+
+The easiest way: open Discky, go to Settings (⌘,) → MCP, pick your client in the tabs and copy the snippet. It is built for the `discky-mcp` the app found on this Mac (inside its own bundle first, then Homebrew, then `~/.cargo/bin`), so the path is always right.
 
 **Claude Code**
 
 ```sh
 claude mcp add discky -- /opt/homebrew/bin/discky-mcp
+# or, without Homebrew:
+claude mcp add discky -- /Applications/Discky.app/Contents/MacOS/discky-mcp
 # or, after cargo install:
 claude mcp add discky -- ~/.cargo/bin/discky-mcp
 ```
