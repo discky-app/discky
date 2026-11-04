@@ -23,7 +23,7 @@ pub struct Colors {
     pub muted: Hsla,
     pub muted_foreground: Hsla,
     danger: Hsla,
-    accent: Hsla,
+    chart_1: Hsla,
     chart_2: Hsla,
     warning: Hsla,
 }
@@ -38,7 +38,7 @@ impl Colors {
             muted: t.muted,
             muted_foreground: t.muted_foreground,
             danger: t.danger,
-            accent: t.accent,
+            chart_1: t.chart_1,
             chart_2: t.chart_2,
             warning: t.warning,
         }
@@ -58,7 +58,8 @@ impl Colors {
             Paint::Category(None) => self.muted,
             Paint::Cloud => self.background,
             Paint::NoAccess => self.danger.opacity(0.35),
-            Paint::Age(b) => sequential(self.accent, b),
+            // Not `accent`: in the dark theme it is the hover grey, too close to the seams.
+            Paint::Age(b) => sequential(self.chart_1, b),
             Paint::Files(b) => sequential(self.chart_2, b),
             Paint::Rest => self.muted.opacity(0.5),
         }

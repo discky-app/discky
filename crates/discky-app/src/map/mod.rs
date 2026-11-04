@@ -231,6 +231,8 @@ impl MapView {
         if e.click_count() >= 2 {
             if is_dir && model.enter(node) {
                 self.changed(cx);
+                // The first click of the double click inspected the folder now opened.
+                cx.emit(MapEvent::Close);
             }
             return;
         }
@@ -391,7 +393,11 @@ impl MapView {
     fn tooltip(&self, model: &MapModel, cx: &App) -> Option<impl IntoElement + use<>> {
         let (i, at) = (self.hover?, self.hover_at?);
         let tiles = self.tiles.borrow();
-        let tile = tiles.get(i)?;
+        // After a resize the tiles were laid out again under an unchanged hover: show
+        // nothing until the mouse moves rather than another tile's details.
+        let tile = tiles
+            .get(i)
+            .filter(|t| t.rect.contains(f32::from(at.x), f32::from(at.y)))?;
         let (title, rows) = model.tooltip(tile);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
