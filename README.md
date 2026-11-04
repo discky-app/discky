@@ -18,7 +18,11 @@ Discky is three parts: a Rust scanner and rule engine that says what each big th
 
 ## Why Discky
 
-A Mac fills up with things nobody remembers creating: package-manager caches, downloaded AI models, Xcode data, `node_modules` and `target` folders in old projects, files left behind by apps you deleted, VM disk images. Most disk tools show sizes that do not add up: a sparse disk image is reported at its claimed size, cloned and hard-linked files are counted twice, and iCloud files that live only in the cloud (dataless) are shown as if they took space.
+A Mac fills up with things nobody remembers creating: package-manager caches, downloaded AI models, Xcode data, `node_modules` and `target` folders in old projects, files left behind by apps you deleted, VM disk images.
+
+Two of these got much worse lately. Apps quietly download AI models you never see: a transcription app, an editor's completion feature or a chat client pulls a few gigabytes into its own corner of `~/Library` or `~/.cache`, and no Finder window ever shows them. And AI coding agents build constantly: every project they touch grows a `target`, a `node_modules`, a virtual environment, a Docker image, plus the download and build caches behind them. That is tens of gigabytes nobody asked for, spread over so many places that nobody can keep track of them by hand.
+
+Most disk tools show sizes that do not add up: a sparse disk image is reported at its claimed size, cloned and hard-linked files are counted twice, and iCloud files that live only in the cloud (dataless) are shown as if they took space.
 
 What Discky does differently:
 

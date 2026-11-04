@@ -40,9 +40,12 @@ struct Batch {
 /// The scan the duck acts out: two paper trips (2 sheets, then 3), a big subtree that
 /// earns the crate, then the scan ends while the crate is shoved in and the lid closes.
 ///
-/// Times are tuned to the walk speeds in `duck/fsm.rs`: the first pick-up happens at
-/// once (no grace), the second about 6 s in, and the third trip starts about 6.2 s in,
-/// so the big subtree has to be reported before that.
+/// Times follow the walk speeds in `duck/fsm.rs` (no grace period): the first pick-up
+/// is at once, the first throw ends about 3.1 s in, the second pick-up is about 6 s in
+/// and the crate decision is taken after the second throw, about 9.1 s in. The big
+/// subtree must therefore be reported between 3.1 s and 9.1 s; the batch at 5 s sits
+/// well inside that window. Bytes are kept small (4 KiB per file) so only the file
+/// count decides what is big. The test below asserts the resulting state sequence.
 const SCRIPT: &[Batch] = &[
     Batch {
         at: Duration::ZERO,
@@ -55,11 +58,14 @@ const SCRIPT: &[Batch] = &[
         current: "/Users/me/Library/Caches/Homebrew",
     },
     Batch {
-        at: Duration::from_millis(4_000),
+        at: Duration::from_millis(5_000),
         files: 130_000,
         current: "/Users/me/Library/Developer/Xcode/DerivedData",
     },
 ];
+
+/// Bytes per scripted file: far below `Thresholds::big_bytes` at these counts.
+const BYTES_PER_FILE: u64 = 4_096;
 
 /// Write `assets/scan.gif` and print its path.
 pub fn run(root: &Path) -> Result<(), String> {
@@ -80,15 +86,14 @@ struct GifFrame {
     delay: Duration,
 }
 
-/// Play [`SCRIPT`] on a fresh state machine and raster every frame; consecutive
-/// identical frames are merged into one with the summed delay.
-fn render() -> Vec<GifFrame> {
+/// Play [`SCRIPT`] on a fresh state machine in [`STEP`]s, calling `on_frame` after every
+/// tick, through the end of the scene and the [`HOLD`] on its last frame.
+fn play(mut on_frame: impl FnMut(&DuckFsm)) {
     let mut fsm = DuckFsm::new(Thresholds {
         grace: Duration::ZERO,
         ..Thresholds::default()
     });
     let home = Path::new(HOME);
-    let mut frames: Vec<GifFrame> = Vec::new();
     let mut t = Duration::ZERO;
     let mut next = 0;
     let mut finished = false;
@@ -98,7 +103,7 @@ fn render() -> Vec<GifFrame> {
             let p = discky_core::fs::walk::Progress {
                 files: b.files,
                 dirs: b.files / 10,
-                allocated: b.files * 65_536,
+                allocated: b.files * BYTES_PER_FILE,
                 current: Some(b.current.into()),
             };
             fsm.on_progress(&p, home);
@@ -115,8 +120,18 @@ fn render() -> Vec<GifFrame> {
             hold += STEP;
         }
         fsm.tick(STEP);
+        on_frame(&fsm);
+        t += STEP;
+    }
+}
+
+/// Raster every frame of the scripted scan; consecutive identical frames are merged
+/// into one with the summed delay.
+fn render() -> Vec<GifFrame> {
+    let mut frames: Vec<GifFrame> = Vec::new();
+    play(|fsm| {
         let mut raster = Raster::new();
-        Stage::of(&fsm, false).draw(&mut raster);
+        Stage::of(fsm, false).draw(&mut raster);
         let pixels = raster.indexed();
         match frames.last_mut() {
             Some(last) if last.pixels == pixels => last.delay += STEP,
@@ -125,8 +140,7 @@ fn render() -> Vec<GifFrame> {
                 delay: STEP,
             }),
         }
-        t += STEP;
-    }
+    });
     frames
 }
 
@@ -176,7 +190,15 @@ impl Raster {
             .collect();
         self.px
             .iter()
-            .map(|c| if c[3] == 0 { 0 } else { index[c] })
+            .map(|c| {
+                if c[3] == 0 {
+                    0
+                } else {
+                    *index
+                        .get(c)
+                        .expect("every stage colour is in the GIF palette")
+                }
+            })
             .collect()
     }
 }
@@ -230,42 +252,15 @@ mod tests {
 
     #[test]
     fn script_plays_both_paper_stacks_the_crate_and_the_closed_lid() {
-        let mut fsm = DuckFsm::new(Thresholds {
-            grace: Duration::ZERO,
-            ..Thresholds::default()
-        });
-        let home = Path::new(HOME);
         let mut seen = Vec::new();
-        let mut t = Duration::ZERO;
-        let mut next = 0;
-        let mut finished = false;
-        for _ in 0..MAX_FRAMES {
-            while let Some(b) = SCRIPT.get(next).filter(|b| b.at <= t) {
-                let p = discky_core::fs::walk::Progress {
-                    files: b.files,
-                    current: Some(b.current.into()),
-                    ..Default::default()
-                };
-                fsm.on_progress(&p, home);
-                next += 1;
-            }
-            if fsm.state == State::Shove && !finished {
-                fsm.on_finished();
-                finished = true;
-            }
+        play(|fsm| {
             if seen.last() != Some(&fsm.state) {
                 seen.push(fsm.state);
             }
-            if fsm.state == State::Done {
-                break;
-            }
-            fsm.tick(STEP);
-            t += STEP;
-        }
+        });
         assert_eq!(
             seen,
             [
-                State::Hidden,
                 State::WalkBack { stack: 2 },
                 State::Throw,
                 State::WalkOut,

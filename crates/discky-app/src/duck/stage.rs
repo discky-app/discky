@@ -200,23 +200,68 @@ mod tests {
     }
 
     #[test]
-    fn walk_back_draws_ground_bin_duck_and_stack() {
+    fn walk_back_draws_ground_bin_duck_and_stack_back_to_front() {
         let fsm = started(no_big(), 5_000);
         assert!(matches!(fsm.state, State::WalkBack { stack: 2 }));
         let stage = Stage::of(&fsm, false);
         let mut log = Log::default();
         stage.draw(&mut log);
-        assert_eq!(log.rects[0], (0., GROUND_Y, STAGE_W, 1., Paint::Ground));
-        assert_eq!(log.rects[1].4, Paint::Shadow);
-        assert_eq!(log.rects.len(), 2, "no rope while carrying papers");
-        let bin = log.sprites.iter().find(|s| *s.2 == BIN_OPEN);
-        assert_eq!(bin.map(|s| s.0), Some(BIN_X * STAGE_W));
-        assert!(
-            log.sprites.iter().any(|s| *s.2 == STACK[1]),
-            "the 2-sheet stack rides on the duck"
+        assert_eq!(
+            log.rects,
+            [
+                (0., GROUND_Y, STAGE_W, 1., Paint::Ground),
+                (404., 130., 72., 4., Paint::Shadow),
+            ],
+            "ground, then the bin's shadow; no rope while carrying papers"
         );
-        let duck = log.sprites.iter().find(|s| std::ptr::eq(s.2, stage.duck));
-        assert_eq!(duck.map(|s| s.3), Some(false), "walking right, not flipped");
+        let duck_left = stage.x * STAGE_W - 64.;
+        assert_eq!(
+            log.sprites,
+            [
+                (408., 52., &BIN_OPEN, false),
+                (duck_left, 68., stage.duck, false),
+                (duck_left, 48., &STACK[1], false),
+            ],
+            "bin, then the duck walking right, then the 2-sheet stack over its back"
+        );
+    }
+
+    #[test]
+    fn shove_drops_the_crate_behind_the_bin() {
+        let th = Thresholds {
+            big_files: 1,
+            ..no_big()
+        };
+        let mut fsm = started(th, 5_000);
+        for _ in 0..1_000 {
+            if fsm.state == State::Shove {
+                break;
+            }
+            fsm.tick(Duration::from_millis(10));
+        }
+        assert_eq!((fsm.state, fsm.frame), (State::Shove, 0));
+        let stage = Stage::of(&fsm, false);
+        assert!(!stage.rope, "no rope once the crate is at the bin");
+        let mut log = Log::default();
+        stage.draw(&mut log);
+        let duck_left = BIN_X * STAGE_W - 64.;
+        assert_eq!(
+            log.sprites,
+            [
+                (416., 48., &BLOCK, false),
+                (408., 52., &BIN_OPEN, false),
+                (duck_left, 68., stage.duck, false),
+            ],
+            "the crate is painted first so the bin's body hides it as it sinks"
+        );
+        fsm.tick(Duration::from_millis(210));
+        assert_eq!(fsm.frame, 1);
+        let mut later = Log::default();
+        Stage::of(&fsm, false).draw(&mut later);
+        assert_eq!(
+            later.sprites[0].1, 60.,
+            "the crate sinks 12 px per shove frame"
+        );
     }
 
     #[test]
