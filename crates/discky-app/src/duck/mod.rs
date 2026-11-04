@@ -6,6 +6,7 @@
 
 pub mod fsm;
 pub mod sprites;
+pub mod stage;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -17,24 +18,14 @@ use gpui_kit::*;
 
 use crate::format;
 use crate::scan::ScanMsg;
-use fsm::{BIN_X, DuckFsm, State, Thresholds};
-use sprites::{BIN_CLOSED, BIN_OPEN, BLOCK, LOGO, Pose, STACK, Sprite, frames};
+use fsm::{DuckFsm, State, Thresholds};
+use sprites::{LOGO, Sprite};
+use stage::{Canvas, Paint, SCALE, STAGE_H, STAGE_W, Stage};
 
-/// Logical pixels per sprite pixel on the stage.
-const SCALE: f32 = 4.;
-/// Stage size in logical pixels.
-const STAGE_W: f32 = 480.;
-const STAGE_H: f32 = 140.;
-/// The ground line's top, from the stage's top.
-const GROUND_Y: f32 = 132.;
 /// Longest frame step: a window that was in the background does not jump.
 const MAX_DT: Duration = Duration::from_millis(250);
 /// The longest scan path shown under the stage, in characters.
 const PATH_CHARS: usize = 60;
-/// Where the duck stands with reduced motion, in stage units.
-const STILL_X: f32 = BIN_X - 0.15;
-/// Gap between the dragged crate and the duck, in sprite pixels.
-const ROPE_LEN: f32 = 6.;
 
 /// The scan scene: the duck carries paper stacks (or drags a crate for a big subtree)
 /// into the bin while a scan runs. An entity owned by the Overview; one per scan.
@@ -145,9 +136,10 @@ impl Render for DuckScene {
             cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
         let visible = self.fsm.visible();
-        let stage = Stage::of(&self.fsm, reduce_motion, cx);
+        let stage = Stage::of(&self.fsm, reduce_motion);
         let (totals, path) = self.progress_line();
         let theme = cx.theme();
+        let (ground, shadow) = (theme.border, theme.muted);
         let muted = theme.muted_foreground;
         let mono = theme.mono_font_family.clone();
         div().when(visible, |this| {
@@ -157,7 +149,9 @@ impl Render for DuckScene {
                     .child(
                         canvas(
                             |_, _, _| (),
-                            move |bounds, _, window, _| stage.paint(bounds, window),
+                            move |bounds, _, window, _| {
+                                paint_stage(stage, bounds, ground, shadow, window)
+                            },
                         )
                         .w(px(STAGE_W))
                         .h(px(STAGE_H)),
@@ -179,151 +173,51 @@ impl Render for DuckScene {
     }
 }
 
-/// One frame of the stage, captured for the canvas's paint closure.
-#[derive(Clone, Copy)]
-struct Stage {
-    duck: &'static Sprite,
-    /// The duck faces left (sprites face right).
-    flip: bool,
-    /// The duck's position in stage units, see [`fsm::DuckFsm::x`].
-    x: f32,
-    /// Paper sheets in hand or in flight (0 = none).
-    stack: u8,
-    /// The papers fly into the bin rather than ride on the duck.
-    throwing: bool,
-    /// The crate is on a rope behind the duck.
-    rope: bool,
-    /// The crate drops into the bin; the value is the shove frame.
-    shove: Option<usize>,
-    bin_open: bool,
+/// A GPUI window as the stage's canvas: theme colours for the ground and the shadow,
+/// every rectangle snapped to device pixels.
+struct GpuiCanvas<'a> {
+    window: &'a mut Window,
+    origin: Point<Pixels>,
     ground: Hsla,
     shadow: Hsla,
 }
 
-impl Stage {
-    /// The frame `fsm` shows now; a still duck by the open bin with reduced motion.
-    fn of(fsm: &DuckFsm, reduce_motion: bool, cx: &App) -> Stage {
-        let theme = cx.theme();
-        let (ground, shadow) = (theme.border, theme.muted);
-        if reduce_motion {
-            return Stage {
-                duck: &frames(Pose::Stand)[0],
-                flip: false,
-                x: STILL_X,
-                stack: 0,
-                throwing: false,
-                rope: false,
-                shove: None,
-                bin_open: true,
-                ground,
-                shadow,
-            };
-        }
-        let pose = fsm.pose();
-        let poses = frames(pose);
-        Stage {
-            duck: &poses[fsm.frame.min(poses.len() - 1)],
-            flip: matches!(fsm.state, State::WalkOut | State::DragOut),
-            x: fsm.x,
-            stack: fsm.stack(),
-            throwing: fsm.state == State::Throw,
-            rope: fsm.dragging() && fsm.state == State::DragBack,
-            shove: (fsm.state == State::Shove).then_some(fsm.frame),
-            bin_open: fsm.bin_open,
+impl Canvas for GpuiCanvas<'_> {
+    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: Paint) {
+        let color = match paint {
+            Paint::Ground => self.ground,
+            Paint::Shadow => self.shadow,
+            Paint::Rgba(c) => to_hsla(c),
+        };
+        let at = point(self.origin.x + px(x), self.origin.y + px(y));
+        let quad = snapped(at, w, h, 1., self.window.scale_factor());
+        self.window.paint_quad(fill(quad, color));
+    }
+
+    fn sprite(&mut self, x: f32, y: f32, sprite: &'static Sprite, flip_x: bool) {
+        let at = point(self.origin.x + px(x), self.origin.y + px(y));
+        paint_sprite(self.window, at, SCALE, sprite, flip_x);
+    }
+}
+
+/// Paint `stage` into `bounds` (clipped to it: the duck walks in from off-stage).
+fn paint_stage(
+    stage: Stage,
+    bounds: Bounds<Pixels>,
+    ground: Hsla,
+    shadow: Hsla,
+    window: &mut Window,
+) {
+    let mask = ContentMask { bounds };
+    window.with_content_mask(Some(mask), |window| {
+        let mut canvas = GpuiCanvas {
+            window,
+            origin: bounds.origin,
             ground,
             shadow,
-        }
-    }
-
-    /// Paint the stage into `bounds` (clipped to it: the duck walks in from off-stage).
-    fn paint(self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let mask = ContentMask { bounds };
-        window.with_content_mask(Some(mask), |window| self.paint_clipped(bounds, window));
-    }
-
-    fn paint_clipped(self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let o = bounds.origin;
-        let at = |x: f32, y: f32| point(o.x + px(x), o.y + px(y));
-        let w = bounds.size.width;
-        // Ground line and the bin's shadow.
-        window.paint_quad(fill(
-            Bounds::new(at(0., GROUND_Y), size(w, px(1.))),
-            self.ground,
-        ));
-        let bin_x = BIN_X * STAGE_W;
-        let bin_h = BIN_OPEN.h as f32 * SCALE;
-        let bin_top = GROUND_Y - bin_h;
-        window.paint_quad(fill(
-            Bounds::new(
-                at(bin_x - SCALE, GROUND_Y - SCALE / 2.),
-                size(px(BIN_OPEN.w as f32 * SCALE + 2. * SCALE), px(SCALE)),
-            ),
-            self.shadow,
-        ));
-        // The bin's rim row: papers and the crate sink in behind its body.
-        let rim = bin_top + 8. * SCALE;
-        let bin_mid = bin_x + BIN_OPEN.w as f32 * SCALE / 2.;
-        if let Some(frame) = self.shove {
-            let side = BLOCK.w as f32 * SCALE;
-            let y = rim - side + (frame as f32 + 1.) * side / 4.;
-            paint_sprite(window, at(bin_mid - side / 2., y), SCALE, &BLOCK, false);
-        }
-        let stack = usize::from(self.stack.min(3))
-            .checked_sub(1)
-            .map(|i| &STACK[i]);
-        let duck_w = self.duck.w as f32 * SCALE;
-        let duck_left = self.x * STAGE_W - duck_w;
-        let duck_top = GROUND_Y - self.duck.h as f32 * SCALE;
-        if let (Some(s), true) = (stack, self.throwing) {
-            let sw = s.w as f32 * SCALE;
-            let y = rim - s.h as f32 * SCALE / 2.;
-            paint_sprite(window, at(bin_mid - sw / 2., y), SCALE, s, false);
-        }
-        let bin = if self.bin_open {
-            &BIN_OPEN
-        } else {
-            &BIN_CLOSED
         };
-        paint_sprite(window, at(bin_x, bin_top), SCALE, bin, false);
-        if self.rope {
-            let side = BLOCK.w as f32 * SCALE;
-            let block_right = duck_left - ROPE_LEN * SCALE;
-            paint_sprite(
-                window,
-                at(block_right - side, GROUND_Y - side),
-                SCALE,
-                &BLOCK,
-                false,
-            );
-            // The rope leaves the sprite's left edge on its first 'r' row.
-            let row = self
-                .duck
-                .rows
-                .iter()
-                .position(|r| r.starts_with('r'))
-                .unwrap_or(7);
-            if let Some(c) = sprites::color('r') {
-                let y = duck_top + row as f32 * SCALE;
-                window.paint_quad(fill(
-                    snapped(
-                        at(block_right, y),
-                        ROPE_LEN,
-                        1.,
-                        SCALE,
-                        window.scale_factor(),
-                    ),
-                    to_hsla(c),
-                ));
-            }
-        }
-        paint_sprite(window, at(duck_left, duck_top), SCALE, self.duck, self.flip);
-        if let (Some(s), false) = (stack, self.throwing) {
-            // Held up over the back: columns 0..8 of the right-facing sprite.
-            let col = if self.flip { 8. } else { 0. };
-            let y = duck_top - s.h as f32 * SCALE;
-            paint_sprite(window, at(duck_left + col * SCALE, y), SCALE, s, self.flip);
-        }
-    }
+        stage.draw(&mut canvas);
+    });
 }
 
 /// Paint `sprite` with its top-left corner at `origin`, `scale` logical pixels per
