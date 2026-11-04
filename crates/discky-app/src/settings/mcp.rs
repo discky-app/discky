@@ -24,7 +24,7 @@ impl SettingsView {
         let config = Self::config(cx);
         let binary: SharedString = match &self.mcp_binary {
             Some(p) => format!("{} found", format::home_relative(p, &self.home)).into(),
-            None => "not found · cargo install --path crates/discky-mcp".into(),
+            None => "not found · brew install --cask AlxGolubev/discky/discky or cargo install --path crates/discky-mcp".into(),
         };
         let bin = self
             .mcp_binary

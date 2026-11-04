@@ -42,7 +42,15 @@ What Discky does differently:
 
 Discky needs macOS 15 or newer (Apple Silicon or Intel, APFS). Building from source needs the Rust toolchain; `rust-toolchain.toml` pins Rust 1.99, and `rustup` picks it up on its own.
 
-### Discky.app
+### Homebrew
+
+```sh
+brew install --cask --no-quarantine AlxGolubev/discky/discky
+```
+
+This installs `/Applications/Discky.app` and symlinks `discky-mcp` into Homebrew's `bin`. `--no-quarantine` is there because the app is not notarized (there is no paid Apple account), and macOS would otherwise refuse to open it until you allow it in Privacy & Security. Upgrade with `brew upgrade --cask discky`. Builds are ad-hoc signed until the release workflow has a certificate, so macOS asks for Full Disk Access again after an update.
+
+### From source
 
 ```sh
 git clone https://github.com/AlxGolubev/discky
@@ -52,27 +60,15 @@ cargo xtask install
 
 This builds a release `target/Discky.app`, signs it and copies it to `/Applications/Discky.app`. `cargo xtask bundle` stops after signing; `cargo xtask icon` regenerates `assets/AppIcon.icns` and `assets/logo.png` from the pixel logo.
 
+`discky-mcp` is inside the bundle at `/Applications/Discky.app/Contents/MacOS/discky-mcp`; Settings → MCP shows the exact `claude mcp add` line. For the server alone: `cargo install --path crates/discky-mcp`.
+
 Signing needs a stable identity, so that Full Disk Access survives rebuilds (macOS ties the grant to the signature). `xtask` picks the first `Apple Development` or `Developer ID Application` identity in your keychain; set `DISCKY_SIGN_IDENTITY="<name or SHA-1>"` to choose another. Without one it stops and explains how to create a self-signed Code Signing certificate in Keychain Access. `DISCKY_SIGN_IDENTITY=-` signs ad-hoc: fine for a quick try, but Full Disk Access has to be granted again after every rebuild.
 
-**Full Disk Access.** Without it macOS hides parts of `~/Library` (Mail, Safari, other apps' containers) from the scan. Grant it in System Settings → Privacy & Security → Full Disk Access (add Discky with `+`), then rescan.
+### Full Disk Access
 
-A Homebrew cask is coming once the repo is public.
+Without it macOS hides parts of `~/Library` (Mail, Safari, other apps' containers) from the scan. The first launch asks for it on the Overview and opens the right System Settings pane; after granting, press Relaunch Discky. To do it by hand: System Settings → Privacy & Security → Full Disk Access (add Discky with `+`), then rescan.
 
-### discky-mcp (the MCP server)
-
-From source:
-
-```sh
-git clone https://github.com/AlxGolubev/discky
-cd discky
-cargo install --path crates/discky-mcp
-```
-
-This installs `~/.cargo/bin/discky-mcp`.
-
-Homebrew: a formula stub lives in [`packaging/homebrew/discky-mcp.rb`](packaging/homebrew/discky-mcp.rb); the tap is coming once the repo is public.
-
-Build `discky-mcp` and Discky.app from the same version. They share the snapshot file, and each ignores a snapshot in another format.
+Build `discky-mcp` and Discky.app from the same version (the cask does this for you). They share the snapshot file, and each ignores a snapshot in another format.
 
 ## Use the app
 
@@ -112,7 +108,7 @@ The map refuses to remove, and says why:
 
 ### Connect to your agent
 
-`discky-mcp` speaks MCP over stdio. Use the Homebrew path (`/opt/homebrew/bin/discky-mcp`) or the `cargo install` path (`~/.cargo/bin/discky-mcp`; some clients need it written out absolutely).
+`discky-mcp` speaks MCP over stdio. Use the cask's symlink (`/opt/homebrew/bin/discky-mcp`, `/usr/local/bin` on Intel) or the `cargo install` path (`~/.cargo/bin/discky-mcp`; some clients need it written out absolutely). Settings → MCP in the app shows the exact line for the binary it found.
 
 **Claude Code**
 
