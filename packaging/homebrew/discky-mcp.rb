@@ -1,13 +1,13 @@
 # Homebrew formula stub for discky-mcp.
 #
-# Untestable until the repository is public: OWNER is a placeholder for the GitHub
-# handle, and the tarball URL and sha256 below do not exist yet.
+# Untestable until the repository is public: the tarball URL and sha256 below do not
+# exist yet.
 # Covers the MCP server only; Discky.app is built with `cargo xtask install` (see README).
-# TODO: set OWNER, then fill sha256 after the first tag (v0.1.0).
+# TODO: fill sha256 after the first tag (v0.1.0).
 class DisckyMcp < Formula
   desc "MCP server that lets AI agents find and safely clear disk space on macOS"
-  homepage "https://github.com/OWNER/discky"
-  url "https://github.com/OWNER/discky/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/alxgol/discky"
+  url "https://github.com/alxgol/discky/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "TODO: fill after first tag"
   license "MIT"
 

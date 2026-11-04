@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Discky nightly report: runs nightly-report.sh every day at 09:00.
+  launchd does not expand ~ or $HOME here: replace /Users/you with your home folder
+  (both paths below). See nightly-report.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.discky.nightly-report</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/you/Library/Scripts/Discky/nightly-report.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- Errors before the script's own log starts (wrong path, bad permissions). -->
+  <key>StandardErrorPath</key>
+  <string>/Users/you/Library/Logs/Discky/nightly-report.launchd.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

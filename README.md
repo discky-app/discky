@@ -1,16 +1,52 @@
-# Discky
+<p align="center"><img src="assets/logo.png" width="160" alt="Discky, a pixel robo-duck"></p>
 
-![Discky](assets/logo.png)
+<h1 align="center">Discky</h1>
 
-Discky finds what is eating your Mac's disk and lets an AI agent clear it safely: a Rust scanner, a rule-based "what is this and is it safe to remove" engine, and an MCP server.
+<p align="center">Find what is eating your Mac's disk and clear it safely, by hand or through an AI agent.</p>
 
-## Status
+<p align="center">
+  <a href="https://github.com/alxgol/discky/stargazers"><img src="https://img.shields.io/github/stars/alxgol/discky?style=flat&logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/alxgol/discky/actions/workflows/ci.yml"><img src="https://github.com/alxgol/discky/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/macOS-15%2B-lightgrey?logo=apple" alt="macOS 15+">
+  <img src="https://img.shields.io/badge/Rust-1.99-orange?logo=rust" alt="Rust 1.99">
+</p>
 
-Milestone 3: app uninstaller and mise versions, on top of Discky.app (Overview, categories, inspector, removal, settings) and the MCP server. Requires macOS 15 or newer (Apple Silicon or Intel, APFS).
+Discky is three parts: a Rust scanner and rule engine that says what each big thing on your disk is and whether it is safe to remove, a desktop app (`Discky.app`), and an MCP server (`discky-mcp`) so an AI agent can do the same work in a chat.
 
-## Build the app
+## Why Discky
+
+A Mac fills up with things nobody remembers creating: package-manager caches, downloaded AI models, Xcode data, `node_modules` and `target` folders in old projects, files left behind by apps you deleted, VM disk images. Most disk tools show sizes that do not add up: a sparse disk image is reported at its claimed size, cloned and hard-linked files are counted twice, and iCloud files that live only in the cloud (dataless) are shown as if they took space.
+
+What Discky does differently:
+
+- **Honest bytes.** Every size is bytes allocated on disk. Discky tracks the claimed (logical) size separately, flags sparse files, and knows which blocks are shared by APFS clones and hard links, so "frees if deleted" is what removing an item really frees. Dataless iCloud files count as zero on disk.
+- **Explained findings.** Each finding comes from a rule with a category, a safety label (`regenerates`, `app_data`, `do_not_touch`, …) and a plain-language explanation.
+- **Official removal only.** Where a tool owns the data, Discky runs that tool: `cargo cache --autoclean`, `npm cache clean --force`, `brew cleanup`, `brew uninstall --cask`, `mise uninstall`, Ollama's own delete API, `hf cache rm`, `docker system prune`, and so on. Everything else goes to the Trash (or is deleted, if you choose). A failed command stops the plan; there is no fallback to `rm`.
+- **Agent-ready.** `discky-mcp` exposes the scanner, findings, planner and executor as ten MCP tools. Deletion by an agent is off until you turn it on.
+- **Local only, no telemetry.** Nothing leaves your Mac. The only network calls are to a local Ollama server, when you have one, to list and delete models.
+
+## What it finds
+
+| Category | What is in it |
+| --- | --- |
+| Applications | Installed apps (Homebrew casks, App Store, installer packages, dragged-in bundles) with their last use and the files they left in `~/Library` and `/Library`, plus leftovers of apps that are already gone. |
+| App caches | App caches and update downloads (Slack, VS Code, Google Drive, Claude Desktop VM images), plus app data that is shown but never removed (Chrome profile, Keychains, Mail, Messages, Photos, iCloud Drive, cloud storage). |
+| Models | AI models from Ollama, the Hugging Face hub, LM Studio, oMLX and MacWhisper. |
+| Dev caches | Package and build caches: Cargo, npm, pnpm, Yarn, pip, uv, Go, CocoaPods, SwiftPM, Gradle, Homebrew, Xcode, iOS Simulator, Docker and OrbStack disk images, and more. |
+| Project builds | Rebuildable folders inside projects: Rust `target`, `node_modules`, Python virtual environments, Next.js, Gradle and `dist` output. |
+| Language versions | Tool versions installed by mise, with which ones are global or used by a project. |
+| Large & old | What no other rule claimed in your home folder (outside `~/Library`): files over 500 MB, folders not changed for a year (both configurable), and everything in `~/Downloads`. |
+
+## Install
+
+Discky needs macOS 15 or newer (Apple Silicon or Intel, APFS). Building from source needs the Rust toolchain; `rust-toolchain.toml` pins Rust 1.99, and `rustup` picks it up on its own.
+
+### Discky.app
 
 ```sh
+git clone https://github.com/alxgol/discky
+cd discky
 cargo xtask install
 ```
 
@@ -20,29 +56,60 @@ Signing needs a stable identity, so that Full Disk Access survives rebuilds (mac
 
 **Full Disk Access.** Without it macOS hides parts of `~/Library` (Mail, Safari, other apps' containers) from the scan. Grant it in System Settings → Privacy & Security → Full Disk Access (add Discky with `+`), then rescan.
 
-**Applications and Language versions.** Applications lists installed apps (Homebrew casks, App Store, installer packages and dragged-in bundles) with their last use and the files they left in `~/Library` and `/Library`, plus leftovers of apps that are already gone. Language versions lists the tool versions mise installed, with which ones are global or used by a project. The inspector shows each removable part of an app (bundle, caches, settings, launch agents, package receipts…) as a checkbox: uncheck a leftover to keep it. An app is removed only through official mechanisms: its vendor's uninstaller script first when it ships one and you check it (it runs as you from the app, never with administrator rights, and may ask for a password itself), then `brew uninstall --cask` (with `--zap` only when every path the cask's zap stanza removes is listed and checked), the installer package's file list, or the Trash; a language version through `mise uninstall`. Keychain items are never touched.
+A Homebrew cask is coming once the repo is public.
 
-**Automation prompt.** Some removals go through Apple Events: Finder moves admin-owned items to the Trash, apps are asked to quit before their files are removed, and Empty Trash asks Finder. The first time, macOS asks whether Discky may control Finder (or that app); allow it, or those steps fail. The choice can be changed in System Settings → Privacy & Security → Automation. System-level steps such as `pkgutil --forget` and `launchctl bootout system` show an administrator password prompt instead; cancelling it stops the removal at that step.
+### discky-mcp (the MCP server)
 
-**Quitting during a removal.** ⌘Q and closing the window are refused with a notification while a removal runs; quitting from the Dock or logging out interrupts the running step and the log records it (`"kind": "interrupted"`). The next scan shows what is left.
-
-**Upgrading from an earlier milestone.** The snapshot format changed (now format 3): an older `snapshot.bin` is ignored, so the first launch shows "No scan yet" until you rescan. Build `discky-mcp` and Discky.app from the same milestone; they share the snapshot file, and each ignores a snapshot in the other's format.
-
-## Install the MCP server
-
-From source (Rust toolchain required):
+From source:
 
 ```sh
-git clone https://github.com/OWNER/discky   # placeholder: the repo is not public yet
+git clone https://github.com/alxgol/discky
 cd discky
 cargo install --path crates/discky-mcp
 ```
 
 This installs `~/.cargo/bin/discky-mcp`.
 
-Homebrew: a formula stub lives in `packaging/homebrew/discky-mcp.rb`; the tap is coming once the repo is public.
+Homebrew: a formula stub lives in [`packaging/homebrew/discky-mcp.rb`](packaging/homebrew/discky-mcp.rb); the tap is coming once the repo is public.
 
-## Connect to your agent
+Build `discky-mcp` and Discky.app from the same version. They share the snapshot file, and each ignores a snapshot in another format.
+
+## Use the app
+
+**Overview** shows the volume, how much each category takes and how much is safe to free. **Scan now** (⌘R) rescans the configured roots.
+
+**Categories.** Each of the seven categories in the sidebar lists its findings, largest first. Select a row to open the **inspector**: what the thing is, its sizes, the rule that matched and, before you remove anything, the exact steps the removal would run. Check rows (Space) and press Remove (⌫) to open the **removal dialog**, which lists every step and how much it frees; nothing runs until you press Run. Settings (⌘,) → Removal chooses between moving to the Trash (the default) and deleting permanently, and whether to remind you to empty the Trash.
+
+**Applications and Language versions.** The inspector shows each removable part of an app (bundle, caches, settings, launch agents, package receipts…) as a checkbox: uncheck a leftover to keep it. An app is removed only through official mechanisms: its vendor's uninstaller script first when it ships one and you check it (it runs as you from the app, never with administrator rights, and may ask for a password itself), then `brew uninstall --cask` (with `--zap` only when every path the cask's zap stanza removes is listed and checked), the installer package's file list, or the Trash; a language version through `mise uninstall`. Keychain items are never touched. mise is the only version manager supported today.
+
+### Disk map
+
+**Disk map** in the sidebar draws the last scan as a treemap: each tile is a folder or file, sized by its bytes.
+
+- **Colour:** *Category* (the finding the tile belongs to, grey when none), *Age* (time since the newest change inside: under a month, six months, a year, two years, older, unknown) or *Files* (how many files it holds).
+- **Weight:** *On disk* (allocated bytes; dataless iCloud files weigh nothing) or *Claimed* (logical size; dataless files appear as dashed tiles labelled "in the cloud"). Hard-link duplicates count once. Sparse files get a warning border and "· sparse".
+- **Depth:** 1 to 4 levels of nested tiles (default 3); ⌘] adds a level, ⌘[ removes one. Small items are merged into one "N more" tile.
+- **Navigate:** hover for a tooltip (on disk, claimed, files, modified, category, flags); double-click a folder to open it; ⌘↑ or the breadcrumbs to go back up.
+- **Click** a tile to open it in the inspector. A tile that is a finding opens that finding. Any other path shows its sizes, **Show in Finder**, **Show in {category}** when a finding owns it, and **Move to Trash…** or **Delete permanently…** (by your removal setting). A removed tile disappears from the map until the next scan.
+
+The map refuses to remove, and says why:
+
+- a scan root;
+- an iCloud file that is only in the cloud;
+- a protected location: `~/Library` itself, anything in `~/Library/Keychains`, `~/Library/Mobile Documents`, `~/Library/CloudStorage` or `~/Library/Preferences`, `/Library/Keychains`, `/System`, or a folder that contains one of these;
+- anything inside, or containing, a finding that an official command removes ("Managed by Dev caches; remove it from there"). Use **Show in {category}** to remove it the proper way.
+
+### Prompts, quitting and upgrading
+
+**Automation prompt.** Some removals go through Apple Events: Finder moves admin-owned items to the Trash, apps are asked to quit before their files are removed, and Empty Trash asks Finder. The first time, macOS asks whether Discky may control Finder (or that app); allow it, or those steps fail. The choice can be changed in System Settings → Privacy & Security → Automation. System-level steps such as `pkgutil --forget` and `launchctl bootout system` show an administrator password prompt instead; cancelling it stops the removal at that step.
+
+**Quitting during a removal.** ⌘Q and closing the window are refused with a notification while a removal runs; quitting from the Dock or logging out interrupts the running step and the log records it (`"kind": "interrupted"`). The next scan shows what is left.
+
+**Upgrading.** When the snapshot format changes (it is format 3 now), an older `snapshot.bin` is ignored, so the first launch shows "No scan yet" until you rescan.
+
+## For agents (MCP)
+
+### Connect to your agent
 
 `discky-mcp` speaks MCP over stdio. Use the Homebrew path (`/opt/homebrew/bin/discky-mcp`) or the `cargo install` path (`~/.cargo/bin/discky-mcp`; some clients need it written out absolutely).
 
@@ -89,7 +156,7 @@ Applications and Language versions findings list their removable parts as `compo
 
 Optional flags: `--home <dir>` (sets `DISCKY_HOME`) and `--log-level <filter>` (stderr logs, default `warn`).
 
-## Tools
+### Tools
 
 | Tool | What it does | Side effects |
 | --- | --- | --- |
@@ -103,6 +170,22 @@ Optional flags: `--home <dir>` (sets `DISCKY_HOME`) and `--log-level <filter>` (
 | `plan_removal` | Plans the removal of the given findings (optionally only chosen `components` of an app or language version) and returns the ordered steps and the bytes they free. | Removes nothing |
 | `execute_plan` | Runs a plan from `plan_removal` (moving items to the Trash or deleting them, per the user's settings). Refused unless the user enabled agent deletion in Discky settings; steps needing an admin prompt are skipped. | **Deletes files** |
 | `history` | Removals Discky has run, newest first, and the items it moved to the Trash that are still there. | None |
+
+### A typical conversation
+
+1. `disk_overview` to see whether the snapshot is stale; if it is, `scan` with `wait_seconds` (at most 60), then `scan_status` until it is done.
+2. `findings`, for example `label: "regenerates"` and `min_bytes` to list what is safe and big.
+3. `inspect` a finding to explain it to you and list its components.
+4. `plan_removal` with the ids you agreed on. The agent shows you the steps and the bytes they free.
+5. `execute_plan` with the plan id, only after you say yes, and only if you set `allow_agent_delete = true` (see [Safety model](#safety-model)).
+
+Under MCP, steps that need an administrator password or quit a running app are skipped and reported; run them from Discky.app. Removing arbitrary paths (the disk map) is only in the app; agents remove findings.
+
+## Automate a nightly report
+
+A scheduled agent can tell you every morning what could be cleaned, without cleaning anything. It has to run on your Mac: a cloud routine cannot see your disk.
+
+[`docs/automation/`](docs/automation/nightly-report.md) has a worked example: a `launchd` agent runs [`nightly-report.sh`](docs/automation/nightly-report.sh) at 09:00. The script runs `claude -p` with `--mcp-config` pointing at `discky-mcp` and an allow-list of only `mcp__discky__scan`, `mcp__discky__scan_status`, `mcp__discky__disk_overview`, `mcp__discky__findings` and `Bash(osascript:*)`. It asks Claude to scan, then report the five largest safe-to-remove findings over 1 GB, and to post the summary as a macOS notification titled "Discky". It never plans or executes a removal: the report says what *can* be cleaned, and you decide in the app or in a chat. For Slack instead of a notification, connect a Slack MCP server and replace the `osascript` instruction and allow-list entry with its send-message tool.
 
 ## Safety model
 
@@ -152,7 +235,7 @@ allow_agent_delete = false
 
 ## How rules work
 
-Findings come from declarative rules in `crates/discky-core/src/rules/builtin.toml`. Each rule has a category (`dev_caches`, `models`, `project_builds`, `app_caches`), a safety label (`regenerates`, `app_data`, `do_not_touch`), a plain-language explanation, a matcher (`path`, `glob` or `build_dir`) and, optionally, the official command that removes it:
+Most findings come from declarative rules in [`crates/discky-core/src/rules/builtin.toml`](crates/discky-core/src/rules/builtin.toml). Each rule has a category (`dev_caches`, `models`, `project_builds`, `app_caches`), a safety label (`regenerates`, `app_data`, `do_not_touch`), a plain-language explanation, a matcher (`path`, `glob` or `build_dir`) and, optionally, the official command that removes it:
 
 ```toml
 [[rule]]
@@ -184,35 +267,11 @@ Measured on 2026-11-03 on an Apple Silicon Mac, macOS 26.2, APFS, release build,
 
 Memory is above the 1 GiB target: a full scan of about 4.8M nodes peaks at roughly 1.24 GiB resident. Throughput is bound by a few very large directories, not by CPU (most of the time is system time in the kernel).
 
-## Development
+## Contributing
 
-```sh
-cargo test --workspace
-```
+Bug reports, new rules and pull requests are welcome. Before a PR, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. Tests never touch your real home folder or Trash.
 
-Three tests are `#[ignore]`d because they touch the real machine; run them in release mode:
-
-```sh
-cargo test -p discky-core --release --test walk -- --ignored home_scan_throughput --nocapture   # scans $HOME
-cargo test -p discky-core --release --test findings -- --ignored --nocapture                   # categorizes $HOME
-cargo test -p discky-core --release --test models -- --ignored --nocapture                     # needs Ollama installed
-```
-
-A hidden flag runs one scan of the configured roots and prints the node count, duration and peak RSS:
-
-```sh
-cargo run --release -p discky-mcp -- --self-test-scan
-```
-
-Debug builds of the app read a few `DISCKY_START_*` variables so a screen can be opened without clicking: `DISCKY_START_ROUTE` (`overview`, `settings` or a category), `DISCKY_START_SETTINGS` (a settings page), `DISCKY_START_INSPECT` (a finding) and `DISCKY_START_REMOVE` (findings for the removal dialog). Release builds ignore them.
-
-```sh
-DISCKY_START_ROUTE=dev_caches cargo run -p discky-app
-```
-
-Three removal routes use Apple Events from child `osascript` processes: the Finder Trash route for admin-owned items, Quit steps, and Empty Trash. macOS grants Automation to the signed bundle, not to `cargo run`, so check all three on the signed `Discky.app` (`cargo xtask bundle`) after changing them or `packaging/macos/Info.plist` (`NSAppleEventsUsageDescription`).
-
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the toolchain, test rules, how to add a rule and the PR checklist. Other version managers (asdf, pyenv, nvm, …): open an issue.
 
 ## License
 
