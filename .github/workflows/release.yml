@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      P12: ${{ secrets.MACOS_SIGN_P12 }}
+      P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      # Honors rust-toolchain.toml (pinned channel, rustfmt + clippy).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Version guard
+        run: |
+          VERSION=$(cargo xtask version)
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match crates/discky-app/Cargo.toml version $VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Signing identity (Apple Development)
+        if: env.P12 != ''
+        run: |
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
+          security create-keychain -p "" build.keychain
+          security set-keychain-settings -lut 3600 build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import "$RUNNER_TEMP/sign.p12" -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/sign.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain > /dev/null
+          security list-keychains -d user -s build.keychain login.keychain
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain | awk 'NR==1{print $2}')
+          if ! printf '%s' "$IDENTITY" | grep -Eq '^[0-9A-F]{40}$'; then
+            echo "::error::No valid codesigning identity in MACOS_SIGN_P12 (expected an Apple Development certificate with its private key)"
+            exit 1
+          fi
+          echo "DISCKY_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Signing identity (ad-hoc fallback)
+        if: env.P12 == ''
+        run: |
+          echo "DISCKY_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
+          echo "::warning::Ad-hoc signed build: Full Disk Access must be granted again after each update"
+
+      - run: cargo xtask bundle
+      - run: codesign --verify --deep --strict target/Discky.app
+
+      - name: Package zip, sha256 and cask
+        run: |
+          ditto -c -k --keepParent target/Discky.app "Discky-$VERSION.zip"
+          shasum -a 256 "Discky-$VERSION.zip" | tee "Discky-$VERSION.zip.sha256"
+          SHA=$(cut -d' ' -f1 "Discky-$VERSION.zip.sha256")
+          packaging/homebrew/render-cask.sh "$VERSION" "$SHA" > discky.rb
+          # brew style only accepts casks that live in a tap, so use a throwaway local one.
+          brew tap-new --no-git local/check
+          mkdir -p "$(brew --repository local/check)/Casks"
+          cp discky.rb "$(brew --repository local/check)/Casks/discky.rb"
+          brew style --cask local/check/discky
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Discky $VERSION" --generate-notes \
+            "Discky-$VERSION.zip" "Discky-$VERSION.zip.sha256" discky.rb
+
+      - name: Upload build (manual run, no release)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Discky-${{ env.VERSION }}
+          path: |
+            Discky-${{ env.VERSION }}.zip
+            Discky-${{ env.VERSION }}.zip.sha256
+            discky.rb
+
+      - name: Update the Homebrew tap
+        if: github.event_name == 'push' && env.TAP_TOKEN != ''
+        run: |
+          git clone --quiet "https://x-access-token:$TAP_TOKEN@github.com/AlxGolubev/homebrew-discky" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          cp discky.rb "$RUNNER_TEMP/tap/Casks/discky.rb"
+          cd "$RUNNER_TEMP/tap"
+          git add Casks/discky.rb
+          if git diff --cached --quiet; then
+            echo "Tap already has discky $VERSION"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "discky $VERSION"
+          git push --quiet origin HEAD:main
+
+      - name: Tap update instructions
+        if: github.event_name == 'push' && env.TAP_TOKEN == ''
+        run: |
+          echo "TAP_TOKEN is not set: copy discky.rb from the release to AlxGolubev/homebrew-discky/Casks/discky.rb" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete the build keychain
+        if: always() && env.P12 != ''
+        run: |
+          security delete-keychain build.keychain || true
+          rm -f "$RUNNER_TEMP/sign.p12"

@@ -90,6 +90,10 @@ Three removal routes use Apple Events from child `osascript` processes: the Find
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty. Finally it runs `cargo xtask bundle` ad-hoc signed (`DISCKY_SIGN_IDENTITY=-`), checks that `discky-mcp` is inside the bundle and runs, verifies the signature with `codesign --verify --deep --strict`, and checks that `cargo xtask version` equals discky-mcp's manifest version, because the bundle ships both, and `brew style` on the rendered cask in a throwaway tap (CI only).
 
+## Releasing
+
+Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds and signs the bundle and publishes the zip, its SHA-256 and the Homebrew cask. The steps, the optional secrets and the tap update are in [`docs/release.md`](docs/release.md).
+
 ## Commits
 
 [Conventional Commits](https://www.conventionalcommits.org/), with the crate as the scope, as in `git log`: `feat(app): …`, `fix(core,app): …`, `docs: …`. The subject says what changed, in the imperative or as a noun phrase, without a trailing period.
