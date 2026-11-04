@@ -1,0 +1,27 @@
+cask "discky" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/AlxGolubev/discky/releases/download/v#{version}/Discky-#{version}.zip"
+  name "Discky"
+  desc "Disk cleanup for macOS that only uses official removal mechanisms, with an MCP server"
+  homepage "https://github.com/AlxGolubev/discky"
+
+  depends_on macos: ">= :sequoia"
+
+  app "Discky.app"
+  binary "#{appdir}/Discky.app/Contents/MacOS/discky-mcp"
+
+  zap trash: [
+    "~/Library/Application Support/Discky",
+    "~/Library/Saved Application State/com.alxgol.discky.savedState",
+  ]
+
+  caveats <<~EOS
+    Discky is not notarized (no paid Apple developer account). Install with
+    --no-quarantine, or allow it once in System Settings → Privacy & Security.
+    Grant Full Disk Access on first launch so the scan can see all of ~/Library.
+    Connect the MCP server to Claude Code with:
+      claude mcp add discky -- #{HOMEBREW_PREFIX}/bin/discky-mcp
+  EOS
+end

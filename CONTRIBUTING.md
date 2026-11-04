@@ -88,7 +88,7 @@ Three removal routes use Apple Events from child `osascript` processes: the Find
 
 ## CI
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty. Finally it runs `cargo xtask bundle` ad-hoc signed (`DISCKY_SIGN_IDENTITY=-`), checks that `discky-mcp` is inside the bundle and runs, verifies the signature with `codesign --verify --deep --strict`, and checks that `cargo xtask version` equals discky-mcp's manifest version, because the bundle ships both.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty. Finally it runs `cargo xtask bundle` ad-hoc signed (`DISCKY_SIGN_IDENTITY=-`), checks that `discky-mcp` is inside the bundle and runs, verifies the signature with `codesign --verify --deep --strict`, and checks that `cargo xtask version` equals discky-mcp's manifest version, because the bundle ships both, and `brew style` on the rendered cask in a throwaway tap (CI only).
 
 ## Commits
 

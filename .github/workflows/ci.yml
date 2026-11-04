@@ -26,3 +26,10 @@ jobs:
       - run: target/Discky.app/Contents/MacOS/discky-mcp --help | grep -q "Discky MCP server"
       - run: codesign --verify --deep --strict target/Discky.app
       - run: test "$(cargo xtask version)" = "$(grep -m1 '^version' crates/discky-mcp/Cargo.toml | cut -d'"' -f2)"
+      # brew style only accepts casks that live in a tap, so use a throwaway local one.
+      - run: |
+          packaging/homebrew/render-cask.sh 0.0.0 0000000000000000000000000000000000000000000000000000000000000000 > "${{ runner.temp }}/discky.rb"
+          brew tap-new --no-git local/check
+          mkdir -p "$(brew --repository local/check)/Casks"
+          cp "${{ runner.temp }}/discky.rb" "$(brew --repository local/check)/Casks/discky.rb"
+          brew style --cask local/check/discky
