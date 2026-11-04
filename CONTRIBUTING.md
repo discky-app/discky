@@ -7,7 +7,7 @@ Thanks for helping. Discky removes files from people's Macs, so the bar is: ever
 - macOS 15 or newer (Apple Silicon or Intel, APFS).
 - Rust 1.99, pinned in [`rust-toolchain.toml`](rust-toolchain.toml) with `rustfmt` and `clippy`; `rustup` installs it on first build.
 
-The workspace has four crates: `discky-core` (scanner, rules, findings, planner, executor), `discky-mcp` (the MCP server), `discky-app` (the GPUI desktop app) and `xtask` (`cargo xtask icon|scan-gif|bundle|install`).
+The workspace has four crates: `discky-core` (scanner, rules, findings, planner, executor), `discky-mcp` (the MCP server), `discky-app` (the GPUI desktop app) and `xtask` (`cargo xtask icon|scan-gif|bundle|install|pkg`).
 
 ## The three commands
 
@@ -88,11 +88,11 @@ Three removal routes use Apple Events from child `osascript` processes: the Find
 
 ## CI
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty. `cargo xtask scan-gif` regenerates `assets/scan.gif` (the README animation, rendered from the app's own duck stage with a scripted scan) and it is byte-checked too: after changing the sprites, the state machine or the stage, run it and commit the new file. Finally it runs `cargo xtask bundle` ad-hoc signed (`DISCKY_SIGN_IDENTITY=-`), checks that `discky-mcp` is inside the bundle and runs, verifies the signature with `codesign --verify --deep --strict`, and checks that `cargo xtask version` equals discky-mcp's manifest version, because the bundle ships both, and `brew style` on the rendered cask in a throwaway tap (CI only).
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS 15, then builds the app and runs `cargo xtask icon`, which regenerates both `assets/AppIcon.icns` and `assets/logo.png`; only `logo.png` is byte-checked against the committed file (the `.icns` bytes depend on the macOS version's `iconutil`), and the `.icns` must exist and be non-empty. `cargo xtask scan-gif` regenerates `assets/scan.gif` (the README animation, rendered from the app's own duck stage with a scripted scan) and it is byte-checked too: after changing the sprites, the state machine or the stage, run it and commit the new file. Finally it runs `cargo xtask bundle` ad-hoc signed (`DISCKY_SIGN_IDENTITY=-`), checks that `discky-mcp` is inside the bundle and runs, verifies the signature with `codesign --verify --deep --strict`, builds the installer package with `cargo xtask pkg` and checks its payload lists `discky-mcp`, and checks that `cargo xtask version` equals discky-mcp's manifest version, because the bundle ships both, and `brew style` on the rendered cask in a throwaway tap (CI only).
 
 ## Releasing
 
-Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds and signs the bundle and publishes the zip, its SHA-256 and the Homebrew cask. The steps, the optional secrets and the tap update are in [`docs/release.md`](docs/release.md).
+Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds and signs the bundle and publishes the zip, the unsigned installer package, their SHA-256s and the Homebrew cask. The steps, the optional secrets and the tap update are in [`docs/release.md`](docs/release.md).
 
 ## Commits
 

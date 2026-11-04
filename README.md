@@ -56,6 +56,10 @@ brew install --cask AlxGolubev/discky/discky
 
 This installs `/Applications/Discky.app` and symlinks `discky-mcp` into Homebrew's `bin`. The app is not notarized (there is no paid Apple account), so the cask removes the macOS quarantine attribute from it after installing; for a copy installed another way, run `xattr -dr com.apple.quarantine /Applications/Discky.app` or allow it once in System Settings → Privacy & Security → Open Anyway. Upgrade with `brew upgrade --cask discky`. Builds are ad-hoc signed until the release workflow has a certificate, so macOS asks for Full Disk Access again after an update.
 
+### Installer package
+
+Every [release](https://github.com/AlxGolubev/discky/releases) also has `Discky-<version>.pkg`, which installs `/Applications/Discky.app` (with `discky-mcp` inside) without Homebrew. The package is not signed (that needs a paid Apple account), so macOS refuses it on double-click: Control-click the `.pkg` and choose Open, or open it once more after allowing it in System Settings → Privacy & Security → Open Anyway. After installing, Settings → MCP in the app shows the `claude mcp add` line for the bundled server. To remove the app later, drag `Discky.app` to the Trash; `pkgutil --forget com.alxgol.discky` clears the receipt.
+
 ### From source
 
 ```sh

@@ -153,7 +153,7 @@ fn pick_identity(listing: &str) -> Option<Identity> {
 }
 
 /// discky-app's version: the first `version = "…"` line of its manifest.
-fn app_version(root: &Path) -> Result<String, String> {
+pub fn app_version(root: &Path) -> Result<String, String> {
     let manifest = root.join("crates/discky-app/Cargo.toml");
     let text = std::fs::read_to_string(&manifest)
         .map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;

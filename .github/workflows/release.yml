@@ -67,13 +67,17 @@ jobs:
           echo "DISCKY_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
           echo "::warning::Ad-hoc signed build: Full Disk Access must be granted again after each update"
 
-      - run: cargo xtask bundle
+      # pkg runs bundle first; the second bundle inside it is a cached rebuild.
+      - run: cargo xtask pkg
       - run: codesign --verify --deep --strict target/Discky.app
+      - run: pkgutil --payload-files "target/Discky-$VERSION.pkg" | grep -q "Discky.app/Contents/MacOS/discky-mcp"
 
-      - name: Package zip, sha256 and cask
+      - name: Package zip, pkg, sha256 and cask
         run: |
           ditto -c -k --keepParent target/Discky.app "Discky-$VERSION.zip"
           shasum -a 256 "Discky-$VERSION.zip" | tee "Discky-$VERSION.zip.sha256"
+          cp "target/Discky-$VERSION.pkg" .
+          shasum -a 256 "Discky-$VERSION.pkg" | tee "Discky-$VERSION.pkg.sha256"
           SHA=$(cut -d' ' -f1 "Discky-$VERSION.zip.sha256")
           packaging/homebrew/render-cask.sh "$VERSION" "$SHA" > discky.rb
           # brew style only accepts casks that live in a tap, so use a throwaway local one.
@@ -87,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ASSETS=("Discky-$VERSION.zip" "Discky-$VERSION.zip.sha256" discky.rb)
+          ASSETS=("Discky-$VERSION.zip" "Discky-$VERSION.zip.sha256" "Discky-$VERSION.pkg" "Discky-$VERSION.pkg.sha256" discky.rb)
           # A re-run after a later step failed finds the release already there: replace
           # its assets instead of failing on create.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
@@ -105,6 +109,8 @@ jobs:
           path: |
             Discky-${{ env.VERSION }}.zip
             Discky-${{ env.VERSION }}.zip.sha256
+            Discky-${{ env.VERSION }}.pkg
+            Discky-${{ env.VERSION }}.pkg.sha256
             discky.rb
 
       - name: Update the Homebrew tap

@@ -16,10 +16,11 @@ The workflow fails early if the tag does not match the version printed by `cargo
 
 ## What the workflow produces
 
-- `cargo xtask bundle` builds `target/Discky.app` with `discky-mcp` inside, and `codesign --verify --deep --strict` checks it.
-- The bundle is zipped with `ditto` into `Discky-<version>.zip`, its SHA-256 goes to `Discky-<version>.zip.sha256`, and `packaging/homebrew/render-cask.sh` renders the cask `discky.rb`, which `brew style` checks.
-- On a tag push: a GitHub release `v<version>` titled `Discky <version>` with generated notes and those three files as assets, then the tap update (below). Re-running the workflow for a tag whose release already exists replaces the release's assets instead of failing.
-- On a manual run (`workflow_dispatch`): the same three files as a workflow artifact; no release and no tap update.
+- `cargo xtask pkg` runs `cargo xtask bundle`, which builds `target/Discky.app` with `discky-mcp` inside, then wraps the bundle with `pkgbuild` into `target/Discky-<version>.pkg` (component package, install location `/Applications`, identifier `com.alxgol.discky`). `codesign --verify --deep --strict` checks the bundle and `pkgutil --payload-files` checks that the package carries `discky-mcp`.
+- The package is never signed: `productsign` needs a Developer ID Installer certificate, which only the paid Apple Developer Program issues. Users open it with Control-click → Open or Open Anyway; the README says so.
+- The bundle is zipped with `ditto` into `Discky-<version>.zip`; the SHA-256 of the zip and of the package go to `Discky-<version>.zip.sha256` and `Discky-<version>.pkg.sha256`, and `packaging/homebrew/render-cask.sh` renders the cask `discky.rb` (from the zip's hash), which `brew style` checks.
+- On a tag push: a GitHub release `v<version>` titled `Discky <version>` with generated notes and those five files as assets, then the tap update (below). Re-running the workflow for a tag whose release already exists replaces the release's assets instead of failing.
+- On a manual run (`workflow_dispatch`): the same five files as a workflow artifact; no release and no tap update.
 
 ## Secrets (all optional)
 
