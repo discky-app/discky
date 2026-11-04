@@ -462,6 +462,28 @@ fn set_snapshot_keeps_path_or_resets() {
 }
 
 #[test]
+fn set_snapshot_with_the_same_index_keeps_exclusions() {
+    let d = tempfile::tempdir().unwrap();
+    tree(d.path());
+    let mut m = MapModel::new(wrap(scan(&[d.path()]), vec![]), d.path().into(), NOW);
+    let root = m.snapshot().index.roots[0];
+    let before = m.weight(root);
+    m.exclude(&[d.path().join("a")]);
+    let shrunk = m.weight(root);
+    assert!(shrunk < before);
+    // A removal publishes a snapshot with fewer findings over the same index.
+    let trimmed = Arc::new(Snapshot {
+        meta: m.snapshot().meta.clone(),
+        index: Arc::clone(&m.snapshot().index),
+        findings: vec![],
+    });
+    m.set_snapshot(trimmed);
+    assert_eq!(m.weight(root), shrunk);
+    let a = m.snapshot().index.find(&d.path().join("a")).unwrap();
+    assert_eq!(m.weight(a), 0);
+}
+
+#[test]
 fn tooltip_rows_for_a_sparse_file_and_a_rest_tile() {
     let d = tempfile::tempdir().unwrap();
     touch(&d.path().join("disk.img"), 100);

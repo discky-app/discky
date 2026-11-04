@@ -388,6 +388,24 @@ impl FindingTitles {
     }
 }
 
+/// The paths of the Trash and Remove steps of `plan` that finished `Done` in `report`, in
+/// plan order: what the disk map hides until the next scan.
+pub fn trashed_paths(plan: &Plan, report: &ExecutionReport) -> Vec<PathBuf> {
+    plan.steps
+        .iter()
+        .filter(|s| {
+            report
+                .results
+                .iter()
+                .any(|r| r.index == s.index && r.status == StepStatus::Done)
+        })
+        .flat_map(|s| match &s.kind {
+            StepKind::Trash { paths } | StepKind::Remove { paths } => paths.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 /// Whether "Empty Trash" is offered after a run: something went to the Trash, the
 /// reminder is on, and Trash steps used the real Trash (with `DISCKY_TRASH_BIN` set the
 /// items are elsewhere, and emptying the real Trash would touch the user's data).
@@ -503,7 +521,7 @@ impl Drop for RunToken {
 mod tests {
     use super::{
         FindingTitles, Phase, RemovalModel, RowStatus, RunFlag, Summary, allow_interactive,
-        show_empty_trash,
+        show_empty_trash, trashed_paths,
     };
     use discky_core::PlanItem;
     use discky_core::findings::FindingId;
@@ -1003,5 +1021,53 @@ mod tests {
             &Config::default(),
         );
         assert_eq!(plain.rows[0].component, None);
+    }
+
+    #[test]
+    fn trashed_paths_are_collected_from_successful_trash_steps() {
+        let removed = step(
+            1,
+            StepKind::Remove {
+                paths: vec![PathBuf::from("/tmp/home/b")],
+            },
+            StepFlags::empty(),
+            Some(2),
+        );
+        let command = step(
+            2,
+            StepKind::Command {
+                argv: vec!["/usr/bin/true".into()],
+                cwd: None,
+                env: Vec::new(),
+            },
+            StepFlags::empty(),
+            None,
+        );
+        let p = plan(
+            vec![
+                trash(0, "/tmp/home/a", StepFlags::empty(), 1),
+                removed,
+                command,
+                trash(3, "/tmp/home/d", StepFlags::empty(), 4),
+            ],
+            &[],
+        );
+        let report = ExecutionReport {
+            plan: PlanId("p".into()),
+            results: vec![
+                result(0, StepStatus::Done, 1),
+                result(1, StepStatus::Done, 2),
+                result(2, StepStatus::Done, 0),
+                result(3, StepStatus::Failed, 0),
+            ],
+            freed_total: 3,
+            trashed_bytes: 1,
+            stopped_at: Some(3),
+            log_path: PathBuf::from("/tmp/home/removals.log"),
+        };
+        assert_eq!(
+            trashed_paths(&p, &report),
+            [PathBuf::from("/tmp/home/a"), PathBuf::from("/tmp/home/b")]
+        );
     }
 }

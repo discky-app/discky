@@ -187,15 +187,21 @@ impl MapModel {
         &self.snap
     }
 
-    /// Keeps the current folder when its path exists in the new index, else returns to the top; clears exclusions.
+    /// Keeps the current folder when its path exists in the new index, else returns to the
+    /// top; clears exclusions, unless the index is the same (a removal publishes the
+    /// snapshot without the removed findings over the old index, still listing the removed
+    /// paths).
     pub fn set_snapshot(&mut self, snap: Arc<Snapshot>) {
+        let same_index = Arc::ptr_eq(&self.snap.index, &snap.index);
         let path = self.root.map(|r| self.snap.index.path(r));
         self.root = path
             .and_then(|p| snap.index.find(&p))
             .filter(|&n| snap.index.node(n).kind == ObjKind::Dir);
         self.findings = NodeFindings::build(&snap);
         self.snap = snap;
-        self.reset_subtractions();
+        if !same_index {
+            self.reset_subtractions();
+        }
     }
 
     pub fn root(&self) -> Option<NodeId> {

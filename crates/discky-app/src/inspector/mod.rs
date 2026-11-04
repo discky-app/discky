@@ -1,11 +1,13 @@
 //! The inspector (mockup `02-uninstall.html`, right column): everything known about the
-//! selected finding and the exact commands its removal would run.
+//! selected finding and the exact commands its removal would run, or about a disk-map
+//! path without a finding of its own (`node`).
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use discky_core::findings::{Component, Finding, FindingId, Removal};
 use discky_core::plan::Plan;
+use discky_core::rules::Category;
 use discky_core::{Inspection, PlanItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -19,6 +21,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 mod commands;
+mod node;
 pub mod selection;
 
 pub use commands::{CommandLine, command_lines, command_text_for};
@@ -45,23 +48,40 @@ const FINDING_CHANGED: &str = "Finding changed; review the selection";
 /// toggles plan once.
 const REPLAN_DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// What the inspector shows.
+#[derive(Clone, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one per inspector; the brief's interface carries the finding by value"
+)]
+pub enum Subject {
+    Finding(Finding),
+    /// A disk-map tile that is no finding's own.
+    Path(PathBuf),
+}
+
 /// What the inspector asks of the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectorEvent {
     /// "Remove…": the finding with its selected components (or `components: None` for a
     /// finding without components), the same path as the table's Remove….
     RemoveItems(Vec<PlanItem>),
+    /// "Move to Trash…" / "Delete permanently…" of a path subject.
+    RemovePaths(Vec<PathBuf>),
+    /// "Show in {category}": show this finding's row on its category screen.
+    ShowInCategory(FindingId),
     /// The close button or Escape.
     Close,
 }
 
 /// The selected finding in full: metadata, largest children, and a preview of the
-/// commands its removal would run.
+/// commands its removal would run; or a path's metadata, children and removal button.
 pub struct Inspector {
-    finding: Finding,
-    /// The checked entries of `finding.components`.
+    subject: Subject,
+    /// The checked entries of the finding's components (empty for a path).
     selection: ComponentSelection,
-    /// `Engine::inspect` of the finding; `None` until the first load finishes.
+    /// `Engine::inspect` of the finding (`node::inspect_path` of a path); `None` until the
+    /// first load finishes.
     inspection: Option<Inspection>,
     /// The removal preview for `finding` and `selection`; kept (dimmed) while a newer one
     /// is computed.
@@ -73,6 +93,8 @@ pub struct Inspector {
     /// A plan preview is being computed (or waits out the toggle debounce).
     planning: bool,
     home: PathBuf,
+    /// Offer "Show in {category}" for a finding subject (opened from the disk map).
+    from_map: bool,
     focus: FocusHandle,
     /// The running inspection; replacing it cancels the previous one.
     _load: Task<()>,
@@ -91,15 +113,30 @@ impl Focusable for Inspector {
 impl Inspector {
     /// Show `f`; its inspection and removal plan are computed off the main thread.
     pub fn new(f: Finding, cx: &mut Context<Self>) -> Self {
+        let selection = ComponentSelection::from_components(&f.components);
+        Self::with_subject(Subject::Finding(f), selection, cx)
+    }
+
+    /// Show the disk-map path `path`; its inspection is computed off the main thread.
+    pub fn new_path(path: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self::with_subject(Subject::Path(path), ComponentSelection::default(), cx)
+    }
+
+    fn with_subject(
+        subject: Subject,
+        selection: ComponentSelection,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut inspector = Inspector {
-            selection: ComponentSelection::from_components(&f.components),
-            finding: f,
+            subject,
+            selection,
             inspection: None,
             plan: None,
             plan_error: None,
             loading: false,
             planning: false,
             home: discky_core::paths::home_dir().unwrap_or_default(),
+            from_map: false,
             focus: cx.focus_handle(),
             _load: Task::ready(()),
             _plan: Task::ready(()),
@@ -108,88 +145,129 @@ impl Inspector {
         inspector
     }
 
-    /// The id of the finding shown.
-    pub fn finding_id(&self) -> &FindingId {
-        &self.finding.id
+    /// What is shown.
+    pub fn subject(&self) -> &Subject {
+        &self.subject
+    }
+
+    /// The finding shown; `None` for a path.
+    fn finding(&self) -> Option<&Finding> {
+        match &self.subject {
+            Subject::Finding(f) => Some(f),
+            Subject::Path(_) => None,
+        }
+    }
+
+    /// The id of the finding shown; `None` for a path.
+    pub fn finding_id(&self) -> Option<&FindingId> {
+        self.finding().map(|f| &f.id)
+    }
+
+    /// Offer "Show in {category}" for a finding subject: true when the inspector shows a
+    /// disk-map tile (a category screen already shows the finding's row).
+    pub fn set_from_map(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.from_map != on {
+            self.from_map = on;
+            cx.notify();
+        }
     }
 
     /// Show `f` instead. The same finding (fresh data after a reload or filter) only
     /// updates what is shown; another one is inspected and planned anew.
     pub fn set_finding(&mut self, f: Finding, cx: &mut Context<Self>) {
-        if f.id == self.finding.id {
+        if self.finding_id() == Some(&f.id) {
             if self.adopt(f) {
                 self.replan(Duration::ZERO, cx);
             }
         } else {
             self.selection = ComponentSelection::from_components(&f.components);
-            self.finding = f;
-            self.inspection = None;
-            self.plan = None;
-            self.plan_error = None;
-            self.load(cx);
+            self.show(Subject::Finding(f), cx);
         }
         cx.notify();
+    }
+
+    /// Show the disk-map path `path` instead; nothing happens when it is already shown.
+    pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if matches!(&self.subject, Subject::Path(p) if *p == path) {
+            return;
+        }
+        self.selection = ComponentSelection::default();
+        self.show(Subject::Path(path), cx);
+        cx.notify();
+    }
+
+    /// Switch to another subject and inspect it anew.
+    fn show(&mut self, subject: Subject, cx: &mut Context<Self>) {
+        self.subject = subject;
+        self.inspection = None;
+        self.plan = None;
+        self.plan_error = None;
+        self.load(cx);
     }
 
     /// Take fresh data for the same finding. The selection is kept while the components
     /// are the same parts (sizes may differ) and reset to the defaults otherwise; true when
     /// it was reset.
     fn adopt(&mut self, f: Finding) -> bool {
-        let same = same_parts(&f.components, &self.finding.components);
-        self.finding = f;
+        let same = same_parts(&f.components, parts_of(&self.subject));
+        self.subject = Subject::Finding(f);
+        let parts = parts_of(&self.subject);
         if same {
-            self.selection.retain_valid(&self.finding.components);
+            self.selection.retain_valid(parts);
         } else {
-            self.selection = ComponentSelection::from_components(&self.finding.components);
+            self.selection = ComponentSelection::from_components(parts);
         }
         !same
     }
 
     /// What "Remove…" and the preview plan: the finding with exactly the checked
-    /// components, or its defaults when it has none.
-    fn plan_request(&self) -> PlanItem {
-        if self.finding.components.is_empty() {
-            PlanItem::defaults(&self.finding.id)
+    /// components, or its defaults when it has none; `None` for a path.
+    fn plan_request(&self) -> Option<PlanItem> {
+        let f = self.finding()?;
+        Some(if f.components.is_empty() {
+            PlanItem::defaults(&f.id)
         } else {
-            self.selection
-                .items(&self.finding.id.0, &self.finding.components)
-        }
+            self.selection.items(&f.id.0, &f.components)
+        })
     }
 
     /// Whether some component can be checked (a mise version's projects cannot).
     fn has_selectable(&self) -> bool {
-        self.finding.components.iter().any(selectable)
+        parts_of(&self.subject).iter().any(selectable)
     }
 
     /// The fresh finding is still being loaded while components are shown: their indices
     /// may not match the current snapshot yet.
     fn refreshing(&self) -> bool {
-        self.loading && !self.finding.components.is_empty()
+        self.loading && !parts_of(&self.subject).is_empty()
     }
 
     /// "Remove…": hand the selection to the removal dialog, unless the snapshot's finding
     /// no longer has the components on screen (then warn and reload them).
     fn request_removal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(f) = self.finding() else {
+            return;
+        };
         let snap = cx.global::<AppState>().engine.snapshot();
         let current = snap.as_ref().and_then(|s| {
             s.findings
                 .iter()
-                .find(|f| f.id == self.finding.id)
-                .map(|f| f.components.as_slice())
+                .find(|c| c.id == f.id)
+                .map(|c| c.components.as_slice())
         });
-        if !self.finding.components.is_empty()
-            && !selection_current(&self.finding.components, current)
-        {
+        if !f.components.is_empty() && !selection_current(&f.components, current) {
             window.push_notification(Notification::warning(FINDING_CHANGED), cx);
             self.refresh(cx);
             return;
         }
-        cx.emit(InspectorEvent::RemoveItems(vec![self.plan_request()]));
+        if let Some(item) = self.plan_request() {
+            cx.emit(InspectorEvent::RemoveItems(vec![item]));
+        }
     }
 
     /// Check or uncheck component `i` and recompute the preview after the debounce.
     fn set_component(&mut self, i: usize, on: bool, cx: &mut Context<Self>) {
-        if self.selection.set(i, on, &self.finding.components) {
+        if self.selection.set(i, on, parts_of(&self.subject)) {
             self.replan(REPLAN_DEBOUNCE, cx);
         }
     }
@@ -204,15 +282,35 @@ impl Inspector {
     /// checked indices never meet a newer component list than the one on screen.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
-        let deferred = !self.finding.components.is_empty();
         let engine = cx.global::<AppState>().engine.clone();
-        let id = self.finding.id.clone();
+        let id = match &self.subject {
+            Subject::Finding(f) => f.id.clone(),
+            Subject::Path(path) => {
+                let path = path.clone();
+                let target = path.clone();
+                let work = cx.background_spawn(async move { node::inspect_path(&engine, &target) });
+                self._load = cx.spawn(async move |this, cx| {
+                    let inspection = work.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if matches!(&this.subject, Subject::Path(p) if *p == path) {
+                            this.inspection = inspection;
+                            this.loading = false;
+                            cx.notify();
+                        }
+                    });
+                });
+                self.replan(Duration::ZERO, cx);
+                cx.notify();
+                return;
+            }
+        };
+        let deferred = !parts_of(&self.subject).is_empty();
         let target = id.0.clone();
         let work = cx.background_spawn(async move { engine.inspect(&target) });
         self._load = cx.spawn(async move |this, cx| {
             let inspection = work.await;
             let _ = this.update(cx, |this, cx| {
-                if this.finding.id != id {
+                if this.finding_id() != Some(&id) {
                     return;
                 }
                 let reset = match inspection.as_ref().and_then(|i| i.finding.clone()) {
@@ -238,16 +336,18 @@ impl Inspector {
     /// call cancels this one; a result for a selection that changed meanwhile is dropped.
     /// Findings that are only shown get no plan.
     fn replan(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        if self.finding.removal == Removal::None {
-            self.plan = None;
-            self.plan_error = None;
-            self.planning = false;
-            self._plan = Task::ready(());
-            return;
-        }
+        let item = match self.plan_request() {
+            Some(item) if self.finding().is_some_and(|f| f.removal != Removal::None) => item,
+            _ => {
+                self.plan = None;
+                self.plan_error = None;
+                self.planning = false;
+                self._plan = Task::ready(());
+                return;
+            }
+        };
         self.planning = true;
         let engine = cx.global::<AppState>().engine.clone();
-        let item = self.plan_request();
         self._plan = cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
@@ -259,7 +359,7 @@ impl Inspector {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.plan_request() != item {
+                if this.plan_request().as_ref() != Some(&item) {
                     return;
                 }
                 (this.plan, this.plan_error) = match plan {
@@ -276,6 +376,10 @@ impl Inspector {
     /// Title, subtitle and the close button.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let muted = cx.theme().muted_foreground;
+        let (title, subtitle) = match &self.subject {
+            Subject::Finding(f) => (f.title.clone(), f.subtitle.clone()),
+            Subject::Path(p) => (node::title(p), None),
+        };
         h_flex()
             .flex_shrink_0()
             .items_start()
@@ -288,18 +392,8 @@ impl Inspector {
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
-                    .child(
-                        div()
-                            .text_base()
-                            .font_semibold()
-                            .child(self.finding.title.clone()),
-                    )
-                    .children(
-                        self.finding
-                            .subtitle
-                            .clone()
-                            .map(|s| div().text_sm().text_color(muted).child(s)),
-                    ),
+                    .child(div().text_base().font_semibold().child(title))
+                    .children(subtitle.map(|s| div().text_sm().text_color(muted).child(s))),
             )
             .child(
                 Button::new("close-inspector")
@@ -312,24 +406,10 @@ impl Inspector {
     }
 
     /// The metadata rows: category, rule, label, path, sizes, dates, flags, owner app.
-    fn meta(&self, cx: &App) -> impl IntoElement + use<> {
+    fn meta(&self, f: &Finding, cx: &App) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (muted, mono) = (theme.muted_foreground, theme.mono_font_family.clone());
-        let f = &self.finding;
-        let row = |label: &'static str, value: AnyElement| {
-            h_flex()
-                .items_start()
-                .gap_2()
-                .text_sm()
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(LABEL_WIDTH))
-                        .text_color(muted)
-                        .child(label),
-                )
-                .child(div().flex_1().min_w_0().child(value))
-        };
+        let row = |label: &'static str, value: AnyElement| meta_row(label, value, muted);
         let mut rows = vec![row("Category", f.category.to_string().into_any_element())];
         if let Some((title, explain)) = self.inspection.as_ref().and_then(|i| i.rule.clone()) {
             rows.push(row(
@@ -349,22 +429,7 @@ impl Inspector {
         ));
         if let Some(path) = f.path.clone() {
             let shown = format::home_relative(&path, &self.home);
-            rows.push(row(
-                "Path",
-                div()
-                    .id("inspector-path")
-                    .cursor_pointer()
-                    .font_family(mono)
-                    .text_xs()
-                    .hover(|s| s.underline())
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Show in Finder")
-                            .build(window, cx)
-                    })
-                    .on_click(move |_, _, cx| cx.reveal_path(&path))
-                    .child(shown)
-                    .into_any_element(),
-            ));
+            rows.push(row("Path", path_link(path, shown, mono).into_any_element()));
         }
         let allocated = format::bytes(f.allocated);
         let logical = format::bytes(f.logical);
@@ -470,8 +535,8 @@ impl Inspector {
 
     /// "Components · N": one row per component with its checkbox (disabled for parts that
     /// are only shown), title, kind, path, size and note. Replaces "Contents".
-    fn components(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        if self.finding.components.is_empty() {
+    fn components(&self, f: &Finding, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if f.components.is_empty() {
             return None;
         }
         let theme = cx.theme();
@@ -480,8 +545,7 @@ impl Inspector {
             theme.border,
             theme.mono_font_family.clone(),
         );
-        let rows: Vec<_> = self
-            .finding
+        let rows: Vec<_> = f
             .components
             .iter()
             .enumerate()
@@ -490,7 +554,7 @@ impl Inspector {
         Some(
             v_flex()
                 .child(section_label(
-                    format!("Components · {}", self.finding.components.len()),
+                    format!("Components · {}", f.components.len()),
                     muted,
                 ))
                 .children(rows),
@@ -565,10 +629,10 @@ impl Inspector {
     }
 
     /// "What will run": the plan's commands with their notes, or why there are none.
-    fn commands(&self, cx: &App) -> impl IntoElement + use<> {
+    fn commands(&self, f: &Finding, cx: &App) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (muted, warning) = (theme.muted_foreground, theme.warning);
-        let body = if self.finding.removal == Removal::None {
+        let body = if f.removal == Removal::None {
             div()
                 .text_sm()
                 .text_color(muted)
@@ -618,11 +682,11 @@ impl Inspector {
     /// The bottom bar: "N components selected · frees X" when components can be checked,
     /// then "Remove…", disabled for findings that cannot be removed and when every
     /// checkable component is unchecked.
-    fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn footer(&self, f: &Finding, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
         let selectable = self.has_selectable();
-        let (count, bytes) = self.selection.summary(&self.finding.components);
+        let (count, bytes) = self.selection.summary(&f.components);
         let summary = selectable.then(|| {
             let noun = if count == 1 {
                 "component"
@@ -635,7 +699,10 @@ impl Inspector {
             ))
         });
         let refreshing = self.refreshing();
-        let disabled = !remove_enabled(is_checkable(&self.finding), selectable, count, refreshing);
+        let disabled = !remove_enabled(is_checkable(f), selectable, count, refreshing);
+        let show_in = self
+            .from_map
+            .then(|| show_in_button(f.category, f.id.clone(), cx));
         v_flex()
             .flex_shrink_0()
             .gap_1()
@@ -652,6 +719,7 @@ impl Inspector {
                     .when(refreshing, |this| {
                         this.child(div().text_xs().text_color(muted).child("Refreshing…"))
                     })
+                    .children(show_in)
                     .child(
                         Button::new("inspector-remove")
                             .small()
@@ -663,6 +731,55 @@ impl Inspector {
                             })),
                     ),
             )
+    }
+}
+
+/// One metadata row: the muted label column, then `value`.
+fn meta_row(label: &'static str, value: AnyElement, muted: Hsla) -> Div {
+    h_flex()
+        .items_start()
+        .gap_2()
+        .text_sm()
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(LABEL_WIDTH))
+                .text_color(muted)
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().child(value))
+}
+
+/// The "Path" value: `shown` in the mono font; a click reveals `path` in Finder.
+fn path_link(path: PathBuf, shown: String, mono: SharedString) -> impl IntoElement {
+    div()
+        .id("inspector-path")
+        .cursor_pointer()
+        .font_family(mono)
+        .text_xs()
+        .hover(|s| s.underline())
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("Show in Finder").build(window, cx)
+        })
+        .on_click(move |_, _, cx| cx.reveal_path(&path))
+        .child(shown)
+}
+
+/// "Show in {category}": asks the app to show finding `id` on its category screen.
+fn show_in_button(category: Category, id: FindingId, cx: &mut Context<Inspector>) -> Button {
+    Button::new("inspector-show-in")
+        .small()
+        .label(format!("Show in {category}"))
+        .on_click(cx.listener(move |_, _, _, cx| {
+            cx.emit(InspectorEvent::ShowInCategory(id.clone()));
+        }))
+}
+
+/// The components of a finding subject; none for a path.
+fn parts_of(subject: &Subject) -> &[Component] {
+    match subject {
+        Subject::Finding(f) => &f.components,
+        Subject::Path(_) => &[],
     }
 }
 
@@ -680,8 +797,28 @@ impl Render for Inspector {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let warning = cx.theme().warning;
         let missing = self.inspection.as_ref().is_some_and(|i| !i.in_snapshot);
-        let has_components = !self.finding.components.is_empty();
-        let components = self.components(cx);
+        let (body, footer) = match &self.subject {
+            Subject::Finding(f) => {
+                let body = v_flex()
+                    .child(self.meta(f, cx))
+                    .children(self.components(f, cx))
+                    .when(f.components.is_empty(), |this| {
+                        this.children(self.contents(cx))
+                    })
+                    .child(self.commands(f, cx));
+                (
+                    body.into_any_element(),
+                    self.footer(f, cx).into_any_element(),
+                )
+            }
+            Subject::Path(p) => {
+                let rows = self.path_rows(cx);
+                (
+                    self.path_body(p, rows.as_ref(), cx).into_any_element(),
+                    self.path_footer(p, rows.as_ref(), cx).into_any_element(),
+                )
+            }
+        };
         v_flex()
             .id("inspector")
             .key_context(INSPECTOR_CONTEXT)
@@ -708,12 +845,9 @@ impl Render for Inspector {
                                     ),
                                 )
                             })
-                            .child(self.meta(cx))
-                            .children(components)
-                            .when(!has_components, |this| this.children(self.contents(cx)))
-                            .child(self.commands(cx)),
+                            .child(body),
                     ),
             )
-            .child(self.footer(cx))
+            .child(footer)
     }
 }

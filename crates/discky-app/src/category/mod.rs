@@ -6,7 +6,7 @@ pub mod table;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use discky_core::RemovalMode;
-use discky_core::findings::Finding;
+use discky_core::findings::{Finding, FindingId};
 use discky_core::rules::Category;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{self, Input, InputEvent, InputState};
@@ -194,6 +194,30 @@ impl CategoryView {
     pub fn request_focus(&mut self, cx: &mut Context<Self>) {
         self.focus_table = true;
         cx.notify();
+    }
+
+    /// Select finding `id`'s row, scroll to it and give the table the keyboard; the
+    /// selection emits [`CategoryEvent::Inspect`]. False when the table does not show it (filtered out, or
+    /// not in this category).
+    pub fn select_finding(
+        &mut self,
+        id: &FindingId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let found = self
+            .table
+            .update(cx, |t, cx| match t.delegate().position(id) {
+                Some(ix) => {
+                    t.set_selected_row(ix, cx);
+                    true
+                }
+                None => false,
+            });
+        if found {
+            window.focus(&self.table.focus_handle(cx), cx);
+        }
+        found
     }
 
     /// Change the rows with `change`, keeping the selected row on the same finding (or

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use discky_core::findings::Finding;
+use discky_core::findings::{Finding, FindingId};
 use discky_core::history;
 use discky_core::index::snapshot::Actor;
 use discky_core::paths::display;
@@ -26,7 +26,7 @@ use gpui_kit::*;
 
 use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
-use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent};
+use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent, Subject};
 use crate::map::{MAP_CONTEXT, MapDepthLess, MapDepthMore, MapEvent, MapUp, MapView};
 use crate::overview::OverviewView;
 use crate::removal::model::{BUSY_MESSAGE, REMOVAL_BUSY_MESSAGE, RunFlag, SCAN_BLOCKED_MESSAGE};
@@ -179,8 +179,9 @@ impl AppView {
     }
 
     /// In debug builds, open the inspector on the finding named by `DISCKY_START_INSPECT`
-    /// (an id, absolute path or title, as `Engine::inspect` resolves it), so the panel can
-    /// be looked at without clicking a row.
+    /// (an id, absolute path or title, as `Engine::inspect` resolves it; an absolute path
+    /// that is no finding's own opens the path inspector), so the panel can be looked at
+    /// without clicking a row.
     fn start_inspect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(debug_assertions)]
         if let Ok(target) = std::env::var("DISCKY_START_INSPECT") {
@@ -191,6 +192,9 @@ impl AppView {
                 .and_then(|i| i.finding);
             match found {
                 Some(f) => self.inspect(f, window, cx),
+                None if Path::new(&target).is_absolute() => {
+                    self.inspect_path(PathBuf::from(target), window, cx);
+                }
                 None => eprintln!("DISCKY_START_INSPECT: no finding `{target}`"),
             }
         }
@@ -200,22 +204,24 @@ impl AppView {
 
     /// In debug builds, open the removal dialog for the comma-separated findings in
     /// `DISCKY_START_REMOVE` (ids, absolute paths or titles, resolved like
-    /// `DISCKY_START_INSPECT`; an unresolved token is passed on as an id), so the dialog can be looked at without clicking. It only
-    /// plans; nothing runs until Run is pressed.
+    /// `DISCKY_START_INSPECT`; an unresolved token is passed on as an id), so the dialog can be looked at without clicking. Absolute
+    /// paths that are no finding's own are planned as disk-map paths instead (when there
+    /// are any, the ids are left out). It only plans; nothing runs until Run is pressed.
     fn start_remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(debug_assertions)]
         if let Ok(list) = std::env::var("DISCKY_START_REMOVE") {
             let engine = cx.global::<AppState>().engine.clone();
-            let ids: Vec<String> = list
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|t| match engine.inspect(t).and_then(|i| i.finding) {
-                    Some(f) => f.id.0,
-                    None => t.to_string(),
-                })
-                .collect();
-            if !ids.is_empty() {
+            let (mut ids, mut paths) = (Vec::new(), Vec::new());
+            for t in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                match engine.inspect(t).and_then(|i| i.finding) {
+                    Some(f) => ids.push(f.id.0),
+                    None if Path::new(t).is_absolute() => paths.push(PathBuf::from(t)),
+                    None => ids.push(t.to_string()),
+                }
+            }
+            if !paths.is_empty() {
+                self.open_removal_paths(paths, window, cx);
+            } else if !ids.is_empty() {
                 self.open_removal(defaults(ids), window, cx);
             }
         }
@@ -226,17 +232,40 @@ impl AppView {
     /// Open the removal dialog for `items` (it plans them afresh); refused while a removal
     /// runs, so one run's dialog and flag are never replaced by another's.
     fn open_removal(&mut self, items: Vec<PlanItem>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_dialog(window, cx, |window, cx| removal::open(items, window, cx));
+    }
+
+    /// Open the removal dialog for disk-map `paths`, under the same guard as
+    /// [`AppView::open_removal`].
+    fn open_removal_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_dialog(window, cx, |window, cx| {
+            removal::open_paths(paths, window, cx)
+        });
+    }
+
+    /// Open the dialog `open` makes and follow its events, unless a removal runs.
+    fn open_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        open: impl FnOnce(&mut Window, &mut App) -> Entity<RemovalDialog>,
+    ) {
         if removal_running(cx) {
             window.push_notification(Notification::warning(REMOVAL_BUSY_MESSAGE), cx);
             return;
         }
-        let dialog = removal::open(items, window, cx);
+        let dialog = open(window, cx);
         self._removal_events = Some(cx.subscribe(&dialog, Self::on_removal_event));
         self.removal = Some(dialog);
     }
 
-    /// A removal run ended: close the inspector when its finding is gone, then re-read
-    /// the snapshot everywhere, as after a scan.
+    /// A removal run ended: close the inspector when its finding or path is gone, hide
+    /// the trashed paths on the map, then re-read the snapshot everywhere, as after a scan.
     fn on_removal_event(
         &mut self,
         _: Entity<RemovalDialog>,
@@ -244,18 +273,21 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            RemovalEvent::Ran => {
+            RemovalEvent::Ran { trashed } => {
                 if let Some(inspector) = &self.inspector {
-                    let id = inspector.read(cx).finding_id().0.clone();
-                    let present = cx
-                        .global::<AppState>()
-                        .engine
-                        .snapshot()
-                        .is_some_and(|s| s.findings.iter().any(|f| f.id.0 == id));
-                    if !present {
+                    let gone = match inspector.read(cx).subject() {
+                        Subject::Finding(f) => !cx
+                            .global::<AppState>()
+                            .engine
+                            .snapshot()
+                            .is_some_and(|s| s.findings.iter().any(|g| g.id == f.id)),
+                        Subject::Path(p) => trashed.iter().any(|t| p.starts_with(t)),
+                    };
+                    if gone {
                         self.close_inspector(cx);
                     }
                 }
+                self.map.update(cx, |m, cx| m.exclude(trashed, cx));
                 self.refresh_data(cx);
             }
         }
@@ -264,20 +296,66 @@ impl AppView {
     /// Show `f` in the inspector, opening it if needed. Nothing happens when it already
     /// shows `f`: the table re-selects the same row after every reload or filter keystroke,
     /// and the inspector keeps its state (and its plan) for it.
+    /// On the map the inspector also offers "Show in {category}".
     fn inspect(&mut self, f: Finding, window: &mut Window, cx: &mut Context<Self>) {
+        let from_map = self.route == Route::Map;
         match &self.inspector {
-            Some(inspector) => {
-                if inspector.read(cx).finding_id() != &f.id {
-                    inspector.update(cx, |i, cx| i.set_finding(f, cx));
+            Some(inspector) => inspector.update(cx, |i, cx| {
+                if i.finding_id() != Some(&f.id) {
+                    i.set_finding(f, cx);
                 }
-            }
+                i.set_from_map(from_map, cx);
+            }),
             None => {
-                let inspector = cx.new(|cx| Inspector::new(f, cx));
-                self._inspector_events =
-                    Some(cx.subscribe_in(&inspector, window, Self::on_inspector_event));
-                self.inspector = Some(inspector);
-                cx.notify();
+                let inspector = cx.new(|cx| {
+                    let mut i = Inspector::new(f, cx);
+                    i.set_from_map(from_map, cx);
+                    i
+                });
+                self.show_inspector(inspector, window, cx);
             }
+        }
+    }
+
+    /// Show the disk-map path `path` in the inspector, opening it if needed.
+    fn inspect_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.inspector {
+            Some(inspector) => inspector.update(cx, |i, cx| i.set_path(path, cx)),
+            None => {
+                let inspector = cx.new(|cx| Inspector::new_path(path, cx));
+                self.show_inspector(inspector, window, cx);
+            }
+        }
+    }
+
+    /// Put the new `inspector` in the right column and follow its events.
+    fn show_inspector(
+        &mut self,
+        inspector: Entity<Inspector>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._inspector_events =
+            Some(cx.subscribe_in(&inspector, window, Self::on_inspector_event));
+        self.inspector = Some(inspector);
+        cx.notify();
+    }
+
+    /// "Show in {category}": open finding `id`'s category screen with its row selected
+    /// (which inspects it), or inspect it directly when the table does not show it.
+    fn show_in_category(&mut self, id: FindingId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(f) = cx
+            .global::<AppState>()
+            .engine
+            .snapshot()
+            .and_then(|s| s.findings.iter().find(|f| f.id == id).cloned())
+        else {
+            return;
+        };
+        self.navigate(Route::Category(f.category), cx);
+        let view = self.category_view(f.category, window, cx);
+        if !view.update(cx, |v, cx| v.select_finding(&id, window, cx)) {
+            self.inspect(f, window, cx);
         }
     }
 
@@ -311,6 +389,10 @@ impl AppView {
             InspectorEvent::RemoveItems(items) => {
                 self.open_removal(items.clone(), window, cx);
             }
+            InspectorEvent::RemovePaths(paths) => {
+                self.open_removal_paths(paths.clone(), window, cx);
+            }
+            InspectorEvent::ShowInCategory(id) => self.show_in_category(id.clone(), window, cx),
         }
     }
 
@@ -408,8 +490,8 @@ impl AppView {
     ) {
         match event {
             MapEvent::InspectFinding(finding) => self.inspect(finding.clone(), window, cx),
-            // No inspector for bare paths yet: close the one showing another tile's finding.
-            MapEvent::InspectPath(_) | MapEvent::Close => self.close_inspector(cx),
+            MapEvent::InspectPath(path) => self.inspect_path(path.clone(), window, cx),
+            MapEvent::Close => self.close_inspector(cx),
         }
     }
 

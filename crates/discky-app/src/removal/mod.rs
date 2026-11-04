@@ -7,6 +7,7 @@ pub mod model;
 use std::path::PathBuf;
 use std::process::Command;
 
+use discky_core::index::snapshot::Snapshot;
 use discky_core::plan::execute::{ExecuteError, ExecutionReport, OSASCRIPT, StepEvent, StepSink};
 use discky_core::{Config, ExecuteRequest, PlanItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -24,7 +25,7 @@ use crate::app::AppState;
 use crate::format;
 use model::{
     FindingTitles, OVERRIDE_NOTE, Phase, RemovalModel, RowStatus, RunToken, StepRow,
-    TRASH_OVERRIDDEN_NOTE, allow_interactive, run_only_steps, show_empty_trash,
+    TRASH_OVERRIDDEN_NOTE, allow_interactive, run_only_steps, show_empty_trash, trashed_paths,
 };
 
 /// Width of the dialog.
@@ -37,12 +38,23 @@ const OUTPUT_LINES: f32 = 8.;
 /// What the dialog tells the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemovalEvent {
-    /// A run ended (finished, stale or failed): the snapshot may have changed.
-    Ran,
+    /// A run ended (finished, stale or failed): the snapshot may have changed. `trashed`
+    /// are the paths of the Trash and Remove steps that finished.
+    Ran { trashed: Vec<PathBuf> },
+}
+
+/// What the dialog was opened for; planned again the same way on Re-plan.
+#[derive(Clone, Debug)]
+enum Request {
+    /// Findings with their component selections (`Engine::plan_items_with_snapshot`).
+    Items(Vec<PlanItem>),
+    /// Disk-map paths (`Engine::plan_paths_with_snapshot`).
+    Paths(Vec<PathBuf>),
 }
 
 /// The removal dialog's state; the dialog shell (`open`) renders it as its content.
 pub struct RemovalDialog {
+    request: Request,
     model: RemovalModel,
     home: PathBuf,
     /// "Empty Trash" is running.
@@ -64,7 +76,16 @@ impl EventEmitter<RemovalEvent> for RemovalDialog {}
 /// Open the modal removal dialog for `items` (findings with their component selections)
 /// and start planning them.
 pub fn open(items: Vec<PlanItem>, window: &mut Window, cx: &mut App) -> Entity<RemovalDialog> {
-    let view = cx.new(|cx| RemovalDialog::new(items, cx));
+    open_request(Request::Items(items), window, cx)
+}
+
+/// Open the modal removal dialog for disk-map `paths` and start planning them.
+pub fn open_paths(paths: Vec<PathBuf>, window: &mut Window, cx: &mut App) -> Entity<RemovalDialog> {
+    open_request(Request::Paths(paths), window, cx)
+}
+
+fn open_request(request: Request, window: &mut Window, cx: &mut App) -> Entity<RemovalDialog> {
+    let view = cx.new(|cx| RemovalDialog::new(request, cx));
     let shown = view.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
         let d = shown.read(cx);
@@ -82,12 +103,17 @@ pub fn open(items: Vec<PlanItem>, window: &mut Window, cx: &mut App) -> Entity<R
 }
 
 impl RemovalDialog {
-    fn new(items: Vec<PlanItem>, cx: &mut Context<Self>) -> Self {
+    fn new(request: Request, cx: &mut Context<Self>) -> Self {
         let engine = cx.global::<AppState>().engine.clone();
         let cfg = engine.config();
         let trash_overridden =
             engine.trash_bin() != std::path::Path::new(discky_core::engine::TRASH_BIN);
+        let items = match &request {
+            Request::Items(items) => items.clone(),
+            Request::Paths(_) => Vec::new(),
+        };
         let mut dialog = RemovalDialog {
+            request,
             model: RemovalModel::planning(items, &cfg),
             home: discky_core::paths::home_dir().unwrap_or_default(),
             emptying: false,
@@ -103,26 +129,33 @@ impl RemovalDialog {
 
     /// "Remove N items".
     fn title(&self) -> String {
-        match self.model.items.len() {
+        let n = match &self.request {
+            Request::Items(items) => items.len(),
+            Request::Paths(paths) => paths.len(),
+        };
+        match n {
             1 => "Remove 1 item".to_string(),
             n => format!("Remove {n} items"),
         }
     }
 
-    /// Plan `model.items` afresh on the background executor (planning stats every path),
+    /// Plan the request afresh on the background executor (planning stats every path),
     /// with the titles of the planned findings and their components for the rows.
     fn plan(&mut self, cx: &mut Context<Self>) {
         let engine = cx.global::<AppState>().engine.clone();
-        let items = self.model.items.clone();
+        let request = self.request.clone();
         let work = cx.background_spawn(async move {
             // Titles come from the very snapshot the plan was made from.
-            let (plan, titles) = match engine.plan_items_with_snapshot(&items) {
+            let planned = match &request {
+                Request::Items(items) => engine.plan_items_with_snapshot(items),
+                Request::Paths(paths) => engine.plan_paths_with_snapshot(paths),
+            };
+            let (plan, titles) = match planned {
                 Ok((plan, snap)) => {
-                    let titles = FindingTitles::from_findings(
-                        snap.findings
-                            .iter()
-                            .filter(|f| items.iter().any(|i| i.id == f.id.0)),
-                    );
+                    let titles = match &request {
+                        Request::Items(items) => titles_of(&snap, items),
+                        Request::Paths(_) => FindingTitles::default(),
+                    };
                     (Ok(plan), titles)
                 }
                 Err(e) => (Err(e.to_string()), FindingTitles::default()),
@@ -157,7 +190,7 @@ impl RemovalDialog {
         }
     }
 
-    /// "Re-plan" after Stale or Expired: plan the same items again.
+    /// "Re-plan" after Stale or Expired: plan the same request again.
     fn replan(&mut self, cx: &mut Context<Self>) {
         self.model.replan();
         self.plan(cx);
@@ -258,6 +291,10 @@ impl RemovalDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let trashed = match (&result, &self.model.plan) {
+            (Ok(report), Some(plan)) => trashed_paths(plan, report),
+            _ => Vec::new(),
+        };
         self.model.finish(result);
         self.running = None;
         if let Some(msg) = self.model.freed_message() {
@@ -266,7 +303,7 @@ impl RemovalDialog {
         if let Some(msg) = self.model.stop_message() {
             window.push_notification(Notification::warning(msg), cx);
         }
-        cx.emit(RemovalEvent::Ran);
+        cx.emit(RemovalEvent::Ran { trashed });
         cx.notify();
     }
 
@@ -510,6 +547,15 @@ impl RemovalDialog {
             )
             .child(div().flex_shrink_0().text_sm().text_right().child(freed))
     }
+}
+
+/// The titles of the findings of `items` and their components, from `snap`.
+fn titles_of(snap: &Snapshot, items: &[PlanItem]) -> FindingTitles {
+    FindingTitles::from_findings(
+        snap.findings
+            .iter()
+            .filter(|f| items.iter().any(|i| i.id == f.id.0)),
+    )
 }
 
 /// The last non-empty line of `s`, or a generic message.
