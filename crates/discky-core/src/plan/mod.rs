@@ -57,6 +57,11 @@ bitflags::bitflags! {
         /// Must run before the finding's later steps (a `Quit`, a vendor script): when it
         /// does not run, the executor skips every later step of the same finding.
         const GATE = 1 << 4;
+        /// The item's own removal of its source (the app bundle, the installer's payload):
+        /// when it fails, the item's later steps are skipped like after a failed tool
+        /// command. Internal to the executor: not in [`StepFlags::names`], so it never
+        /// reaches MCP output.
+        const SOURCE = 1 << 5;
     }
 }
 

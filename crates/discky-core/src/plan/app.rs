@@ -496,7 +496,9 @@ fn plan_app(
             ),
             AppSource::Pkg { .. } => (Bucket::Trash, pkg_step(f, bundle, &pkg_files, cfg, tools)),
             AppSource::AppStore | AppSource::Dragged => {
-                (Bucket::Trash, path_step(f, &[bundle.to_path_buf()], cfg))
+                let mut s = path_step(f, &[bundle.to_path_buf()], cfg);
+                s.flags |= StepFlags::SOURCE;
+                (Bucket::Trash, s)
             }
         };
         let zapped = match source {
@@ -778,6 +780,7 @@ fn pkg_step(
     let mut paths = vec![bundle.to_path_buf()];
     paths.extend(extra);
     let mut s = path_step(f, &paths, cfg);
+    s.flags |= StepFlags::SOURCE;
     if paths.len() > 1 {
         let n = paths.len() - 1;
         let files = if n == 1 { "file" } else { "files" };

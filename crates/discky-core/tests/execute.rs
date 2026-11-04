@@ -965,3 +965,102 @@ fn failed_trash_step_blocks_nothing() {
     assert_eq!(rep.stopped_at, None);
     assert_eq!(read_log(&paths).len(), 3);
 }
+
+#[test]
+fn failed_source_step_skips_the_items_later_steps() {
+    use discky_core::plan::{StepFlags, StepKind};
+    let (d, paths, _bin) = setup();
+    let bundle = d.path().join("Foo-fail.app");
+    let leftover = d.path().join("leftover");
+    let marker = d.path().join("command-ran");
+    let b = d.path().join("b");
+    for p in [&bundle, &leftover, &b] {
+        std::fs::create_dir(p).unwrap();
+    }
+    // Item A: its own bundle (SOURCE, refused by the fake trash), a leftover path and a
+    // command. Item B: a Trash step for `b`.
+    let cmd = Finding {
+        id: FindingId("A-cmd".into()),
+        ..command_finding(d.path(), &format!("touch '{}'", marker.display()), None)
+    };
+    let mut plan = plan_removal(
+        &[
+            &trash_item("A", &bundle),
+            &trash_item("A-leftover", &leftover),
+            &cmd,
+            &trash_item("B", &b),
+        ],
+        &Config::default(),
+    );
+    assert_eq!(plan.steps.len(), 4, "{:#?}", plan.steps);
+    // A rule command is planned before the Trash steps; move it after them, where an
+    // app's `defaults delete` and `pkgutil --forget` commands run.
+    let command = plan.steps.remove(0);
+    plan.steps.insert(2, command);
+    for (i, s) in plan.steps.iter_mut().enumerate() {
+        s.index = i;
+    }
+    assert!(matches!(plan.steps[2].kind, StepKind::Command { .. }));
+    plan.steps[0].flags |= StepFlags::SOURCE;
+    plan.steps[1].finding = FindingId("A".into());
+    plan.steps[2].finding = FindingId("A".into());
+
+    let rep = execute_plan(&plan, &opts(Actor::App, failing_trash(d.path())), &paths).unwrap();
+    assert_eq!(
+        statuses(&rep),
+        [
+            StepStatus::Failed,
+            StepStatus::Skipped,
+            StepStatus::Skipped,
+            StepStatus::Done
+        ]
+    );
+    assert_eq!(rep.results[1].reason.as_deref(), Some(FAILED_STEP_REASON));
+    assert_eq!(rep.results[2].reason.as_deref(), Some(FAILED_STEP_REASON));
+    assert!(bundle.exists() && leftover.exists() && !marker.exists());
+    assert!(!b.exists(), "the other item still runs");
+    assert_eq!(rep.stopped_at, None);
+}
+
+#[test]
+fn failed_gate_script_skips_the_items_later_steps() {
+    use discky_core::plan::StepFlags;
+    let (d, paths, bin) = setup();
+    let script = d.path().join("gate.sh");
+    std::fs::write(&script, "#!/bin/sh\necho refused >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let a = d.path().join("a");
+    let b = d.path().join("b");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    // Item A: a GATE script that exits 1, then a Trash step for `a`. Item B: Trash `b`.
+    let gate = Finding {
+        id: FindingId("A".into()),
+        removal: Removal::Command {
+            tool: "sh".into(),
+            argv: vec![script.display().to_string()],
+            cwd: None,
+            install_hint: None,
+            freed_note: None,
+        },
+        ..command_finding(d.path(), "", None)
+    };
+    let mut plan = plan_removal(
+        &[&gate, &trash_item("A-path", &a), &trash_item("B", &b)],
+        &Config::default(),
+    );
+    assert_eq!(plan.steps.len(), 3, "{:#?}", plan.steps);
+    plan.steps[0].flags |= StepFlags::GATE;
+    plan.steps[1].finding = FindingId("A".into());
+
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert_eq!(
+        statuses(&rep),
+        [StepStatus::Failed, StepStatus::Skipped, StepStatus::Done]
+    );
+    assert!(rep.results[0].output.contains("refused"));
+    assert_eq!(rep.results[1].reason.as_deref(), Some(FAILED_STEP_REASON));
+    assert!(a.exists());
+    assert!(!b.exists());
+    assert_eq!(rep.stopped_at, None);
+}

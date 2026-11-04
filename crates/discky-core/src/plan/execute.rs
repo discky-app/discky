@@ -4,10 +4,11 @@
 //! whole plan. Steps then run in order, and every executed step is appended to the
 //! history log before the next one starts; only a log that cannot be written stops the
 //! whole queue. A failed step stops its own finding, not the queue: when it is a step the
-//! later ones depend on — a `GATE` step (a `Quit`, a vendor script) or the tool's own
-//! removal (`Command`, `OllamaDelete`: no trashing after the official command failed) —
-//! the later non-`Quit` steps of its finding are `Skipped`. A failed `Trash` or `Remove`
-//! step blocks nothing. Paths are
+//! later ones depend on — a `GATE` step (a `Quit`, a vendor script), the tool's own
+//! removal (`Command`, `OllamaDelete`: no trashing after the official command failed) or
+//! the item's own removal of its source (a `SOURCE` step: the app bundle, the installer's
+//! payload) — the later non-`Quit` steps of its finding are `Skipped`. A failed `Trash`
+//! or `Remove` step of a leftover path blocks nothing. Paths are
 //! only ever handed to the Trash or removed when they are listed in the step itself.
 //! A window between the stale check and each action is unavoidable; the last path
 //! component is still protected because every removal decides by `lstat`.
@@ -44,7 +45,8 @@ const QUIT_FIRST_REASON: &str = "Needs the app quit first; run from Discky.app";
 /// Why a step after another `GATE` step (a vendor script) that did not run is skipped.
 const EARLIER_STEP_REASON: &str = "Needs an earlier interactive step; run from Discky.app";
 /// Why a step is skipped after a step of its finding that the rest depend on failed: a
-/// `GATE` step (a vendor script) or the tool's own command (`Command`, `OllamaDelete`).
+/// `GATE` step (a vendor script), the tool's own command (`Command`, `OllamaDelete`) or
+/// the item's own `SOURCE` step (its app bundle).
 pub const FAILED_STEP_REASON: &str = "an earlier command of this item failed";
 /// Absolute, never looked up through `PATH`: it may show an administrator prompt.
 pub const OSASCRIPT: &str = "/usr/bin/osascript";
@@ -313,10 +315,11 @@ pub fn execute_plan(
     })
 }
 
-/// A failure of `step` skips the later steps of its finding: a `GATE` step or the tool's
-/// own removal. A failed `Trash` or `Remove` leaves the finding's other paths to run.
+/// A failure of `step` skips the later steps of its finding: a `GATE` step, the tool's
+/// own removal or the item's `SOURCE` step. A failed `Trash` or `Remove` of a leftover
+/// path leaves the finding's other paths to run.
 fn blocks_its_finding(step: &Step) -> bool {
-    step.flags.contains(StepFlags::GATE)
+    step.flags.intersects(StepFlags::GATE | StepFlags::SOURCE)
         || matches!(
             step.kind,
             StepKind::Command { .. } | StepKind::OllamaDelete { .. }

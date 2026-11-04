@@ -448,6 +448,11 @@ fn pkg_plan_trashes_files_then_forgets() {
     assert_eq!(trashed(&p.steps[0]), [bundle.clone(), home_file]);
     assert_eq!(p.steps[0].component, Some(0));
     assert_eq!(p.steps[0].freed, Some(100));
+    assert!(p.steps[0].flags.contains(StepFlags::SOURCE));
+    assert!(
+        !p.steps[1].flags.contains(StepFlags::SOURCE),
+        "a leftover path"
+    );
     let w = &p.steps[0].warnings;
     assert!(
         w.contains(&"left in place: /usr/local/bin/zoom-cli".to_string()),
@@ -494,6 +499,9 @@ fn dragged_plan_is_a_trash_step() {
         assert_eq!(p.steps[0].component, Some(0));
         assert_eq!(p.steps[0].freed, Some(42));
         assert!(!p.steps[0].flags.contains(StepFlags::INTERACTIVE));
+        assert!(p.steps[0].flags.contains(StepFlags::SOURCE));
+        // Internal to the executor: never one of the exported flag names.
+        assert!(!p.steps[0].flags.names().contains(&"source"));
         let mut cfg = Config::default();
         cfg.removal.mode = RemovalMode::Permanent;
         let p = plan_with(&f, None, &PlanTools::default(), &cfg);
