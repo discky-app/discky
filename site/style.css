@@ -99,7 +99,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: 
   padding: 8px 8px 8px 12px;
   min-width: 0;
 }
-.cmd code { flex: 1; overflow-x: auto; white-space: nowrap; }
+.cmd code { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .copy {
   flex: none;
   background: transparent;
