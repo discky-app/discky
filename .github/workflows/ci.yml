@@ -25,7 +25,16 @@ jobs:
       - run: test -x target/Discky.app/Contents/MacOS/discky-mcp
       - run: target/Discky.app/Contents/MacOS/discky-mcp --help | grep -q "Discky MCP server"
       - run: codesign --verify --deep --strict target/Discky.app
-      - run: test "$(cargo xtask version)" = "$(grep -m1 '^version' crates/discky-mcp/Cargo.toml | cut -d'"' -f2)"
+      # Every manifest carries the version the bundle is stamped with.
+      - run: |
+          want="$(cargo xtask version)"
+          for m in crates/discky-core/Cargo.toml crates/discky-mcp/Cargo.toml crates/xtask/Cargo.toml crates/discky-app/Cargo.toml; do
+            got="$(grep -m1 '^version' "$m" | cut -d'"' -f2)"
+            if [ "$got" != "$want" ]; then
+              echo "$m: version $got, expected $want" >&2
+              exit 1
+            fi
+          done
       # brew style only accepts casks that live in a tap, so use a throwaway local one.
       - run: |
           packaging/homebrew/render-cask.sh 0.0.0 0000000000000000000000000000000000000000000000000000000000000000 > "${{ runner.temp }}/discky.rb"
