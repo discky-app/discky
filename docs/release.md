@@ -30,7 +30,7 @@ Set them under the repository's Settings → Secrets and variables → Actions.
 | --- | --- |
 | `MACOS_SIGN_P12` | `base64 -i cert.p12` of your Apple Development certificate, exported from Keychain Access together with its private key as `cert.p12` |
 | `MACOS_SIGN_P12_PASSWORD` | The password chosen when exporting `cert.p12` |
-| `TAP_TOKEN` | A fine-grained personal access token with Contents: read and write on `AlxGolubev/homebrew-discky` only |
+| `TAP_TOKEN` | A fine-grained personal access token with Contents: read and write on `discky-app/homebrew-tap` only |
 
 Without `MACOS_SIGN_P12` the build is ad-hoc signed and the run shows a warning. Without `TAP_TOKEN` the job summary says to update the tap by hand. The secrets reach only the steps that use them.
 
@@ -38,7 +38,7 @@ If the first signed run fails with "0 valid identities found", the runner lacks 
 
 ## Updating the tap by hand
 
-Download `discky.rb` from the release and commit it as `Casks/discky.rb` in `AlxGolubev/homebrew-discky` with the message `discky <version>`.
+Download `discky.rb` from the release and commit it as `Casks/discky.rb` in `discky-app/homebrew-tap` with the message `discky <version>`.
 
 ## Why the signature matters for Full Disk Access
 

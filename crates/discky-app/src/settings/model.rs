@@ -199,7 +199,7 @@ pub fn mise_info(home: &Path) -> Option<MiseInfo> {
 // ------------------------------------------------------------------ links
 
 /// Project repository.
-pub const REPO_URL: &str = "https://github.com/AlxGolubev/discky";
+pub const REPO_URL: &str = "https://github.com/discky-app/discky";
 /// About shows a Donate row only when this is `Some`.
 pub const DONATE_URL: Option<&str> = None;
 #[cfg(test)]

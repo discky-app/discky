@@ -5,8 +5,8 @@
 <p align="center">Find what is eating your Mac's disk and clear it safely, by hand or through an AI agent.</p>
 
 <p align="center">
-  <a href="https://github.com/AlxGolubev/discky/stargazers"><img src="https://img.shields.io/github/stars/AlxGolubev/discky?style=flat&logo=github" alt="GitHub stars"></a>
-  <a href="https://github.com/AlxGolubev/discky/actions/workflows/ci.yml"><img src="https://github.com/AlxGolubev/discky/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/discky-app/discky/stargazers"><img src="https://img.shields.io/github/stars/discky-app/discky?style=flat&logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/discky-app/discky/actions/workflows/ci.yml"><img src="https://github.com/discky-app/discky/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/macOS-15%2B-lightgrey?logo=apple" alt="macOS 15+">
   <img src="https://img.shields.io/badge/Rust-1.99-orange?logo=rust" alt="Rust 1.99">
@@ -51,19 +51,19 @@ Discky needs Apple Silicon, macOS 15 or newer (APFS). Building from source needs
 ### Homebrew
 
 ```sh
-brew install --cask AlxGolubev/discky/discky
+brew install --cask discky-app/tap/discky
 ```
 
 This installs `/Applications/Discky.app` and symlinks `discky-mcp` into Homebrew's `bin`. The app is not notarized (there is no paid Apple account), so the cask removes the macOS quarantine attribute from it after installing; for a copy installed another way, run `xattr -dr com.apple.quarantine /Applications/Discky.app` or allow it once in System Settings → Privacy & Security → Open Anyway. Upgrade with `brew upgrade --cask discky`. Builds are ad-hoc signed until the release workflow has a certificate, so macOS asks for Full Disk Access again after an update.
 
 ### Installer package
 
-Every [release](https://github.com/AlxGolubev/discky/releases) also has `Discky-<version>.pkg`, which installs `/Applications/Discky.app` (with `discky-mcp` inside) without Homebrew and upgrades the copy already there. The package is not signed or notarized (that needs a paid Apple account), so macOS blocks it the first time: click Done, open System Settings → Privacy & Security, click **Open Anyway** next to the message about the package, confirm with your password, then open the package again. From a terminal, `sudo installer -pkg Discky-<version>.pkg -target /` installs it without that prompt. After installing, Settings → MCP in the app shows the `claude mcp add` line for the bundled server. To remove the app later, drag `Discky.app` to the Trash; `sudo pkgutil --forget com.alxgol.discky` clears the receipt.
+Every [release](https://github.com/discky-app/discky/releases) also has `Discky-<version>.pkg`, which installs `/Applications/Discky.app` (with `discky-mcp` inside) without Homebrew and upgrades the copy already there. The package is not signed or notarized (that needs a paid Apple account), so macOS blocks it the first time: click Done, open System Settings → Privacy & Security, click **Open Anyway** next to the message about the package, confirm with your password, then open the package again. From a terminal, `sudo installer -pkg Discky-<version>.pkg -target /` installs it without that prompt. After installing, Settings → MCP in the app shows the `claude mcp add` line for the bundled server. To remove the app later, drag `Discky.app` to the Trash; `sudo pkgutil --forget com.alxgol.discky` clears the receipt.
 
 ### From source
 
 ```sh
-git clone https://github.com/AlxGolubev/discky
+git clone https://github.com/discky-app/discky
 cd discky
 cargo xtask install
 ```

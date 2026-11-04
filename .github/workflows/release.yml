@@ -119,7 +119,7 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
-          git clone --quiet "https://x-access-token:$TAP_TOKEN@github.com/AlxGolubev/homebrew-discky" "$RUNNER_TEMP/tap"
+          git clone --quiet "https://x-access-token:$TAP_TOKEN@github.com/discky-app/homebrew-tap" "$RUNNER_TEMP/tap"
           mkdir -p "$RUNNER_TEMP/tap/Casks"
           cp discky.rb "$RUNNER_TEMP/tap/Casks/discky.rb"
           cd "$RUNNER_TEMP/tap"
@@ -135,7 +135,7 @@ jobs:
       - name: Tap update instructions
         if: github.event_name == 'push' && env.HAS_TAP != '1'
         run: |
-          echo "TAP_TOKEN is not set: copy discky.rb from the release to AlxGolubev/homebrew-discky/Casks/discky.rb" >> "$GITHUB_STEP_SUMMARY"
+          echo "TAP_TOKEN is not set: copy discky.rb from the release to discky-app/homebrew-tap/Casks/discky.rb" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Delete the build keychain
         if: always() && env.HAS_P12 == '1'

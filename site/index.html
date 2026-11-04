@@ -18,7 +18,7 @@
 <body>
   <header class="top">
     <a class="brand" href="/"><img src="assets/logo.png" width="28" height="28" alt="">Discky</a>
-    <a class="gh" href="https://github.com/AlxGolubev/discky">GitHub</a>
+    <a class="gh" href="https://github.com/discky-app/discky">GitHub</a>
   </header>
 
   <main>
@@ -41,7 +41,7 @@
       <div class="row">
         <span class="method">Homebrew</span>
         <div class="cmd">
-          <code id="brew-cmd">brew install --cask AlxGolubev/discky/discky</code>
+          <code id="brew-cmd">brew install --cask discky-app/tap/discky</code>
           <button type="button" class="copy" data-copy="brew-cmd" aria-label="Copy command">Copy</button>
         </div>
       </div>
@@ -49,8 +49,8 @@
       <div class="row">
         <span class="method">Download</span>
         <div class="buttons">
-          <a class="btn" id="dl-pkg" href="https://github.com/AlxGolubev/discky/releases/latest">Installer package<small>.pkg</small></a>
-          <a class="btn" id="dl-zip" href="https://github.com/AlxGolubev/discky/releases/latest">App bundle<small>.zip</small></a>
+          <a class="btn" id="dl-pkg" href="https://github.com/discky-app/discky/releases/latest">Installer package<small>.pkg</small></a>
+          <a class="btn" id="dl-zip" href="https://github.com/discky-app/discky/releases/latest">App bundle<small>.zip</small></a>
           <span class="version" id="version">latest release</span>
         </div>
       </div>
@@ -84,15 +84,15 @@
         Every size is bytes actually allocated on disk: sparse images, APFS clones, hard links and
         cloud-only iCloud files are counted honestly. The MCP server gives your agent the same
         scanner, findings and planner; deletion by an agent stays off until you turn it on.
-        <a href="https://github.com/AlxGolubev/discky#readme">Read the full README →</a>
+        <a href="https://github.com/discky-app/discky#readme">Read the full README →</a>
       </p>
     </section>
   </main>
 
   <footer>
     <span>© 2026 Alex Golubev · MIT</span>
-    <a href="https://github.com/AlxGolubev/discky/releases">Releases</a>
-    <a href="https://github.com/AlxGolubev/discky/issues">Issues</a>
+    <a href="https://github.com/discky-app/discky/releases">Releases</a>
+    <a href="https://github.com/discky-app/discky/issues">Issues</a>
   </footer>
 
   <script>
@@ -106,7 +106,7 @@
           });
         });
       });
-      fetch('https://api.github.com/repos/AlxGolubev/discky/releases/latest')
+      fetch('https://api.github.com/repos/discky-app/discky/releases/latest')
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (rel) {
           if (!rel || !rel.assets) return;
