@@ -4,19 +4,20 @@ cask "discky" do
 
   url "https://github.com/AlxGolubev/discky/releases/download/v#{version}/Discky-#{version}.zip"
   name "Discky"
-  desc "Disk cleanup for macOS that only uses official removal mechanisms, with an MCP server"
+  desc "Disk cleanup that only uses official removal mechanisms, with an MCP server"
   homepage "https://github.com/AlxGolubev/discky"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :sequoia"
+  depends_on macos: :sequoia
 
   app "Discky.app"
   binary "#{appdir}/Discky.app/Contents/MacOS/discky-mcp"
 
-  postflight do
-    # Discky is not notarized (no paid Apple developer account). Strip the quarantine
-    # attribute so Gatekeeper lets it open; the tap's caveats say so.
-    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{appdir}/Discky.app"], sudo: false
+  # Discky is not notarized (no paid Apple developer account). Strip the quarantine
+  # attribute so Gatekeeper lets it open; the caveats say so. `{{appdir}}` is expanded
+  # by Homebrew at install time (not Ruby interpolation).
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Discky.app"]
   end
 
   zap trash: [
