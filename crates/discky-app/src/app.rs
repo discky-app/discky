@@ -27,6 +27,7 @@ use gpui_kit::*;
 use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
 use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent};
+use crate::map::{MAP_CONTEXT, MapDepthLess, MapDepthMore, MapEvent, MapUp, MapView};
 use crate::overview::OverviewView;
 use crate::removal::model::{BUSY_MESSAGE, REMOVAL_BUSY_MESSAGE, RunFlag, SCAN_BLOCKED_MESSAGE};
 use crate::removal::{self, RemovalDialog, RemovalEvent};
@@ -87,6 +88,7 @@ fn start_scan(cx: &mut App) {
 pub enum Route {
     Overview,
     Category(Category),
+    Map,
     Settings,
 }
 
@@ -96,6 +98,7 @@ impl Route {
         match self {
             Route::Overview => "Overview".to_string(),
             Route::Category(c) => c.to_string(),
+            Route::Map => "Disk map".to_string(),
             Route::Settings => "Settings".to_string(),
         }
     }
@@ -113,6 +116,7 @@ pub struct AppView {
     settings: Entity<SettingsView>,
     /// One screen per category visited so far, created on first visit.
     categories: HashMap<Category, Entity<CategoryView>>,
+    map: Entity<MapView>,
     /// The right column showing the finding last selected in a category table.
     inspector: Option<Entity<Inspector>>,
     /// The removal dialog opened last, kept so its run finishes and reports back even
@@ -123,6 +127,7 @@ pub struct AppView {
     _appearance: Subscription,
     _scan_events: Subscription,
     _category_events: Vec<Subscription>,
+    _map_events: Subscription,
     _inspector_events: Option<Subscription>,
     _removal_events: Option<Subscription>,
 }
@@ -143,6 +148,8 @@ impl AppView {
         let overview = cx.new(|cx| OverviewView::new(app, overview_scan, cx));
         let settings =
             cx.new(|cx| SettingsView::new(start_settings_section(), settings_app, window, cx));
+        let map = cx.new(|cx| MapView::new(window, cx));
+        let map_events = cx.subscribe_in(&map, window, Self::on_map_event);
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut view = AppView {
@@ -153,6 +160,7 @@ impl AppView {
             overview,
             settings,
             categories: HashMap::new(),
+            map,
             inspector: None,
             removal: None,
             scan,
@@ -160,6 +168,7 @@ impl AppView {
             _appearance: appearance,
             _scan_events: scan_events,
             _category_events: Vec::new(),
+            _map_events: map_events,
             _inspector_events: None,
             _removal_events: None,
         };
@@ -272,16 +281,20 @@ impl AppView {
         }
     }
 
-    /// Close the inspector; keyboard focus goes back to the category table.
+    /// Close the inspector; keyboard focus goes back to the category table or the map.
     fn close_inspector(&mut self, cx: &mut Context<Self>) {
         if self.inspector.take().is_none() {
             return;
         }
         self._inspector_events = None;
-        if let Route::Category(c) = self.route
-            && let Some(view) = self.categories.get(&c)
-        {
-            view.update(cx, |v, cx| v.request_focus(cx));
+        match self.route {
+            Route::Category(c) => {
+                if let Some(view) = self.categories.get(&c) {
+                    view.update(cx, |v, cx| v.request_focus(cx));
+                }
+            }
+            Route::Map => self.map.update(cx, |m, cx| m.request_focus(cx)),
+            Route::Overview | Route::Settings => {}
         }
         cx.notify();
     }
@@ -334,8 +347,8 @@ impl AppView {
         }
     }
 
-    /// Re-read the engine's snapshot everywhere it is shown: sidebar weights, Overview
-    /// and every category screen created so far.
+    /// Re-read the engine's snapshot everywhere it is shown: sidebar weights, Overview,
+    /// every category screen created so far and the map.
     fn refresh_data(&mut self, cx: &mut Context<Self>) {
         let overview = cx.global::<AppState>().engine.overview();
         self.weights = overview.by_category;
@@ -344,6 +357,7 @@ impl AppView {
         for view in self.categories.values() {
             view.update(cx, |v, cx| v.reload(cx));
         }
+        self.map.update(cx, |m, cx| m.reload(cx));
         if let Some(inspector) = &self.inspector {
             inspector.update(cx, |i, cx| i.refresh(cx));
         }
@@ -381,6 +395,21 @@ impl AppView {
             CategoryEvent::RemoveRequested(ids) => {
                 self.open_removal(defaults(ids.clone()), window, cx);
             }
+        }
+    }
+
+    /// Route a map request to the inspector.
+    fn on_map_event(
+        &mut self,
+        _: &Entity<MapView>,
+        event: &MapEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            MapEvent::InspectFinding(finding) => self.inspect(finding.clone(), window, cx),
+            // No inspector for bare paths yet: close the one showing another tile's finding.
+            MapEvent::InspectPath(_) | MapEvent::Close => self.close_inspector(cx),
         }
     }
 
@@ -431,6 +460,7 @@ impl AppView {
                         view.update(cx, |v, cx| v.request_focus(cx));
                     }
                 }
+                Route::Map => self.map.update(cx, |m, cx| m.request_focus(cx)),
                 Route::Settings => self.settings.update(cx, |s, cx| s.on_shown(cx)),
             }
             cx.notify();
@@ -451,6 +481,7 @@ impl Render for AppView {
         let content = match self.route {
             Route::Overview => self.overview.clone().into_any_element(),
             Route::Category(c) => self.category_view(c, window, cx).into_any_element(),
+            Route::Map => self.map.clone().into_any_element(),
             Route::Settings => self.settings.clone().into_any_element(),
         };
         v_flex()
@@ -517,23 +548,30 @@ impl Render for AppView {
 }
 
 /// The first screen: the Overview, or in debug builds the route named by
-/// `DISCKY_START_ROUTE` (`overview`, `settings` or a category such as `app_caches`), so a
-/// screen can be looked at without clicking to it.
+/// `DISCKY_START_ROUTE` (`overview`, `map`, `settings` or a category such as
+/// `app_caches`), so a screen can be looked at without clicking to it.
 fn start_route() -> Route {
     #[cfg(debug_assertions)]
     if let Ok(name) = std::env::var("DISCKY_START_ROUTE") {
-        match name.as_str() {
-            "overview" => return Route::Overview,
-            "settings" => return Route::Settings,
-            other => {
-                match serde_json::from_value::<Category>(serde_json::Value::String(other.into())) {
-                    Ok(c) => return Route::Category(c),
-                    Err(_) => eprintln!("DISCKY_START_ROUTE: unknown route `{other}`"),
-                }
-            }
+        match parse_route(&name) {
+            Some(r) => return r,
+            None => eprintln!("DISCKY_START_ROUTE: unknown route `{name}`"),
         }
     }
     Route::Overview
+}
+
+/// A `DISCKY_START_ROUTE` value: `overview`, `map`, `settings` or a category's snake_case name.
+#[cfg(any(debug_assertions, test))]
+fn parse_route(name: &str) -> Option<Route> {
+    match name {
+        "overview" => Some(Route::Overview),
+        "map" => Some(Route::Map),
+        "settings" => Some(Route::Settings),
+        other => serde_json::from_value::<Category>(serde_json::Value::String(other.into()))
+            .ok()
+            .map(Route::Category),
+    }
 }
 
 /// The Settings page shown first: Removal, or in debug builds the section named by
@@ -614,6 +652,9 @@ fn install_actions(cx: &mut App) {
         KeyBinding::new("space", ToggleCheck, Some(CATEGORY_TABLE_CONTEXT)),
         KeyBinding::new("backspace", RemoveSelected, Some(CATEGORY_TABLE_CONTEXT)),
         KeyBinding::new("escape", CloseInspector, Some(INSPECTOR_CONTEXT)),
+        KeyBinding::new("cmd-up", MapUp, Some(MAP_CONTEXT)),
+        KeyBinding::new("cmd-]", MapDepthMore, Some(MAP_CONTEXT)),
+        KeyBinding::new("cmd-[", MapDepthLess, Some(MAP_CONTEXT)),
     ]);
     cx.on_action(|_: &Quit, cx: &mut App| quit(cx));
     // Also handled on the main view's root; this one serves the menu with nothing focused.
@@ -919,7 +960,7 @@ fn open_startup_error(err: &EngineError, options: EngineOptions, launch: Launch,
 #[cfg(test)]
 mod tests {
     // Not `use super::*`: the GPUI glob brings a `test` attribute macro that shadows std's.
-    use super::{reset_config, startup_error_text};
+    use super::{Route, parse_route, reset_config, startup_error_text};
     use discky_core::{Config, DisckyPaths};
     use std::path::PathBuf;
 
@@ -934,6 +975,14 @@ mod tests {
             log: dir.join("removals.log"),
         };
         (dir, paths)
+    }
+
+    #[test]
+    fn map_route_has_a_title_and_debug_name() {
+        assert_eq!(Route::Map.title(), "Disk map");
+        assert_eq!(parse_route("map"), Some(Route::Map));
+        assert_eq!(parse_route("settings"), Some(Route::Settings));
+        assert_eq!(parse_route("nowhere"), None);
     }
 
     #[test]

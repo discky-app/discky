@@ -83,7 +83,7 @@ pub fn sidebar(
         }),
     ));
     let disk = SidebarGroup::new("Disk")
-        .child(SidebarMenu::new().child(SidebarMenuItem::new("Disk map").disable(true)));
+        .child(SidebarMenu::new().child(item("Disk map".into(), Route::Map)));
     let settings = SidebarMenu::new().child(item("Settings".into(), Route::Settings));
 
     Sidebar::new("main")
