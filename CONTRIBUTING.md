@@ -108,6 +108,10 @@ Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/rele
 - [ ] README updated if behaviour a user sees changed.
 - [ ] Apple Events routes checked on the signed bundle, if touched.
 
+## Website
+
+`site/` is the landing page at https://discky.xyz (plain HTML and CSS, no build step). It references `assets/logo.png` and `assets/scan.gif` from the repository root as `assets/…`, so a local preview needs those two files copied next to `index.html`. The owner deploys it by `rsync` to a static nginx host; it is not part of the release workflow.
+
 ## Design docs
 
 The rules of removal, the categories and the MCP contract are documented in the [README](README.md) and in the crate doc comments (`cargo doc --workspace --no-deps --open`). Before a large change, open an issue to discuss it first.

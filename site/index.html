@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discky: disk cleanup for your Mac, by hand or through an AI agent</title>
+  <meta name="description" content="Discky finds what is eating your Mac's disk and clears it safely, using only official removal mechanisms. Free, open source, with an MCP server for Claude Code, Codex and Cursor.">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+  <link rel="canonical" href="https://discky.xyz/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Discky: disk cleanup for your Mac">
+  <meta property="og:description" content="Find what is eating your Mac's disk and clear it safely, by hand or through an AI agent.">
+  <meta property="og:url" content="https://discky.xyz/">
+  <meta property="og:image" content="https://discky.xyz/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <link rel="stylesheet" href="style.css?v=1">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/"><img src="assets/logo.png" width="28" height="28" alt="">Discky</a>
+    <a class="gh" href="https://github.com/AlxGolubev/discky">GitHub</a>
+  </header>
+
+  <main>
+    <figure class="hero">
+      <img src="assets/scan.gif" width="480" height="140" alt="A pixel robo-duck carries paper stacks and drags a crate into a bin while a scan runs">
+    </figure>
+
+    <h1>Your Mac is full of things nobody remembers creating.</h1>
+    <p class="lead">
+      AI models apps downloaded behind your back, build folders coding agents left in every project,
+      caches of tools you used once. Discky finds them, says what each one is and whether it is safe
+      to remove, and removes it only through the tool that owns it. Nothing is ever deleted with
+      a bare <code>rm</code>.
+    </p>
+
+    <section class="install" aria-labelledby="install-h">
+      <h2 id="install-h">Install</h2>
+      <p class="req">Apple Silicon, macOS 15 or later. Free and open source (MIT).</p>
+
+      <div class="row">
+        <span class="method">Homebrew</span>
+        <div class="cmd">
+          <code id="brew-cmd">brew install --cask AlxGolubev/discky/discky</code>
+          <button type="button" class="copy" data-copy="brew-cmd" aria-label="Copy command">Copy</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="method">Download</span>
+        <div class="buttons">
+          <a class="btn" id="dl-pkg" href="https://github.com/AlxGolubev/discky/releases/latest">Installer package<small>.pkg</small></a>
+          <a class="btn" id="dl-zip" href="https://github.com/AlxGolubev/discky/releases/latest">App bundle<small>.zip</small></a>
+          <span class="version" id="version">latest release</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="method">Agent</span>
+        <div class="cmd">
+          <code id="mcp-cmd">claude mcp add discky -- /opt/homebrew/bin/discky-mcp</code>
+          <button type="button" class="copy" data-copy="mcp-cmd" aria-label="Copy command">Copy</button>
+        </div>
+      </div>
+
+      <p class="note">
+        The app is not notarized (there is no paid Apple account behind it). The cask clears the
+        quarantine flag for you; for the package, allow it once in System Settings → Privacy &amp;
+        Security → Open Anyway, or run <code>sudo installer -pkg Discky-&lt;version&gt;.pkg -target /</code>.
+        Grant Full Disk Access on first launch so the scan can see all of <code>~/Library</code>.
+      </p>
+    </section>
+
+    <section class="what" aria-labelledby="what-h">
+      <h2 id="what-h">What it finds</h2>
+      <ul>
+        <li><b>Models</b> from Ollama, Hugging Face, LM Studio, oMLX, MacWhisper.</li>
+        <li><b>Dev caches</b> of Cargo, npm, pnpm, pip, uv, Go, Gradle, Xcode, Docker and more.</li>
+        <li><b>Project builds</b>: <code>target</code>, <code>node_modules</code>, virtual environments, <code>dist</code>.</li>
+        <li><b>Applications</b> with the files they left behind, and leftovers of apps already gone.</li>
+        <li><b>App caches</b>, <b>language versions</b> from mise, and <b>large &amp; old</b> files in your home folder.</li>
+      </ul>
+      <p>
+        Every size is bytes actually allocated on disk: sparse images, APFS clones, hard links and
+        cloud-only iCloud files are counted honestly. The MCP server gives your agent the same
+        scanner, findings and planner; deletion by an agent stays off until you turn it on.
+        <a href="https://github.com/AlxGolubev/discky#readme">Read the full README →</a>
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    <span>© 2026 Alex Golubev · MIT</span>
+    <a href="https://github.com/AlxGolubev/discky/releases">Releases</a>
+    <a href="https://github.com/AlxGolubev/discky/issues">Issues</a>
+  </footer>
+
+  <script>
+    (function () {
+      document.querySelectorAll('.copy').forEach(function (b) {
+        b.addEventListener('click', function () {
+          var text = document.getElementById(b.dataset.copy).textContent;
+          navigator.clipboard.writeText(text).then(function () {
+            b.textContent = 'Copied';
+            setTimeout(function () { b.textContent = 'Copy'; }, 1500);
+          });
+        });
+      });
+      fetch('https://api.github.com/repos/AlxGolubev/discky/releases/latest')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (rel) {
+          if (!rel || !rel.assets) return;
+          var find = function (ext) {
+            var a = rel.assets.find(function (x) { return x.name.endsWith(ext); });
+            return a && a.browser_download_url;
+          };
+          var pkg = find('.pkg'), zip = find('.zip');
+          if (pkg) document.getElementById('dl-pkg').href = pkg;
+          if (zip) document.getElementById('dl-zip').href = zip;
+          if (rel.tag_name) document.getElementById('version').textContent = rel.tag_name;
+        })
+        .catch(function () {});
+    })();
+  </script>
+</body>
+</html>
