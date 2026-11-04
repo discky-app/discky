@@ -67,10 +67,11 @@ jobs:
           echo "DISCKY_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
           echo "::warning::Ad-hoc signed build: Full Disk Access must be granted again after each update"
 
-      # pkg runs bundle first; the second bundle inside it is a cached rebuild.
+      # pkg builds and signs the bundle, then wraps it.
       - run: cargo xtask pkg
       - run: codesign --verify --deep --strict target/Discky.app
       - run: pkgutil --payload-files "target/Discky-$VERSION.pkg" | grep -q "Discky.app/Contents/MacOS/discky-mcp"
+      - run: pkgutil --expand "target/Discky-$VERSION.pkg" target/pkg-expanded && ! grep -q "<relocate>" target/pkg-expanded/PackageInfo
 
       - name: Package zip, pkg, sha256 and cask
         run: |

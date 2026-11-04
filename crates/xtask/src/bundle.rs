@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The bundle's Info.plist template (`@VERSION@` is filled from discky-app's manifest).
-const PLIST_TEMPLATE: &str = include_str!("../../../packaging/macos/Info.plist");
+pub(crate) const PLIST_TEMPLATE: &str = include_str!("../../../packaging/macos/Info.plist");
 
 const NO_IDENTITY: &str = "No stable signing identity. Create one in Keychain Access \
 (Certificate Assistant → Create a Certificate, type Code Signing) and pass \

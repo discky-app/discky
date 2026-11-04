@@ -58,7 +58,7 @@ This installs `/Applications/Discky.app` and symlinks `discky-mcp` into Homebrew
 
 ### Installer package
 
-Every [release](https://github.com/AlxGolubev/discky/releases) also has `Discky-<version>.pkg`, which installs `/Applications/Discky.app` (with `discky-mcp` inside) without Homebrew. The package is not signed (that needs a paid Apple account), so macOS refuses it on double-click: Control-click the `.pkg` and choose Open, or open it once more after allowing it in System Settings → Privacy & Security → Open Anyway. After installing, Settings → MCP in the app shows the `claude mcp add` line for the bundled server. To remove the app later, drag `Discky.app` to the Trash; `pkgutil --forget com.alxgol.discky` clears the receipt.
+Every [release](https://github.com/AlxGolubev/discky/releases) also has `Discky-<version>.pkg`, which installs `/Applications/Discky.app` (with `discky-mcp` inside) without Homebrew and upgrades the copy already there. The package is not signed or notarized (that needs a paid Apple account), so macOS blocks it the first time: click Done, open System Settings → Privacy & Security, click **Open Anyway** next to the message about the package, confirm with your password, then open the package again. From a terminal, `sudo installer -pkg Discky-<version>.pkg -target /` installs it without that prompt. After installing, Settings → MCP in the app shows the `claude mcp add` line for the bundled server. To remove the app later, drag `Discky.app` to the Trash; `sudo pkgutil --forget com.alxgol.discky` clears the receipt.
 
 ### From source
 
