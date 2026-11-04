@@ -50,17 +50,17 @@ To change the time, edit `Hour` and `Minute` in the plist, then unload and load 
 1. `scan` with `wait_seconds` 60 (the most `discky-mcp` waits), then `scan_status` until the scan is done.
 2. `disk_overview`: free space and how much can be freed safely.
 3. `findings` with `label: "regenerates"` (safe: it comes back on its own), `min_bytes: 1073741824` (1 GB) and `limit: 5`.
-4. A plain-text report ending in a `SUMMARY:` line. The script appends it to the log and posts the summary with `osascript` (`display notification … with title "Discky"`). If no summary comes back, the notification points at the log.
+4. A plain-text report ending in a `SUMMARY:` line. The script appends it to the log and posts the summary with `osascript` (`display notification … with title "Discky"`). If `claude` exits with an error or no summary comes back, the notification says the report did not finish and points at the log.
 
 ## Where the job keeps its data
 
-The script sets `DISCKY_HOME` to `~/Library/Application Support/Discky/nightly`, so the job's `config.toml`, `snapshot.bin` and `removals.log` live there, apart from Discky.app's. Without a `config.toml` there the defaults apply (the default scan roots); copy your `~/Library/Application Support/Discky/config.toml` into that folder to use the same roots and exclusions.
+The script sets `DISCKY_HOME` to `~/Library/Application Support/Discky/nightly` and passes the same folder to `discky-mcp` as `--home` in its MCP config (so it does not depend on `claude` handing its environment to the server); the job's `config.toml`, `snapshot.bin` and `removals.log` live there, apart from Discky.app's. Without a `config.toml` there the defaults apply (the default scan roots); copy your `~/Library/Application Support/Discky/config.toml` into that folder to use the same roots and exclusions.
 
 ## Full Disk Access
 
 Full Disk Access is granted to Discky.app, not to `bash`, `claude` or `discky-mcp` started by `launchd`. So the 09:00 scan does not see what macOS protects (Mail, Safari, other apps' containers in `~/Library`), and macOS may ask whether those programs may read your Desktop, Documents or Downloads. That is why the job keeps its own snapshot: a smaller nightly scan never replaces the app's fuller one.
 
-To scan everything and share the app's snapshot, opt in: grant Full Disk Access (System Settings → Privacy & Security → Full Disk Access) to the binaries the job runs (`/bin/bash`, your `claude` and your `discky-mcp`), then delete the `export DISCKY_HOME=…` line in the script. Granting it to `/bin/bash` gives every bash script that access; decide whether that is acceptable on your Mac.
+To scan everything and share the app's snapshot, opt in: grant Full Disk Access (System Settings → Privacy & Security → Full Disk Access) to the binaries the job runs (`/bin/bash`, your `claude` and your `discky-mcp`), then delete the `export DISCKY_HOME=…` line in the script (without it the script passes no `--home`). Granting it to `/bin/bash` gives every bash script that access; decide whether that is acceptable on your Mac.
 
 ## Slack instead of a notification
 

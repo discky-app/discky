@@ -87,17 +87,18 @@ Build `discky-mcp` and Discky.app from the same version. They share the snapshot
 **Disk map** in the sidebar draws the last scan as a treemap: each tile is a folder or file, sized by its bytes.
 
 - **Colour:** *Category* (the finding the tile belongs to, grey when none), *Age* (time since the newest change inside: under a month, six months, a year, two years, older, unknown) or *Files* (how many files it holds).
-- **Weight:** *On disk* (allocated bytes; dataless iCloud files weigh nothing) or *Claimed* (logical size; dataless files appear as dashed tiles labelled "in the cloud"). Hard-link duplicates count once. Sparse files get a warning border and "· sparse".
+- **Weight:** *On disk* (allocated bytes; dataless iCloud files weigh nothing) or *Claimed* (logical size; dataless files appear as dashed tiles labelled "in the cloud", but the folder total above the map leaves them out). Hard-link duplicates count once. Sparse files get a warning border and "· sparse".
 - **Depth:** 1 to 4 levels of nested tiles (default 3); ⌘] adds a level, ⌘[ removes one. Small items are merged into one "N more" tile.
 - **Navigate:** hover for a tooltip (on disk, claimed, files, modified, category, flags); double-click a folder to open it; ⌘↑ or the breadcrumbs to go back up.
-- **Click** a tile to open it in the inspector. A tile that is a finding opens that finding. Any other path shows its sizes, **Show in Finder**, **Show in {category}** when a finding owns it, and **Move to Trash…** or **Delete permanently…** (by your removal setting). A removed tile disappears from the map until the next scan.
+- **Click** a tile to open it in the inspector. A tile that is a finding opens that finding. Any other path shows its sizes, **Show in Finder**, **Show in {category}** when a finding owns it, and **Move to Trash…**. Paths removed from the map always go to the Trash, even with **Delete permanently** chosen in Settings: permanent deletion is only for what a rule found. A path that needs an administrator is moved to the Trash by Finder. A removed tile disappears from the map until the next scan, and the findings inside it leave their categories.
 
 The map refuses to remove, and says why:
 
 - a scan root;
 - an iCloud file that is only in the cloud;
 - a protected location: `~/Library` itself, anything in `~/Library/Keychains`, `~/Library/Mobile Documents`, `~/Library/CloudStorage` or `~/Library/Preferences`, `/Library/Keychains`, `/System`, or a folder that contains one of these;
-- anything inside, or containing, a finding that Discky removes another way (an official command, an uninstaller) or never removes ("Managed by Dev caches; remove it from there"). Use **Show in {category}** to remove it the proper way.
+- anything inside, or containing, a finding that Discky removes another way (an official command, an uninstaller, including an app's leftovers such as its LaunchAgents) → "Managed by Dev caches; remove it from there". Use **Show in {category}** to remove it the proper way;
+- anything inside or containing something Discky never removes (do-not-touch app data, the global mise version) → "Discky never removes {title}" (or "Contains {title}, which Discky never removes").
 
 ### Prompts, quitting and upgrading
 
@@ -185,7 +186,7 @@ Under MCP, steps that need an administrator password or quit a running app are s
 
 A scheduled agent can tell you every morning what could be cleaned, without cleaning anything. It has to run on your Mac: a cloud routine cannot see your disk.
 
-[`docs/automation/`](docs/automation/nightly-report.md) has a worked example: a `launchd` agent runs [`nightly-report.sh`](docs/automation/nightly-report.sh) at 09:00. The script runs `claude -p` with every built-in tool off (`--tools ""`), `--mcp-config` pointing at `discky-mcp` and an allow-list of only `mcp__discky__scan`, `mcp__discky__scan_status`, `mcp__discky__disk_overview` and `mcp__discky__findings`. It asks Claude to scan, then report the five largest safe-to-remove findings over 1 GB, ending with a `SUMMARY:` line that the script itself posts as a macOS notification titled "Discky". Nothing in it can plan or execute a removal: the report says what *can* be cleaned, and you decide in the app or in a chat. The job keeps its own snapshot (`DISCKY_HOME=~/Library/Application Support/Discky/nightly`), because it runs without Discky.app's Full Disk Access and must not replace the app's fuller scan. For Slack instead of a notification, replace the script's `osascript` call with a `curl` to a Slack incoming webhook.
+[`docs/automation/`](docs/automation/nightly-report.md) has a worked example: a `launchd` agent runs [`nightly-report.sh`](docs/automation/nightly-report.sh) at 09:00. The script runs `claude -p` with every built-in tool off (`--tools ""`), `--mcp-config` pointing at `discky-mcp` and an allow-list of only `mcp__discky__scan`, `mcp__discky__scan_status`, `mcp__discky__disk_overview` and `mcp__discky__findings`. It asks Claude to scan, then report the five largest safe-to-remove findings over 1 GB, ending with a `SUMMARY:` line that the script itself posts as a macOS notification titled "Discky". Nothing in it can plan or execute a removal: the report says what *can* be cleaned, and you decide in the app or in a chat. The job keeps its own snapshot (`discky-mcp --home ~/Library/Application Support/Discky/nightly`), because it runs without Discky.app's Full Disk Access and must not replace the app's fuller scan. For Slack instead of a notification, replace the script's `osascript` call with a `curl` to a Slack incoming webhook.
 
 ## Safety model
 
@@ -198,11 +199,11 @@ A scheduled agent can tell you every morning what could be cleaned, without clea
   ```
 
   The config is re-read on every call, so no restart is needed.
-- **Trash by default.** `removal.mode` is `"trash"` unless you set `"permanent"`.
+- **Trash by default.** `removal.mode` is `"trash"` unless you set `"permanent"`. Permanent deletion applies only to what a rule found: a path removed from the disk map always goes to the Trash.
 - **Interactive steps are never run by the agent.** Steps that need an admin prompt are skipped.
 - **Official tools, no `rm` fallback.** Where a tool owns the data (for example `cargo cache --autoclean`), the rule runs that tool. If it is not installed, the step reports an install hint instead of falling back to `rm`.
 - **Honest sizes.** Every size is bytes allocated on disk. `freed_if_deleted` is what removing the item really frees; clones and hard links shared with files that stay are not counted. `disk_overview` reports `exact_private_size`: `true` when `freed_if_deleted` was measured exactly, `false` when it is clone-aware only; it is recorded in the snapshot, so it is `null` only before the first scan.
-- Paths labelled `do_not_touch` (Keychains, Mail, Messages, ...) are listed so you know they were seen, but have no removal method and are never removed.
+- Paths labelled `do_not_touch` (Keychains, Mail, Messages, ...) are listed so you know they were seen, but have no removal method and are never removed, not even with the folder around them from the disk map.
 
 ## Files
 

@@ -22,9 +22,14 @@ export DISCKY_HOME="$HOME/Library/Application Support/Discky/nightly"
 LOG_DIR="$HOME/Library/Logs/Discky"
 LOG="$LOG_DIR/nightly-report.log"
 
-# Same shape as the README's Claude Code config, passed inline. discky-mcp inherits
-# DISCKY_HOME from this script.
-MCP_CONFIG="{\"mcpServers\": {\"discky\": {\"command\": \"$DISCKY_MCP\"}}}"
+# Same shape as the README's Claude Code config, passed inline. The job's home is
+# passed to discky-mcp as `--home`, so it does not depend on claude handing this
+# script's environment to the MCP server; without DISCKY_HOME, no args.
+MCP_ARGS=""
+if [ -n "${DISCKY_HOME:-}" ]; then
+  MCP_ARGS=", \"args\": [\"--home\", \"$DISCKY_HOME\"]"
+fi
+MCP_CONFIG="{\"mcpServers\": {\"discky\": {\"command\": \"$DISCKY_MCP\"$MCP_ARGS}}}"
 
 # Claude Code names MCP tools mcp__<server>__<tool> in allow-lists (server "discky",
 # from MCP_CONFIG above). Only the read tools are allowed; plan_removal and
@@ -39,7 +44,10 @@ PROMPT='You are writing a short morning disk report from Discky. Do not plan or 
 4. Print a plain-text report: free space, how much can be freed safely, and for each of those findings (at most five) its title, size and category.
 5. End with one line that starts with "SUMMARY: " followed by a summary of at most 200 characters. If there are no such findings, the summary says so.'
 
-mkdir -p "$LOG_DIR" "$DISCKY_HOME"
+mkdir -p "$LOG_DIR"
+if [ -n "${DISCKY_HOME:-}" ]; then
+  mkdir -p "$DISCKY_HOME"
+fi
 # A neutral working directory, so no project's CLAUDE.md is picked up (your global
 # ~/.claude/CLAUDE.md still loads).
 cd "$LOG_DIR"
@@ -59,15 +67,19 @@ report=$("$CLAUDE" -p "$PROMPT" \
   printf '%s\n' "$report"
 } >>"$LOG"
 
-summary=$(printf '%s\n' "$report" | grep '^SUMMARY:' | tail -n 1 | sed 's/^SUMMARY: *//' || true)
+summary=""
+if [ "$status" -eq 0 ]; then
+  summary=$(printf '%s\n' "$report" | grep '^SUMMARY:' | tail -n 1 | sed 's/^SUMMARY: *//' || true)
+fi
 if [ -z "$summary" ]; then
   summary="The nightly report did not finish; see $LOG"
 fi
 
 # The summary is passed as an argument, never spliced into the AppleScript source, so
-# quotes in file names cannot change what runs.
+# quotes in file names cannot change what runs; `--` ends osascript's options, so a
+# summary starting with "-" is never read as one.
 /usr/bin/osascript \
   -e 'on run argv' \
   -e 'display notification (item 1 of argv) with title "Discky"' \
   -e 'end run' \
-  "$summary"
+  -- "$summary"
