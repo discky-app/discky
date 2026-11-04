@@ -5,8 +5,8 @@
 <p align="center">Find what is eating your Mac's disk and clear it safely, by hand or through an AI agent.</p>
 
 <p align="center">
-  <a href="https://github.com/alxgol/discky/stargazers"><img src="https://img.shields.io/github/stars/alxgol/discky?style=flat&logo=github" alt="GitHub stars"></a>
-  <a href="https://github.com/alxgol/discky/actions/workflows/ci.yml"><img src="https://github.com/alxgol/discky/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/AlxGolubev/discky/stargazers"><img src="https://img.shields.io/github/stars/AlxGolubev/discky?style=flat&logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/AlxGolubev/discky/actions/workflows/ci.yml"><img src="https://github.com/AlxGolubev/discky/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/macOS-15%2B-lightgrey?logo=apple" alt="macOS 15+">
   <img src="https://img.shields.io/badge/Rust-1.99-orange?logo=rust" alt="Rust 1.99">
@@ -45,7 +45,7 @@ Discky needs macOS 15 or newer (Apple Silicon or Intel, APFS). Building from sou
 ### Discky.app
 
 ```sh
-git clone https://github.com/alxgol/discky
+git clone https://github.com/AlxGolubev/discky
 cd discky
 cargo xtask install
 ```
@@ -63,7 +63,7 @@ A Homebrew cask is coming once the repo is public.
 From source:
 
 ```sh
-git clone https://github.com/alxgol/discky
+git clone https://github.com/AlxGolubev/discky
 cd discky
 cargo install --path crates/discky-mcp
 ```

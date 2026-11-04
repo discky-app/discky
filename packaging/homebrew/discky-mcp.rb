@@ -6,8 +6,8 @@
 # TODO: fill sha256 after the first tag (v0.1.0).
 class DisckyMcp < Formula
   desc "MCP server that lets AI agents find and safely clear disk space on macOS"
-  homepage "https://github.com/alxgol/discky"
-  url "https://github.com/alxgol/discky/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/AlxGolubev/discky"
+  url "https://github.com/AlxGolubev/discky/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "TODO: fill after first tag"
   license "MIT"
 
