@@ -206,22 +206,11 @@ impl Inspector {
             .map(|(category, id, _)| show_in_button(category, id, cx));
         let reveal: PathBuf = path.to_path_buf();
         let remove: PathBuf = path.to_path_buf();
-        h_flex()
-            .flex_shrink_0()
-            .gap_2()
-            .px_4()
-            .py_2()
-            .border_t_1()
-            .border_color(border)
+        let buttons = h_flex()
+            .flex_wrap()
+            .justify_end()
             .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_xs()
-                    .text_color(muted)
-                    .children(reason.clone()),
-            )
+            .gap_2()
             .child(
                 Button::new("inspector-reveal")
                     .small()
@@ -235,11 +224,20 @@ impl Inspector {
                     .danger()
                     .label(label)
                     .disabled(!can_remove)
-                    .when_some(reason, |this, reason| this.tooltip(reason))
+                    .when_some(reason.clone(), |this, reason| this.tooltip(reason))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(InspectorEvent::RemovePaths(vec![remove.clone()]));
                     })),
-            )
+            );
+        v_flex()
+            .flex_shrink_0()
+            .gap_1()
+            .px_4()
+            .py_2()
+            .border_t_1()
+            .border_color(border)
+            .children(reason.map(|r| div().text_xs().text_color(muted).child(r)))
+            .child(buttons)
     }
 }
 
