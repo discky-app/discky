@@ -290,8 +290,9 @@ impl RemovalModel {
     }
 
     /// The warning toast after a run that stopped: "Stopped at step N: <reason>"; else,
-    /// after a run with failed steps, "F of N steps failed; the rest ran. See the list for
-    /// why." ("1 step failed. …" for a one-step run).
+    /// after a run with failed steps, "F of N steps failed, S skipped. See the list for
+    /// why." (", S skipped" left out when none were; "1 step failed. …" for a one-step
+    /// run).
     pub fn stop_message(&self) -> Option<String> {
         let Phase::Finished(s) = &self.phase else {
             return None;
@@ -300,9 +301,15 @@ impl RemovalModel {
             return match (s.failed, self.rows.len()) {
                 (0, _) => None,
                 (_, 1) => Some("1 step failed. See the list for why.".to_string()),
-                (failed, total) => Some(format!(
-                    "{failed} of {total} steps failed; the rest ran. See the list for why."
-                )),
+                (failed, total) => {
+                    let skipped = match s.skipped {
+                        0 => String::new(),
+                        n => format!(", {n} skipped"),
+                    };
+                    Some(format!(
+                        "{failed} of {total} steps failed{skipped}. See the list for why."
+                    ))
+                }
             };
         };
         let reason = self
@@ -834,7 +841,7 @@ mod tests {
         );
         assert_eq!(
             m.stop_message().as_deref(),
-            Some("1 of 3 steps failed; the rest ran. See the list for why.")
+            Some("1 of 3 steps failed, 1 skipped. See the list for why.")
         );
     }
 
@@ -861,7 +868,7 @@ mod tests {
         }));
         assert_eq!(
             m.stop_message().as_deref(),
-            Some("2 of 2 steps failed; the rest ran. See the list for why.")
+            Some("2 of 2 steps failed. See the list for why.")
         );
         // Nothing freed and failures: the warning says enough.
         assert_eq!(m.freed_message(), None);

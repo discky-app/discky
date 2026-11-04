@@ -57,15 +57,19 @@ impl Client {
 
 // ----------------------------------------------------------------- binary
 
-/// Places `discky-mcp` may live, in preference order.
+/// Places `discky-mcp` may live, in preference order: next to the running app first
+/// (the bundle's own copy, the same version as the app), then Homebrew (Apple Silicon,
+/// then `/usr/local`), then `cargo install`.
 pub fn mcp_binary_candidates(home: &Path, exe: Option<&Path>) -> Vec<PathBuf> {
-    let mut v = vec![
-        PathBuf::from("/opt/homebrew/bin/discky-mcp"),
-        home.join(".cargo/bin/discky-mcp"),
-    ];
+    let mut v = Vec::new();
     if let Some(dir) = exe.and_then(Path::parent) {
         v.push(dir.join("discky-mcp"));
     }
+    v.extend([
+        PathBuf::from("/opt/homebrew/bin/discky-mcp"),
+        PathBuf::from("/usr/local/bin/discky-mcp"),
+        home.join(".cargo/bin/discky-mcp"),
+    ]);
     v
 }
 
@@ -194,8 +198,8 @@ pub fn mise_info(home: &Path) -> Option<MiseInfo> {
 
 // ------------------------------------------------------------------ links
 
-/// Project repository (placeholder until the repo is public).
-pub const REPO_URL: &str = "https://github.com/OWNER/discky";
+/// Project repository.
+pub const REPO_URL: &str = "https://github.com/AlxGolubev/discky";
 /// About shows a Donate row only when this is `Some`.
 pub const DONATE_URL: Option<&str> = None;
 #[cfg(test)]
@@ -225,9 +229,13 @@ mod tests {
         let exe_dir = tempfile::tempdir().unwrap();
         let exe = exe_dir.path().join("discky-app");
         let c = mcp_binary_candidates(home.path(), Some(&exe));
-        assert_eq!(c[0], PathBuf::from("/opt/homebrew/bin/discky-mcp"));
-        assert_eq!(c[1], home.path().join(".cargo/bin/discky-mcp"));
-        assert_eq!(c[2], exe_dir.path().join("discky-mcp"));
+        assert_eq!(c[0], exe_dir.path().join("discky-mcp"));
+        assert_eq!(c[1], PathBuf::from("/opt/homebrew/bin/discky-mcp"));
+        assert_eq!(c[2], PathBuf::from("/usr/local/bin/discky-mcp"));
+        assert_eq!(c[3], home.path().join(".cargo/bin/discky-mcp"));
+        assert_eq!(c.len(), 4);
+        // Without a known executable: the installed locations only.
+        assert_eq!(mcp_binary_candidates(home.path(), None).len(), 3);
     }
 
     #[test]

@@ -99,10 +99,7 @@ impl OverviewView {
     /// Access is denied and a snapshot exists: the warning row, until dismissed.
     pub(super) fn access_banner(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let text = match self.model.no_access {
-            0 => "Full Disk Access is off: parts of ~/Library were skipped.".to_string(),
-            n => format!("Full Disk Access is off: {n} folders were skipped."),
-        };
+        let text = banner_text(self.model.no_access);
         h_flex()
             .gap_2()
             .px_3()
@@ -130,5 +127,35 @@ impl OverviewView {
                         cx.notify();
                     })),
             )
+    }
+}
+
+/// The access banner's text for `no_access` unreadable folders.
+fn banner_text(no_access: usize) -> String {
+    match no_access {
+        0 => "Full Disk Access is off: parts of ~/Library were skipped.".to_string(),
+        1 => "Full Disk Access is off: 1 folder was skipped.".to_string(),
+        n => format!("Full Disk Access is off: {n} folders were skipped."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::banner_text;
+
+    #[test]
+    fn banner_counts_folders_in_the_singular_and_plural() {
+        assert_eq!(
+            banner_text(0),
+            "Full Disk Access is off: parts of ~/Library were skipped."
+        );
+        assert_eq!(
+            banner_text(1),
+            "Full Disk Access is off: 1 folder was skipped."
+        );
+        assert_eq!(
+            banner_text(3),
+            "Full Disk Access is off: 3 folders were skipped."
+        );
     }
 }
