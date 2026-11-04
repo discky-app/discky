@@ -12,6 +12,8 @@
   <img src="https://img.shields.io/badge/Rust-1.99-orange?logo=rust" alt="Rust 1.99">
 </p>
 
+<p align="center"><img src="assets/scan.gif" width="480" alt="While a scan runs, the robo-duck carries paper stacks and drags a crate into the bin"></p>
+
 Discky is three parts: a Rust scanner and rule engine that says what each big thing on your disk is and whether it is safe to remove, a desktop app (`Discky.app`), and an MCP server (`discky-mcp`) so an AI agent can do the same work in a chat.
 
 ## Why Discky

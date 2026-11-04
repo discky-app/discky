@@ -8,4 +8,6 @@ publish = false
 
 [dependencies]
 discky-app = { path = "../discky-app" }
+discky-core = { path = "../discky-core" }
+gif = "0.14"
 png = "0.18"

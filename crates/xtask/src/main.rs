@@ -1,22 +1,25 @@
 //! Developer tasks for the Discky workspace, run as `cargo xtask <command>`:
 //!
 //! - `icon`: render the pixel logo into `assets/AppIcon.icns` and `assets/logo.png`.
+//! - `scan-gif`: render the README scan animation into `assets/scan.gif`.
 //! - `bundle [--release]`: build `target/Discky.app` (always a release build) and sign it.
 //! - `install`: `bundle`, then copy the app to `/Applications/Discky.app`.
 //! - `version`: print discky-app's manifest version (the bundle's version).
 
 mod bundle;
 mod icon;
+mod scan_gif;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-const USAGE: &str = "usage: cargo xtask <icon | bundle [--release] | install | version>";
+const USAGE: &str = "usage: cargo xtask <icon | scan-gif | bundle [--release] | install | version>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("icon") => icon::run(&workspace_root()),
+        Some("scan-gif") => scan_gif::run(&workspace_root()),
         Some("bundle") => bundle::run(&workspace_root(), &args[1..]).map(|_| ()),
         Some("install") => bundle::install(&workspace_root()),
         Some("version") => bundle::print_version(&workspace_root()),

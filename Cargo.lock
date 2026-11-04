@@ -8640,6 +8640,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "discky-app",
+ "discky-core",
+ "gif 0.14.2",
  "png 0.18.1",
 ]
 

@@ -21,6 +21,9 @@ jobs:
       - run: cargo xtask icon
       - run: git diff --exit-code assets/logo.png
       - run: test -s assets/AppIcon.icns
+      # The README animation is rendered from the duck stage; the committed file must match.
+      - run: cargo xtask scan-gif
+      - run: git diff --exit-code assets/scan.gif
       - run: DISCKY_SIGN_IDENTITY=- cargo xtask bundle
       - run: test -x target/Discky.app/Contents/MacOS/discky-mcp
       - run: target/Discky.app/Contents/MacOS/discky-mcp --help | grep -q "Discky MCP server"
