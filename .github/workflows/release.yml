@@ -71,7 +71,7 @@ jobs:
       - run: cargo xtask pkg
       - run: codesign --verify --deep --strict target/Discky.app
       - run: pkgutil --payload-files "target/Discky-$VERSION.pkg" | grep -q "Discky.app/Contents/MacOS/discky-mcp"
-      - run: pkgutil --expand "target/Discky-$VERSION.pkg" target/pkg-expanded && ! grep -q "<relocate>" target/pkg-expanded/PackageInfo
+      - run: rm -rf target/pkg-expanded && pkgutil --expand "target/Discky-$VERSION.pkg" target/pkg-expanded && ! grep -q "<relocate>" target/pkg-expanded/PackageInfo
 
       - name: Package zip, pkg, sha256 and cask
         run: |
