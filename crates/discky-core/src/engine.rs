@@ -550,24 +550,42 @@ impl Engine {
         })
     }
 
-    /// Publish a snapshot without the findings of `done` steps whose paths are gone, and
-    /// of `done` Ollama deletes. The filtering runs without holding the lock; the new
-    /// snapshot shares the old index.
+    /// Publish a snapshot without the findings of `done` steps whose paths are gone, of
+    /// `done` Ollama deletes, and of findings inside a path a `done` disk-map step
+    /// (a [`plan::PATH_ID_PREFIX`] id) removed and that no longer exists (trashing
+    /// `~/Projects/old` forgets its `target/` finding). The filtering runs without holding
+    /// the lock; the new snapshot shares the old index.
     fn forget_removed(&self, done: &[&crate::plan::Step]) {
         let Some(old) = self.snapshot() else {
             return;
         };
-        let gone = |f: &Finding| {
-            done.iter().any(|s| {
-                s.finding == f.id
-                    && (matches!(s.kind, StepKind::OllamaDelete { .. }) || {
-                        let paths: Vec<&Path> = match &f.path {
-                            Some(p) => vec![p.as_path()],
-                            None => s.fingerprints.iter().map(|fp| fp.path.as_path()).collect(),
-                        };
-                        !paths.is_empty() && paths.iter().all(|p| !Fingerprint::take(p).exists)
-                    })
+        let removed_paths: Vec<&Path> = done
+            .iter()
+            .filter(|s| s.finding.0.starts_with(plan::PATH_ID_PREFIX))
+            .filter_map(|s| match &s.kind {
+                StepKind::Trash { paths } | StepKind::Remove { paths } => Some(paths),
+                _ => None,
             })
+            .flatten()
+            .map(PathBuf::as_path)
+            .filter(|p| !Fingerprint::take(p).exists)
+            .collect();
+        let inside_removed = |f: &Finding| {
+            let path = f.path.clone().or_else(|| f.node.map(|n| old.index.path(n)));
+            path.is_some_and(|fp| removed_paths.iter().any(|r| fp.starts_with(r)))
+        };
+        let gone = |f: &Finding| {
+            inside_removed(f)
+                || done.iter().any(|s| {
+                    s.finding == f.id
+                        && (matches!(s.kind, StepKind::OllamaDelete { .. }) || {
+                            let paths: Vec<&Path> = match &f.path {
+                                Some(p) => vec![p.as_path()],
+                                None => s.fingerprints.iter().map(|fp| fp.path.as_path()).collect(),
+                            };
+                            !paths.is_empty() && paths.iter().all(|p| !Fingerprint::take(p).exists)
+                        })
+                })
         };
         let kept: Vec<&Finding> = old.findings.iter().filter(|f| !gone(f)).collect();
         if kept.len() == old.findings.len() {

@@ -518,3 +518,54 @@ fn plan_paths_keeps_the_plan_and_bounds_history() {
     }
     assert!(e.get_plan(&first.id).is_none());
 }
+
+#[test]
+fn trashing_a_map_folder_forgets_the_findings_inside_it() {
+    let d = tempfile::tempdir().unwrap();
+    let e = temp_engine(&d);
+    // The build-dir pass only looks under `HOME`; the tree is under the temp dir.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe { std::env::set_var("HOME", std::env::temp_dir()) };
+    let id = e.start_scan(None);
+    e.wait_scan(&id, Duration::from_secs(30));
+    // `web/node_modules` is a plain-trash finding (`proj/target` runs `cargo clean`, so
+    // `proj` itself is refused).
+    let proj = d.path().join("tree/web");
+    let target = proj.join("node_modules");
+    let snap = e.snapshot().unwrap();
+    assert!(
+        snap.findings
+            .iter()
+            .any(|f| f.path.as_deref() == Some(target.as_path())),
+        "the fixture's node_modules is a finding"
+    );
+    let plan = e.plan_paths(std::slice::from_ref(&proj)).unwrap();
+    assert_eq!(plan.steps.len(), 1, "{:?}", plan.skipped);
+    // Trash steps run the fake trash binary of `temp_opts`, never the real Trash.
+    assert!(matches!(
+        &plan.steps[0].kind,
+        discky_core::plan::StepKind::Trash { .. }
+    ));
+    let rep = e.execute_plan(&plan.id, request()).unwrap();
+    assert!(matches!(
+        rep.results[0].status,
+        discky_core::plan::execute::StepStatus::Done
+    ));
+    assert!(!proj.exists());
+    assert!(d.path().join("trashed/web").exists());
+    let after = e.snapshot().unwrap();
+    assert!(
+        !after
+            .findings
+            .iter()
+            .any(|f| f.path.as_deref().is_some_and(|p| p.starts_with(&proj))),
+        "findings inside the trashed folder are forgotten"
+    );
+    assert!(
+        after
+            .findings
+            .iter()
+            .any(|f| f.path.as_deref() == Some(d.path().join("tree/proj/target").as_path())),
+        "findings elsewhere stay"
+    );
+}
