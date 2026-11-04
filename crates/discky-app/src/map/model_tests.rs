@@ -233,7 +233,38 @@ fn dataless_hidden_on_disk_dashed_when_claimed() {
     assert_eq!(t.caption, Some(CAPTION_CLOUD));
     assert_eq!(t.paint, Paint::Cloud);
     assert_eq!(m.weight(cloud), 100);
-    assert_eq!(m.totals().0, local_logical + 100);
+    // The dashed tile keeps its logical size, but the total counts only what is on disk.
+    assert_eq!(m.totals().0, local_logical);
+    m.set_weight_mode(WeightMode::OnDisk);
+    assert_eq!(m.totals().0, local_alloc);
+}
+
+#[test]
+fn claimed_total_leaves_out_cloud_bytes_below_and_after_exclusion() {
+    let d = tempfile::tempdir().unwrap();
+    touch(&d.path().join("docs/local"), 10_000);
+    touch(&d.path().join("docs/cloud"), 10);
+    touch(&d.path().join("other"), 5_000);
+    let mut idx = scan(&[d.path()]);
+    let cloud = idx.find(&d.path().join("docs/cloud")).unwrap();
+    let docs = idx.find(&d.path().join("docs")).unwrap();
+    set_sizes(&mut idx, cloud, 0, 1 << 20);
+    flag(&mut idx, cloud, NodeFlags::DATALESS);
+    let other_logical = idx.node(idx.find(&d.path().join("other")).unwrap()).logical;
+    let local_logical = idx
+        .node(idx.find(&d.path().join("docs/local")).unwrap())
+        .logical;
+    let mut m = MapModel::new(wrap(idx, vec![]), d.path().into(), NOW);
+    m.set_weight_mode(WeightMode::Claimed);
+    let root = m.snapshot().index.roots[0];
+    assert!(m.enter(root));
+    assert_eq!(m.weight(docs), local_logical + (1 << 20));
+    assert_eq!(m.totals().0, local_logical + other_logical);
+    assert!(m.enter(docs));
+    assert_eq!(m.totals().0, local_logical);
+    m.exclude(&[d.path().join("docs")]);
+    assert_eq!(m.root(), Some(root));
+    assert_eq!(m.totals().0, other_logical);
 }
 
 #[test]

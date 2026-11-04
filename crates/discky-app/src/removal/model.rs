@@ -90,7 +90,8 @@ pub struct RemovalModel {
     pub plan: Option<Plan>,
     pub rows: Vec<StepRow>,
     pub phase: Phase,
-    /// `removal.mode` is Permanent.
+    /// `removal.mode` is Permanent and (once planned) the plan deletes something outright:
+    /// disk-map path plans always trash, so they never show the permanent banner.
     pub permanent_mode: bool,
     /// `removal.remind_trash`: offer "Empty Trash" after a run that trashed something.
     pub remind_trash: bool,
@@ -140,12 +141,18 @@ impl RemovalModel {
                 parts: None,
             })
             .collect();
-        RemovalModel {
+        let deletes = plan
+            .steps
+            .iter()
+            .any(|s| s.flags.contains(StepFlags::PERMANENT));
+        let mut m = RemovalModel {
             plan: Some(plan),
             rows,
             phase: Phase::Ready,
             ..RemovalModel::planning(items, cfg)
-        }
+        };
+        m.permanent_mode &= deletes;
+        m
     }
 
     /// Apply a step event: `Started` marks the row running, `Finished` records its result.
@@ -613,6 +620,9 @@ mod tests {
         let m = RemovalModel::from_plan(p, &cfg);
         assert!(m.permanent_mode);
         assert!(!m.remind_trash);
+        // A disk-map path plan trashes even in permanent mode: no permanent banner.
+        let map = plan(vec![trash(0, "/h/a", StepFlags::empty(), 1)], &[]);
+        assert!(!RemovalModel::from_plan(map, &cfg).permanent_mode);
         assert_eq!(m.phase, Phase::Ready);
         assert_eq!(m.ids, ["f0", "f1"]);
         assert_eq!(m.rows.len(), 2);

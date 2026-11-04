@@ -131,10 +131,16 @@ impl MapView {
         self.changed(cx);
     }
 
+    /// Also drops the last layout (tiles, key) and the hover: their `NodeId`s belong to the
+    /// old index, so a click before the next paint must not resolve them against the new one.
     fn load(&mut self, cx: &mut Context<Self>) {
         let Some(snap) = cx.global::<AppState>().engine.snapshot() else {
             return;
         };
+        self.tiles.borrow_mut().clear();
+        self.layout_key.set(None);
+        self.hover = None;
+        self.hover_at = None;
         match &mut self.model {
             Some(model) => model.set_snapshot(snap),
             None => {
@@ -228,6 +234,10 @@ impl MapView {
         let (Some(node), Some(model)) = (node, &mut self.model) else {
             return;
         };
+        // A tile laid out over another index (a stale layout) is ignored.
+        if node.0 as usize >= model.snapshot().index.len() {
+            return;
+        }
         if e.click_count() >= 2 {
             if is_dir && model.enter(node) {
                 self.changed(cx);

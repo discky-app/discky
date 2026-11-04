@@ -822,12 +822,10 @@ impl Render for Inspector {
                 )
             }
             Subject::Path(p) => {
-                let mode = Self::removal_mode(cx);
-                let rows = self.path_rows(mode);
+                let rows = self.path_rows();
                 (
                     self.path_body(p, rows.as_ref(), cx).into_any_element(),
-                    self.path_footer(p, rows.as_ref(), mode, cx)
-                        .into_any_element(),
+                    self.path_footer(p, rows.as_ref(), cx).into_any_element(),
                 )
             }
         };

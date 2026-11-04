@@ -142,6 +142,9 @@ pub struct MapModel {
     weight: WeightMode,
     excluded: HashSet<NodeId>,
     subtracted: HashMap<NodeId, Subtracted>,
+    /// Claimed bytes of dataless (cloud-only) entries strictly below each node, after
+    /// exclusions: taken off [`MapModel::totals`] under Claimed.
+    cloud: HashMap<NodeId, u64>,
 }
 
 impl MapModel {
@@ -158,6 +161,7 @@ impl MapModel {
             weight: WeightMode::OnDisk,
             excluded: HashSet::new(),
             subtracted: HashMap::new(),
+            cloud: HashMap::new(),
         };
         m.reset_subtractions();
         m
@@ -165,11 +169,13 @@ impl MapModel {
 
     /// Clears exclusions and seeds `subtracted` with every hard-link duplicate's logical
     /// size on each ancestor: the walker keeps `logical` on a duplicate (and so in
-    /// `agg_logical`), but the shared bytes count once, under the first name.
+    /// `agg_logical`), but the shared bytes count once, under the first name. Then seeds
+    /// `cloud` with each outermost dataless entry's claimed weight on each ancestor.
     fn reset_subtractions(&mut self) {
         self.excluded.clear();
         self.subtracted.clear();
-        let idx = &self.snap.index;
+        self.cloud.clear();
+        let idx = Arc::clone(&self.snap.index);
         for n in idx
             .nodes
             .iter()
@@ -180,6 +186,40 @@ impl MapModel {
                 self.subtracted.entry(a).or_default().claimed += n.logical;
                 cur = idx.node(a).parent;
             }
+        }
+        let ancestors =
+            |id: NodeId| std::iter::successors(idx.node(id).parent, |&a| idx.node(a).parent);
+        let dataless = |id: NodeId| idx.node(id).flags.contains(NodeFlags::DATALESS);
+        for i in 0..idx.len() {
+            let id = NodeId(i as u32);
+            if !dataless(id) || ancestors(id).any(dataless) {
+                continue;
+            }
+            let bytes = self.weight_in(id, WeightMode::Claimed);
+            if bytes == 0 {
+                continue;
+            }
+            for a in ancestors(id) {
+                *self.cloud.entry(a).or_default() += bytes;
+            }
+        }
+    }
+
+    /// Claimed bytes of dataless entries at or below `node` (the node's own claimed weight
+    /// when it is dataless itself); 0 when it is excluded.
+    fn cloud_in(&self, node: NodeId) -> u64 {
+        if self.excluded.contains(&node) {
+            0
+        } else if self
+            .snap
+            .index
+            .node(node)
+            .flags
+            .contains(NodeFlags::DATALESS)
+        {
+            self.weight_in(node, WeightMode::Claimed)
+        } else {
+            self.cloud.get(&node).copied().unwrap_or(0)
         }
     }
 
@@ -300,14 +340,25 @@ impl MapModel {
         out
     }
 
-    /// `(weight, files)` of the current folder after exclusions; at the top, over all scan roots.
+    /// `(weight, files)` of the current folder after exclusions; at the top, over all scan
+    /// roots. The weight never counts cloud-only (dataless) bytes, under either mode: they
+    /// weigh nothing on disk, and under Claimed their dashed tiles keep their logical size
+    /// but the folder's total leaves it out (it is not on this Mac). Hard-link duplicates
+    /// count once.
     pub fn totals(&self) -> (u64, u32) {
         let nodes: Vec<NodeId> = match self.root {
             Some(r) => vec![r],
             None => self.snap.index.roots.clone(),
         };
         nodes.iter().fold((0, 0), |(w, f), &n| {
-            (w + self.weight(n), f.saturating_add(self.files(n)))
+            let cloud = match self.weight {
+                WeightMode::OnDisk => 0,
+                WeightMode::Claimed => self.cloud_in(n),
+            };
+            (
+                w + self.weight(n).saturating_sub(cloud),
+                f.saturating_add(self.files(n)),
+            )
         })
     }
 
@@ -328,6 +379,7 @@ impl MapModel {
                 claimed: self.weight_in(node, WeightMode::Claimed),
                 files: self.files(node),
             };
+            let cloud = self.cloud_in(node);
             self.excluded.insert(node);
             let mut cur = self.snap.index.node(node).parent;
             while let Some(a) = cur {
@@ -335,6 +387,9 @@ impl MapModel {
                 s.on_disk += delta.on_disk;
                 s.claimed += delta.claimed;
                 s.files += delta.files;
+                if let Some(c) = self.cloud.get_mut(&a) {
+                    *c = c.saturating_sub(cloud);
+                }
                 cur = self.snap.index.node(a).parent;
             }
         }

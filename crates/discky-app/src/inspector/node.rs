@@ -10,7 +10,7 @@ use discky_core::fs::attr::ObjKind;
 use discky_core::plan::{NOT_IN_SNAPSHOT, PROTECTED_REFUSED, path_refusal};
 use discky_core::query::NodeFindings;
 use discky_core::rules::Category;
-use discky_core::{Engine, Inspection, RemovalMode};
+use discky_core::{Engine, Inspection};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
@@ -18,7 +18,6 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{Inspector, InspectorEvent, meta_row, path_link, show_in_button};
-use crate::app::AppState;
 use crate::format;
 
 /// What the inspector shows for a path, and whether it offers to remove it.
@@ -29,7 +28,7 @@ pub struct PathRows {
     pub rows: Vec<(&'static str, String)>,
     /// The finding owning the path (its own or an ancestor's): category, id, title.
     pub managed_by: Option<(Category, FindingId, String)>,
-    /// "Move to Trash…" or "Delete permanently…", by the removal mode.
+    /// Always [`REMOVE_LABEL`]: disk-map paths go to the Trash whatever the removal mode.
     pub remove_label: &'static str,
     pub can_remove: bool,
     /// Why the path cannot be removed (the planner's refusal text), when `!can_remove`.
@@ -40,13 +39,7 @@ pub struct PathRows {
 /// planner's verdict on it (see [`inspect_path`]). Removal is refused for a path not in
 /// the snapshot, for every path when `home` is unknown ([`PROTECTED_REFUSED`]), and with
 /// `refusal` otherwise. `now` is Unix seconds.
-pub fn path_rows(
-    insp: &Inspection,
-    refusal: Option<&str>,
-    mode: RemovalMode,
-    home: &Path,
-    now: i64,
-) -> PathRows {
+pub fn path_rows(insp: &Inspection, refusal: Option<&str>, home: &Path, now: i64) -> PathRows {
     let mut rows = Vec::new();
     if let Some(e) = &insp.entry {
         rows.push(("Path", format::home_relative(&e.path, home)));
@@ -95,19 +88,15 @@ pub fn path_rows(
             .finding
             .as_ref()
             .map(|f| (f.category, f.id.clone(), f.title.clone())),
-        remove_label: remove_label(mode),
+        remove_label: REMOVE_LABEL,
         can_remove: remove_reason.is_none(),
         remove_reason,
     }
 }
 
-/// "Move to Trash…" or "Delete permanently…".
-pub fn remove_label(mode: RemovalMode) -> &'static str {
-    match mode {
-        RemovalMode::Trash => "Move to Trash…",
-        RemovalMode::Permanent => "Delete permanently…",
-    }
-}
+/// The path subject's remove button: disk-map paths always go to the Trash (permanent
+/// removal is only for rule-found paths, spec §7), whatever the removal mode.
+pub const REMOVE_LABEL: &str = "Move to Trash…";
 
 /// `Engine::inspect` of `path`, completed for the path subject, with the planner's
 /// refusal of it (`plan::path_refusal` against `home`; `None` when it can be removed or is
@@ -147,23 +136,12 @@ pub fn title(path: &Path) -> String {
 impl Inspector {
     /// [`path_rows`] of the loaded inspection; `None` while it loads or when it could not
     /// be inspected (no snapshot).
-    pub(super) fn path_rows(&self, mode: RemovalMode) -> Option<PathRows> {
+    pub(super) fn path_rows(&self) -> Option<PathRows> {
         let insp = self.inspection.as_ref()?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-        Some(path_rows(
-            insp,
-            self.refusal.as_deref(),
-            mode,
-            &self.home,
-            now,
-        ))
-    }
-
-    /// The removal mode of the current config.
-    pub(super) fn removal_mode(cx: &App) -> RemovalMode {
-        cx.global::<AppState>().engine.config().removal.mode
+        Some(path_rows(insp, self.refusal.as_deref(), &self.home, now))
     }
 
     /// The rows (the Path row reveals `path` in Finder), then "Contents · top N".
@@ -207,7 +185,6 @@ impl Inspector {
         &self,
         path: &Path,
         rows: Option<&PathRows>,
-        mode: RemovalMode,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
@@ -218,7 +195,7 @@ impl Inspector {
             None => None,
         };
         let can_remove = rows.is_some_and(|r| r.can_remove);
-        let label = remove_label(mode);
+        let label = REMOVE_LABEL;
         let show_in = rows
             .and_then(|r| r.managed_by.clone())
             .map(|(category, id, _)| show_in_button(category, id, cx));
@@ -263,12 +240,12 @@ impl Inspector {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use discky_core::Inspection;
     use discky_core::findings::{Finding, FindingId, Removal};
     use discky_core::fs::attr::ObjKind;
     use discky_core::plan;
     use discky_core::query::TreeEntry;
     use discky_core::rules::{Category, SafetyLabel};
-    use discky_core::{Inspection, RemovalMode};
 
     use super::path_rows;
 
@@ -327,7 +304,7 @@ mod tests {
     #[test]
     fn rows_for_a_plain_folder() {
         let insp = inspection(entry("/Users/me/Projects/notes", 8192, 8192), None);
-        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
+        let rows = path_rows(&insp, None, Path::new(HOME), NOW);
         let labels: Vec<&str> = rows.rows.iter().map(|(l, _)| *l).collect();
         assert_eq!(labels, ["Path", "On disk", "Frees", "Files", "Modified"]);
         assert_eq!(rows.rows[0].1, "~/Projects/notes");
@@ -335,10 +312,8 @@ mod tests {
         assert!(rows.managed_by.is_none());
         assert!(rows.can_remove);
         assert_eq!(rows.remove_reason, None);
+        // Map paths always go to the Trash, whatever the removal mode (spec §7).
         assert_eq!(rows.remove_label, "Move to Trash…");
-        let permanent = path_rows(&insp, None, RemovalMode::Permanent, Path::new(HOME), NOW);
-        assert_eq!(permanent.remove_label, "Delete permanently…");
-        assert!(permanent.can_remove);
     }
 
     #[test]
@@ -360,13 +335,7 @@ mod tests {
             entry("/Users/me/.cargo/registry/cache", 8192, 4096),
             Some(f),
         );
-        let rows = path_rows(
-            &insp,
-            Some(&managed),
-            RemovalMode::Trash,
-            Path::new(HOME),
-            NOW,
-        );
+        let rows = path_rows(&insp, Some(&managed), Path::new(HOME), NOW);
         assert_eq!(
             rows.managed_by,
             Some((Category::DevCaches, id, "Cache".to_string()))
@@ -396,7 +365,7 @@ mod tests {
             entry("/Users/me/Projects/app/target/debug", 8192, 8192),
             Some(f),
         );
-        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
+        let rows = path_rows(&insp, None, Path::new(HOME), NOW);
         assert!(rows.managed_by.is_some());
         assert!(rows.can_remove);
         assert_eq!(rows.remove_reason, None);
@@ -405,7 +374,7 @@ mod tests {
     /// The removal reason `path_rows` gives a plain folder with `refusal` and `home`.
     fn reason(refusal: Option<&str>, home: &str) -> Option<String> {
         let insp = inspection(entry("/Users/me/Projects/notes", 8192, 8192), None);
-        let rows = path_rows(&insp, refusal, RemovalMode::Trash, Path::new(home), NOW);
+        let rows = path_rows(&insp, refusal, Path::new(home), NOW);
         assert_eq!(rows.can_remove, rows.remove_reason.is_none());
         rows.remove_reason
     }
@@ -426,10 +395,10 @@ mod tests {
     fn a_path_not_in_the_snapshot_cannot_be_removed() {
         let mut insp = inspection(entry("/Users/me/gone", 1, 1), None);
         insp.in_snapshot = false;
-        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
+        let rows = path_rows(&insp, None, Path::new(HOME), NOW);
         assert_eq!(rows.remove_reason.as_deref(), Some(plan::NOT_IN_SNAPSHOT));
         insp.entry = None;
-        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
+        let rows = path_rows(&insp, None, Path::new(HOME), NOW);
         assert!(!rows.can_remove);
         assert!(rows.rows.is_empty());
     }
