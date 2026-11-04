@@ -278,6 +278,12 @@ impl NodeFindings {
         None
     }
 
+    /// Every entry: a node and the index (in `snap.findings`) of the finding it maps to,
+    /// in no particular order.
+    pub fn entries(&self) -> impl Iterator<Item = (NodeId, usize)> + '_ {
+        self.by_node.iter().map(|(&n, &i)| (n, i))
+    }
+
     /// Direct entry only (the tile *is* the finding's node).
     pub fn direct(&self, id: NodeId) -> Option<usize> {
         self.by_node.get(&id).copied()

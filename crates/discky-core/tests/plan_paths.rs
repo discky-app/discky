@@ -3,13 +3,16 @@ use std::path::{Path, PathBuf};
 
 use discky_core::{
     Config, RemovalMode,
-    findings::{Finding, FindingId, Removal},
+    findings::{
+        AppSource, Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal,
+    },
     fs::walk::{ScanOptions, walk},
     index::NodeFlags,
     index::snapshot::{Actor, SNAPSHOT_FORMAT, Snapshot, SnapshotMeta},
     plan::{
         CLOUD_REFUSED, NOT_IN_SNAPSHOT, PATH_ID_PREFIX, PROTECTED_REFUSED, ROOT_REFUSED, StepFlags,
-        StepKind, is_protected, managed_by, path_refusal, plan_paths_in,
+        StepKind, contains_never_removed, is_protected, managed_by, never_removed, path_refusal,
+        plan_paths_in,
     },
     query::NodeFindings,
     rules::{Category, SafetyLabel},
@@ -109,17 +112,21 @@ fn plans_one_trash_step_per_existing_path() {
 }
 
 #[test]
-fn permanent_mode_plans_remove_steps() {
+fn permanent_mode_still_plans_trash_steps_for_paths() {
+    // Permanent removal is only for rule-found paths (spec §7); map tiles always trash.
     let d = tempfile::tempdir().unwrap();
     let a = d.path().join("a/one.bin");
     touch(&a, 100);
     let s = snap(d.path());
     let mut cfg = Config::default();
     cfg.removal.mode = RemovalMode::Permanent;
-    let plan = plan_paths_in(&[a], &s, &cfg, d.path());
+    let plan = plan_paths_in(std::slice::from_ref(&a), &s, &cfg, d.path());
     assert_eq!(plan.steps.len(), 1);
-    assert!(matches!(plan.steps[0].kind, StepKind::Remove { .. }));
-    assert!(plan.steps[0].flags.contains(StepFlags::PERMANENT));
+    assert!(
+        matches!(&plan.steps[0].kind, StepKind::Trash { paths } if paths == std::slice::from_ref(&a))
+    );
+    assert!(!plan.steps[0].flags.contains(StepFlags::PERMANENT));
+    assert!(plan.steps[0].description.contains("to the Trash"));
 }
 
 #[test]
@@ -358,19 +365,21 @@ fn directory_step_credits_agg_private() {
 
 #[test]
 fn admin_path_step_is_interactive() {
-    // The system log dir is root-owned on macOS, so removing a child needs an admin.
-    let sys = Path::new("/Library/Logs");
-    let Some(child) = fs::read_dir(sys)
-        .ok()
-        .and_then(|mut it| it.find_map(|e| e.ok()))
-        .map(|e| e.path())
-    else {
-        return;
-    };
+    // `/usr/bin/true` is root-owned (and SIP-protected) on every macOS, so removing it
+    // needs an admin: the step stays a Trash step, routed through Finder.
+    let sys = Path::new("/usr/bin");
+    let child = sys.join("true");
+    assert!(child.exists());
     let s = snap(sys);
     let home = tempfile::tempdir().unwrap();
-    let plan = plan_paths_in(&[child], &s, &Config::default(), home.path());
+    let plan = plan_paths_in(
+        std::slice::from_ref(&child),
+        &s,
+        &Config::default(),
+        home.path(),
+    );
     assert_eq!(plan.steps.len(), 1, "{:?}", plan.skipped);
+    assert!(matches!(plan.steps[0].kind, StepKind::Trash { .. }));
     assert!(plan.steps[0].flags.contains(StepFlags::INTERACTIVE));
 }
 
@@ -419,4 +428,144 @@ fn path_refusal_agrees_with_plan_paths_in() {
             None => assert_eq!(plan.steps.len(), 1, "{:?}", plan.skipped),
         }
     }
+}
+
+#[test]
+fn do_not_touch_findings_refuse_inside_and_containing_paths() {
+    let d = tempfile::tempdir().unwrap();
+    let data = d.path().join("Library/Application Support/Vault");
+    let inner = data.join("db/x");
+    touch(&inner, 10);
+    let mut s = snap(d.path());
+    let mut f = finding(&s, Category::AppCaches, &data, Removal::None);
+    f.label = SafetyLabel::DoNotTouch;
+    f.title = "Vault data".into();
+    s.findings.push(f);
+    let parent = d.path().join("Library/Application Support");
+    let plan = plan_paths_in(
+        &[inner.clone(), data.clone(), parent.clone()],
+        &s,
+        &Config::default(),
+        d.path(),
+    );
+    assert!(plan.steps.is_empty());
+    assert_eq!(skipped_reason(&plan, &inner), never_removed("Vault data"));
+    assert_eq!(skipped_reason(&plan, &data), never_removed("Vault data"));
+    assert_eq!(
+        skipped_reason(&plan, &parent),
+        contains_never_removed("Vault data")
+    );
+}
+
+#[test]
+fn global_mise_version_refuses_inside_and_containing_paths() {
+    let d = tempfile::tempdir().unwrap();
+    let ver = d.path().join(".local/share/mise/installs/node/22");
+    touch(&ver.join("bin/node"), 10);
+    let mut s = snap(d.path());
+    let mut f = finding(&s, Category::LanguageVersions, &ver, Removal::None);
+    f.rule_id = "mise-version".into();
+    f.title = "node 22".into();
+    s.findings.push(f);
+    let installs = d.path().join(".local/share/mise/installs");
+    let plan = plan_paths_in(
+        &[ver.join("bin"), installs.clone()],
+        &s,
+        &Config::default(),
+        d.path(),
+    );
+    assert!(plan.steps.is_empty());
+    assert_eq!(
+        skipped_reason(&plan, &ver.join("bin")),
+        never_removed("node 22")
+    );
+    assert_eq!(
+        skipped_reason(&plan, &installs),
+        contains_never_removed("node 22")
+    );
+}
+
+#[test]
+fn informational_findings_do_not_refuse() {
+    // A large `.git` (vcs-history) and orphan model blobs are `Removal::None` but not
+    // do-not-touch: the user may still remove them, or their parents, from the map.
+    let d = tempfile::tempdir().unwrap();
+    let proj = d.path().join("proj");
+    let git = proj.join(".git");
+    let blobs = d.path().join(".ollama/models");
+    touch(&git.join("objects/pack"), 10);
+    touch(&blobs.join("blobs/sha256-x"), 10);
+    let mut s = snap(d.path());
+    let mut vcs = finding(&s, Category::LargeOld, &git, Removal::None);
+    vcs.label = SafetyLabel::AppData;
+    vcs.rule_id = "vcs-history".into();
+    let mut residual = finding(&s, Category::Models, &blobs, Removal::None);
+    residual.label = SafetyLabel::AppData;
+    residual.rule_id = "ollama:residual".into();
+    s.findings.extend([vcs, residual]);
+    let paths = [
+        git.clone(),
+        proj.clone(),
+        blobs.join("blobs"),
+        blobs.clone(),
+    ];
+    let plan = plan_paths_in(&paths, &s, &Config::default(), d.path());
+    assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+    assert_eq!(plan.steps.len(), paths.len());
+}
+
+#[test]
+fn refuses_folders_containing_an_app_component() {
+    // An app's LaunchAgent is a component path (removed with `launchctl bootout`): its
+    // folder must not be trashable around the uninstaller.
+    let d = tempfile::tempdir().unwrap();
+    let agents = d.path().join("Library/LaunchAgents");
+    let plist = agents.join("com.example.agent.plist");
+    let other = d.path().join("Library/Other/x");
+    touch(&plist, 10);
+    touch(&other, 10);
+    let bundle = d.path().join("Applications/Example.app");
+    touch(&bundle.join("Contents/Info.plist"), 10);
+    let mut s = snap(d.path());
+    let mut f = finding(
+        &s,
+        Category::Apps,
+        &bundle,
+        Removal::App {
+            source: AppSource::Dragged,
+            bundle: bundle.clone(),
+            bundle_id: Some("com.example".into()),
+        },
+    );
+    f.components.push(Component {
+        kind: ComponentKind::LaunchAgent,
+        title: "LaunchAgent".into(),
+        path: Some(plist.clone()),
+        allocated: 10,
+        freed_if_deleted: 10,
+        modified: None,
+        default_on: true,
+        removal: ComponentRemoval::Bootout {
+            label: "com.example.agent".into(),
+            system: false,
+        },
+        note: None,
+        covered_by_cask: false,
+    });
+    s.findings.push(f);
+    let plan = plan_paths_in(
+        &[plist.clone(), agents.clone(), other.clone()],
+        &s,
+        &Config::default(),
+        d.path(),
+    );
+    assert_eq!(skipped_reason(&plan, &plist), managed_by(Category::Apps));
+    assert_eq!(skipped_reason(&plan, &agents), managed_by(Category::Apps));
+    assert_eq!(plan.steps.len(), 1, "{:?}", plan.skipped);
+    let nf = NodeFindings::build(&s);
+    let node = s.index.find(&agents).unwrap();
+    assert_eq!(
+        path_refusal(&s, &nf, node, d.path()),
+        Some(managed_by(Category::Apps))
+    );
 }

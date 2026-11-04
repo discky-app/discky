@@ -5,7 +5,7 @@
 //! them and uses each step's [`Fingerprint`]s to refuse when the target changed since
 //! planning.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -22,7 +22,7 @@ use crate::index::snapshot::Snapshot;
 use crate::index::{NodeFlags, NodeId};
 use crate::paths;
 use crate::query::NodeFindings;
-use crate::rules::Category;
+use crate::rules::{Category, SafetyLabel};
 use crate::tools;
 
 mod app;
@@ -326,13 +326,14 @@ fn step(f: &Finding, description: String, kind: StepKind) -> Step {
 /// A step trashing (or, in permanent mode, deleting) `paths`, `INTERACTIVE` when any of
 /// them needs an administrator, with every path fingerprinted.
 fn path_step(f: &Finding, paths: &[PathBuf], cfg: &Config) -> Step {
-    path_step_for(&f.id, f.freed_if_deleted, paths, cfg)
+    path_step_for(&f.id, f.freed_if_deleted, paths, cfg.removal.mode)
 }
 
-/// [`path_step`] for a step that credits `freed` bytes to `id`, without a finding.
-fn path_step_for(id: &FindingId, freed: u64, paths: &[PathBuf], cfg: &Config) -> Step {
+/// [`path_step`] for a step that credits `freed` bytes to `id`, without a finding, removing
+/// by `mode`.
+fn path_step_for(id: &FindingId, freed: u64, paths: &[PathBuf], mode: RemovalMode) -> Step {
     let shown = display_paths(paths);
-    let (description, kind) = match cfg.removal.mode {
+    let (description, kind) = match mode {
         RemovalMode::Trash => (
             format!("Move {shown} to the Trash"),
             StepKind::Trash {
@@ -358,7 +359,7 @@ fn path_step_for(id: &FindingId, freed: u64, paths: &[PathBuf], cfg: &Config) ->
         fingerprints: Vec::new(),
         component: None,
     };
-    if cfg.removal.mode == RemovalMode::Permanent {
+    if mode == RemovalMode::Permanent {
         s.flags |= StepFlags::PERMANENT;
     }
     if paths.iter().any(|p| needs_admin(p)) {
@@ -651,6 +652,32 @@ pub fn managed_by(category: Category) -> String {
     format!("Managed by {category}; remove it from there")
 }
 
+/// Why a path inside a finding Discky never removes (do-not-touch app data, the global
+/// mise version) is refused.
+pub fn never_removed(title: &str) -> String {
+    format!("Discky never removes {title}")
+}
+
+/// Why a path containing a finding Discky never removes is refused.
+pub fn contains_never_removed(title: &str) -> String {
+    format!("Contains {title}, which Discky never removes")
+}
+
+/// Whether removing a path inside or containing `f` from the disk map is refused, and why:
+/// `(inside, containing)` reasons. A plain trash removal never refuses; `Removal::None`
+/// refuses only for do-not-touch findings and the global mise version
+/// ([`never_removed`], [`contains_never_removed`]) — other informational findings (a
+/// large `.git`, orphan model blobs) leave the path to the user; every other removal route
+/// refuses with [`managed_by`] its category.
+fn finding_refusal(f: &Finding) -> Option<(String, String)> {
+    match &f.removal {
+        Removal::Trash { .. } => None,
+        Removal::None => (f.label == SafetyLabel::DoNotTouch || app::is_global_mise(f))
+            .then(|| (never_removed(&f.title), contains_never_removed(&f.title))),
+        _ => Some((managed_by(f.category), managed_by(f.category))),
+    }
+}
+
 /// Whether `path` is a location the disk map never removes: `home/Library` itself,
 /// anything under `home/Library/{Keychains, Mobile Documents, CloudStorage, Preferences}`,
 /// `/Library/Keychains` or `/System`. Fails closed: a `home` that is not absolute (unknown)
@@ -685,55 +712,101 @@ fn contains_protected(path: &Path, home: &Path) -> bool {
     .any(|prot| prot != path && prot.starts_with(path))
 }
 
-/// Why the disk map cannot remove `node` of `snap` (the skip reason [`plan_paths_in`]
-/// records), or `None` when it can; `findings` is [`NodeFindings::build`] of `snap`. Rules
-/// in order, first failing wins: a scan root, a dataless entry, a protected location
-/// ([`is_protected`], or one inside it), a path in or containing a finding whose removal
-/// is not a plain trash. A `home` that is not absolute protects everything.
+/// The disk map's removal verdicts over one snapshot: the one rule set the planner
+/// ([`plan_paths_in`]) and the app's path inspector share. Building it walks the ancestors
+/// of every refusing [`NodeFindings`] entry (a finding's node or a component path) once,
+/// so each [`PathRefusals::refusal`] is a lookup plus one ancestor walk.
+pub struct PathRefusals<'a> {
+    snap: &'a Snapshot,
+    findings: &'a NodeFindings,
+    home: &'a Path,
+    /// Strict ancestor → index of the first refusing finding entry below it.
+    containing: HashMap<NodeId, usize>,
+}
+
+impl<'a> PathRefusals<'a> {
+    /// `findings` is [`NodeFindings::build`] of `snap`.
+    pub fn new(snap: &'a Snapshot, findings: &'a NodeFindings, home: &'a Path) -> Self {
+        let index = &*snap.index;
+        let mut entries: Vec<(NodeId, usize)> = findings
+            .entries()
+            .filter(|&(_, i)| finding_refusal(&snap.findings[i]).is_some())
+            .collect();
+        // Earlier findings win, as in `NodeFindings`; the map's iteration order is not stable.
+        entries.sort_unstable_by_key(|&(n, i)| (i, n.0));
+        let mut containing = HashMap::new();
+        for (node, i) in entries {
+            let mut cur = index.node(node).parent;
+            while let Some(a) = cur {
+                match containing.entry(a) {
+                    std::collections::hash_map::Entry::Occupied(e) if *e.get() <= i => break,
+                    e => {
+                        e.insert_entry(i);
+                    }
+                }
+                cur = index.node(a).parent;
+            }
+        }
+        PathRefusals {
+            snap,
+            findings,
+            home,
+            containing,
+        }
+    }
+
+    /// Why the disk map cannot remove `node` (the skip reason [`plan_paths_in`] records), or
+    /// `None` when it can. Rules in order, first failing wins: a scan root, a dataless
+    /// entry, a protected location ([`is_protected`], or one inside it), a path inside a
+    /// finding that refuses (its owner in [`NodeFindings::owner`]), a path containing one
+    /// (any [`NodeFindings`] entry, component paths included). A finding refuses per its
+    /// removal: not a plain trash, and for `Removal::None` only do-not-touch findings and the
+    /// global mise version. A `home` that is not absolute protects everything.
+    pub fn refusal(&self, node: NodeId) -> Option<String> {
+        let (snap, index) = (self.snap, &*self.snap.index);
+        let n = index.node(node);
+        if n.flags.contains(NodeFlags::ROOT) {
+            return Some(ROOT_REFUSED.to_string());
+        }
+        if n.flags.contains(NodeFlags::DATALESS) {
+            return Some(CLOUD_REFUSED.to_string());
+        }
+        let p = index.path(node);
+        if is_protected(&p, self.home) || contains_protected(&p, self.home) {
+            return Some(PROTECTED_REFUSED.to_string());
+        }
+        if let Some(i) = self.findings.owner(index, node)
+            && let Some((inside, _)) = finding_refusal(&snap.findings[i])
+        {
+            return Some(inside);
+        }
+        self.containing
+            .get(&node)
+            .and_then(|&i| finding_refusal(&snap.findings[i]))
+            .map(|(_, containing)| containing)
+    }
+}
+
+/// [`PathRefusals::refusal`] of `node` of `snap` (`findings` is [`NodeFindings::build`] of
+/// it); build a [`PathRefusals`] once to ask about many nodes.
 pub fn path_refusal(
     snap: &Snapshot,
     findings: &NodeFindings,
     node: NodeId,
     home: &Path,
 ) -> Option<String> {
-    let index = &*snap.index;
-    let n = index.node(node);
-    if n.flags.contains(NodeFlags::ROOT) {
-        return Some(ROOT_REFUSED.to_string());
-    }
-    if n.flags.contains(NodeFlags::DATALESS) {
-        return Some(CLOUD_REFUSED.to_string());
-    }
-    let p = index.path(node);
-    if is_protected(&p, home) || contains_protected(&p, home) {
-        return Some(PROTECTED_REFUSED.to_string());
-    }
-    if let Some(i) = findings.owner(index, node) {
-        let f = &snap.findings[i];
-        if !matches!(f.removal, Removal::Trash { .. }) {
-            return Some(managed_by(f.category));
-        }
-    }
-    snap.findings
-        .iter()
-        .find(|f| {
-            !matches!(f.removal, Removal::Trash { .. })
-                && f.node.is_some_and(|fnode| {
-                    std::iter::successors(index.node(fnode).parent, |&a| index.node(a).parent)
-                        .any(|a| a == node)
-                })
-        })
-        .map(|f| managed_by(f.category))
+    PathRefusals::new(snap, findings, home).refusal(node)
 }
 
-/// Plan the removal of arbitrary `paths` of the snapshot (disk map tiles), one step each
-/// by `cfg.removal.mode`. A path is refused, with the reason in [`Plan::skipped`], when it
-/// is not in the snapshot, is a scan root, is dataless, is protected ([`is_protected`]) or
-/// contains a protected location, or lies in or contains a finding whose removal is not a
-/// plain trash (first failing rule wins).
-/// Repeated paths count once, at the first position.
-pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Path) -> Plan {
+/// Plan the removal of arbitrary `paths` of the snapshot (disk map tiles), one Trash step
+/// each — always the Trash, whatever `cfg.removal.mode`: permanent removal is only for
+/// rule-found paths (spec §7); a path that needs an administrator is `INTERACTIVE` (the
+/// Finder route). A path is refused, with the reason in [`Plan::skipped`], when it is not
+/// in the snapshot or by [`PathRefusals::refusal`]. Repeated paths count once, at the first
+/// position.
+pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, _cfg: &Config, home: &Path) -> Plan {
     let nf = NodeFindings::build(snap);
+    let refusals = PathRefusals::new(snap, &nf, home);
     let index = &*snap.index;
     let mut seen = HashSet::new();
     let mut steps = Vec::new();
@@ -748,7 +821,7 @@ pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Pa
             .then(|| index.find(p))
             .flatten()
             .ok_or_else(|| NOT_IN_SNAPSHOT.to_string())
-            .and_then(|node| match path_refusal(snap, &nf, node, home) {
+            .and_then(|node| match refusals.refusal(node) {
                 Some(reason) => Err(reason),
                 None => {
                     let n = index.node(node);
@@ -760,7 +833,12 @@ pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Pa
                 }
             });
         match verdict {
-            Ok(freed) => steps.push(path_step_for(&id, freed, std::slice::from_ref(p), cfg)),
+            Ok(freed) => steps.push(path_step_for(
+                &id,
+                freed,
+                std::slice::from_ref(p),
+                RemovalMode::Trash,
+            )),
             Err(reason) => skipped.push((id, reason)),
         }
     }

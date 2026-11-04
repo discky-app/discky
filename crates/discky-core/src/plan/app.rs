@@ -306,7 +306,7 @@ pub(super) fn wants_running(f: &Finding) -> bool {
         )
 }
 
-fn is_global_mise(f: &Finding) -> bool {
+pub(super) fn is_global_mise(f: &Finding) -> bool {
     f.removal == Removal::None && f.rule_id == RULE_MISE_VERSION
 }
 
