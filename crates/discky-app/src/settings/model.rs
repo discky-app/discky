@@ -1,5 +1,5 @@
-//! Pure settings model: MCP client snippets, binary detection, Full Disk Access probe,
-//! threshold parsing, mise info and links. No GPUI imports.
+//! Pure settings model: MCP client snippets, binary detection, threshold parsing, mise info
+//! and links. No GPUI imports.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -124,42 +124,6 @@ pub const MCP_TOOLS: [(&str, &str); 10] = [
     ),
 ];
 
-// -------------------------------------------------------------------- FDA
-
-/// Full Disk Access state as inferred from probing protected folders.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FdaStatus {
-    Granted,
-    Denied,
-    Unknown,
-}
-
-/// Any `PermissionDenied` means Denied, otherwise any success means Granted, else Unknown.
-pub fn fda_status_from_results(mail: &io::Result<()>, safari: &io::Result<()>) -> FdaStatus {
-    let denied =
-        |r: &io::Result<()>| matches!(r, Err(e) if e.kind() == io::ErrorKind::PermissionDenied);
-    if denied(mail) || denied(safari) {
-        FdaStatus::Denied
-    } else if mail.is_ok() || safari.is_ok() {
-        FdaStatus::Granted
-    } else {
-        FdaStatus::Unknown
-    }
-}
-
-/// Probes `~/Library/Mail` and `~/Library/Safari` with `read_dir` (nothing else is read).
-pub fn probe_fda(home: &Path) -> FdaStatus {
-    let probe = |p: PathBuf| std::fs::read_dir(p).map(|_| ());
-    fda_status_from_results(
-        &probe(home.join("Library/Mail")),
-        &probe(home.join("Library/Safari")),
-    )
-}
-
-/// Deep link to System Settings > Privacy & Security > Full Disk Access.
-pub const FDA_SETTINGS_URL: &str =
-    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
-
 // ------------------------------------------------------------- thresholds
 
 /// Parses a whole number of megabytes (decimal, 1 MB = 1 000 000 bytes); rejects 0 and garbage.
@@ -238,7 +202,6 @@ pub const DONATE_URL: Option<&str> = None;
 mod tests {
     use super::*;
     use std::fs;
-    use std::io;
 
     #[test]
     fn snippets_substitute_binary_path() {
@@ -282,28 +245,6 @@ mod tests {
         assert_eq!(first_existing(&list), Some(cargo.clone()));
         fs::remove_file(&cargo).unwrap();
         assert_eq!(first_existing(&list), Some(exe));
-    }
-
-    #[test]
-    fn fda_status_from_errors() {
-        let denied = || Err(io::Error::from(io::ErrorKind::PermissionDenied));
-        let missing = || Err(io::Error::from(io::ErrorKind::NotFound));
-        assert_eq!(
-            fda_status_from_results(&Ok(()), &denied()),
-            FdaStatus::Denied
-        );
-        assert_eq!(
-            fda_status_from_results(&denied(), &Ok(())),
-            FdaStatus::Denied
-        );
-        assert_eq!(
-            fda_status_from_results(&Ok(()), &missing()),
-            FdaStatus::Granted
-        );
-        assert_eq!(
-            fda_status_from_results(&missing(), &missing()),
-            FdaStatus::Unknown
-        );
     }
 
     #[test]

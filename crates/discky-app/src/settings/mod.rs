@@ -23,9 +23,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 
+use crate::access::{self, FdaStatus};
 use crate::app::{AppState, AppView};
 use helpers::threshold_field_text;
-use model::{FdaStatus, MiseInfo};
+use model::MiseInfo;
 
 /// Width of the section list.
 const SECTION_LIST_WIDTH: f32 = 180.;
@@ -203,7 +204,7 @@ impl SettingsView {
     fn check_fda(&mut self, cx: &mut Context<Self>) {
         self.fda = None;
         let home = self.home.clone();
-        let work = cx.background_spawn(async move { model::probe_fda(&home) });
+        let work = cx.background_spawn(async move { access::probe_fda(&home) });
         self._fda_task = cx.spawn(async move |this, cx| {
             let status = work.await;
             let _ = this.update(cx, |this, cx| {

@@ -5,8 +5,8 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex
 use gpui_kit::*;
 
 use super::helpers::no_access_preview;
-use super::model::{FDA_SETTINGS_URL, FdaStatus};
 use super::{SettingsView, group_title, help, mono, page_title, row};
+use crate::access::{FDA_SETTINGS_URL, FdaStatus};
 use crate::app::{AppState, Rescan};
 
 /// How many unreadable folders the page lists.
