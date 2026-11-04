@@ -3,6 +3,7 @@
 //! - `icon`: render the pixel logo into `assets/AppIcon.icns` and `assets/logo.png`.
 //! - `bundle [--release]`: build `target/Discky.app` (always a release build) and sign it.
 //! - `install`: `bundle`, then copy the app to `/Applications/Discky.app`.
+//! - `version`: print discky-app's manifest version (the bundle's version).
 
 mod bundle;
 mod icon;
@@ -10,7 +11,7 @@ mod icon;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-const USAGE: &str = "usage: cargo xtask <icon | bundle [--release] | install>";
+const USAGE: &str = "usage: cargo xtask <icon | bundle [--release] | install | version>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -18,6 +19,7 @@ fn main() -> ExitCode {
         Some("icon") => icon::run(&workspace_root()),
         Some("bundle") => bundle::run(&workspace_root(), &args[1..]).map(|_| ()),
         Some("install") => bundle::install(&workspace_root()),
+        Some("version") => bundle::print_version(&workspace_root()),
         _ => Err(USAGE.to_owned()),
     };
     match result {

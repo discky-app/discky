@@ -21,4 +21,8 @@ jobs:
       - run: cargo xtask icon
       - run: git diff --exit-code assets/logo.png
       - run: test -s assets/AppIcon.icns
-      # `cargo xtask bundle` stays out of CI: it needs a codesigning identity.
+      - run: DISCKY_SIGN_IDENTITY=- cargo xtask bundle
+      - run: test -x target/Discky.app/Contents/MacOS/discky-mcp
+      - run: target/Discky.app/Contents/MacOS/discky-mcp --help | grep -q "Discky MCP server"
+      - run: codesign --verify --deep --strict target/Discky.app
+      - run: test "$(cargo xtask version)" = "$(grep -m1 '^version' crates/discky-mcp/Cargo.toml | cut -d'"' -f2)"

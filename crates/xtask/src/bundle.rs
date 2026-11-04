@@ -11,7 +11,13 @@ const NO_IDENTITY: &str = "No stable signing identity. Create one in Keychain Ac
 DISCKY_SIGN_IDENTITY, or pass DISCKY_SIGN_IDENTITY=- for an ad-hoc build (Full Disk \
 Access will not survive rebuilds).";
 
-/// Build the release binary, assemble `target/Discky.app` and sign it; returns the
+/// Binaries built next to the app and shipped in `Contents/MacOS`; the Homebrew cask
+/// and CI rely on this list.
+pub fn helper_binaries() -> [&'static str; 1] {
+    ["discky-mcp"]
+}
+
+/// Build the release binaries, assemble `target/Discky.app` and sign it; returns the
 /// bundle's path. Bundles are always release builds; `--release` is accepted for
 /// symmetry with cargo.
 pub fn run(root: &Path, args: &[String]) -> Result<PathBuf, String> {
@@ -23,7 +29,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<PathBuf, String> {
     crate::run_inherit(
         Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
             .current_dir(root)
-            .args(["build", "-p", "discky-app", "--release"]),
+            .args(["build", "-p", "discky-app", "-p", "discky-mcp", "--release"]),
     )?;
 
     let target = crate::target_dir(root);
@@ -44,6 +50,9 @@ pub fn run(root: &Path, args: &[String]) -> Result<PathBuf, String> {
     std::fs::write(&plist, render_plist(PLIST_TEMPLATE, &version))
         .map_err(|e| format!("cannot write {}: {e}", plist.display()))?;
     copy(&target.join("release/discky-app"), &macos.join("Discky"))?;
+    for helper in helper_binaries() {
+        copy(&target.join("release").join(helper), &macos.join(helper))?;
+    }
     copy(
         &root.join("assets/AppIcon.icns"),
         &resources.join("AppIcon.icns"),
@@ -55,6 +64,15 @@ pub fn run(root: &Path, args: &[String]) -> Result<PathBuf, String> {
              survive rebuilds"
         );
     }
+    // Extra Mach-O files in Contents/MacOS are not covered by `--deep` and fail strict
+    // verification unsigned, so each helper is signed before the bundle.
+    for helper in helper_binaries() {
+        crate::run_capture(
+            Command::new("codesign")
+                .args(["--force", "--sign", &identity.id])
+                .arg(macos.join(helper)),
+        )?;
+    }
     crate::run_capture(
         Command::new("codesign")
             .args(["--force", "--deep", "--sign", &identity.id])
@@ -62,11 +80,17 @@ pub fn run(root: &Path, args: &[String]) -> Result<PathBuf, String> {
     )?;
     crate::run_capture(
         Command::new("codesign")
-            .args(["--verify", "--verbose"])
+            .args(["--verify", "--deep", "--strict", "--verbose"])
             .arg(&app),
     )?;
     println!("signed {} with {}", app.display(), identity.name);
     Ok(app)
+}
+
+/// `cargo xtask version`: print discky-app's manifest version and nothing else.
+pub fn print_version(root: &Path) -> Result<(), String> {
+    println!("{}", app_version(root)?);
+    Ok(())
 }
 
 /// `bundle`, then copy the app over `/Applications/Discky.app`.
@@ -197,6 +221,11 @@ mod tests {
             })
         );
         assert_eq!(pick_identity("     0 valid identities found\n"), None);
+    }
+
+    #[test]
+    fn helper_binaries_lists_the_mcp_server() {
+        assert_eq!(helper_binaries(), ["discky-mcp"]);
     }
 
     #[test]
