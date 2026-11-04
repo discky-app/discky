@@ -670,8 +670,8 @@ fn start_settings_section() -> Section {
     Section::Removal
 }
 
-/// Run Discky.app. With `self_check`, quit one second after the window opened and print
-/// `self-check ok`.
+/// Run Discky.app. With `self_check`, show the disk map in the hidden window, then quit one
+/// second after it opened and print `self-check ok`.
 pub fn run(self_check: bool) {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
@@ -713,7 +713,23 @@ pub fn run(self_check: bool) {
 
             if self_check {
                 cx.spawn(async move |cx| {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    // Show the disk map in the (hidden, unfocused) window so a map that
+                    // cannot be built or drawn from the current snapshot fails the check.
+                    cx.background_executor()
+                        .timer(Duration::from_millis(300))
+                        .await;
+                    cx.update(|cx| {
+                        for window in cx.windows() {
+                            if let Some(handle) = window.downcast::<AppView>() {
+                                let _ = handle.update(cx, |view, _, cx| {
+                                    view.navigate(Route::Map, cx);
+                                });
+                            }
+                        }
+                    });
+                    cx.background_executor()
+                        .timer(Duration::from_millis(700))
+                        .await;
                     let mut out = std::io::stdout();
                     let _ = writeln!(out, "self-check ok");
                     let _ = out.flush();

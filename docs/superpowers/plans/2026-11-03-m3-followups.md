@@ -25,11 +25,11 @@ Subagents could not click or press keys (owner rule), so verify once on real dat
 
 ## Core
 
-- Planner: "Nothing selected" when all selected paths are gone (should read "Already gone"); lone-Quit plans; the brew step credits covered components whose path is gone; package-installed prefs plists are trashed instead of `defaults delete`; pkg files are not cross-checked against other receipts; one administrator prompt per admin step (batching wanted); `installed_zap` picks the newest timestamp across all version dirs; `defaults_target` `with_extension("")` on a dotted name without `.plist`; `plan/app.rs` ≈ 900 lines, duplicated `BREW_ENV` / launchctl target building / pkgutil budget closure; `too_many_arguments` allow.
+- Planner: "Nothing selected" when all selected paths are gone (should read "Already gone") (done in M4); lone-Quit plans; the brew step credits covered components whose path is gone; package-installed prefs plists are trashed instead of `defaults delete`; pkg files are not cross-checked against other receipts; one administrator prompt per admin step (batching wanted); `installed_zap` picks the newest timestamp across all version dirs; `defaults_target` `with_extension("")` on a dotted name without `.plist`; `plan/app.rs` ≈ 900 lines, duplicated `BREW_ENV` / launchctl target building / pkgutil budget closure; `too_many_arguments` allow.
 - Leftovers: `is_loaded` without an overall budget (cache per label); `id_stem` duplicates `app_caches::owner_of`; rule-pass descendant overlap double-counts bytes in groups; "never opened*" wording; `sharing()` decides "owned" by length comparison (fail-safe); unrelated running-only ids mark jobs shared (fail-safe); `leftovers.rs` ≈ 880 lines (groups → `groups.rs`); `forget_removed` drops a path-less group when one step's paths are gone.
 - Inventory: `installed_casks` fallback may take 3 × 5 s; no direct tests for `/System/Applications` and SF_RESTRICTED exclusion; detached reader thread on timeout; `read_caskroom` may show an older cached JSON (display only); per-bundle `read_dir` for sibling uninstallers.
 - mise: `~/.tool-versions`, `~/.config/mise/conf.d/*`, `config.local.toml` count as "pinned", not global; `.tool-versions` fallback versions ignored; `.mise/config.toml` counts as its own project and bypasses the depth cap; XDG/symlinked home not recognised for Global; trailing period on the Global explain; two sequential 5 s commands worst case.
-- Snapshot: a reload between the inspector's click-time check and the dialog's plan could re-map indices (the dialog shows the real steps; a parts signature in `PlanItem` would close it).
+- Snapshot: a reload between the inspector's click-time check and the dialog's plan could re-map indices (the dialog shows the real steps; a parts signature in `PlanItem` would close it) (done in M4).
 
 ## MCP
 
@@ -39,7 +39,7 @@ Subagents could not click or press keys (owner rule), so verify once on real dat
 
 ## App
 
-- Apps tab switch drops the selection (treat the tab as a filter); `apps_filter` runs three times per toolbar render; the Applications card is hidden when 0 apps are unused even if leftovers exist; Default layout's Frees second line now truncates; `table.rs` ≈ 820 lines.
+- Apps tab switch drops the selection (treat the tab as a filter) (done in M4); `apps_filter` runs three times per toolbar render; the Applications card is hidden when 0 apps are unused even if leftovers exist; Default layout's Frees second line now truncates; `table.rs` ≈ 820 lines.
 - Inspector: Remove… enabled when components exist but none is selectable (non-mise); summary sums `freed_if_deleted` while rows show `allocated`; same-id `set_finding` does not replan; no test of the `planned()` titles path; "Needs administrator password" shown on Quit steps in "What will run"; the brew "Homebrew will also: quit …" warning duplicates Discky's Quit step; `NOTE_RUN_SCRIPT` does not raise the safety label.
 - Settings: literal backticks in the prune help text; prune output wraps instead of scrolling.
 - Dev override hint says "run from Discky.app" inside Discky.app.
