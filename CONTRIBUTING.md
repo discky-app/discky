@@ -80,7 +80,7 @@ To propose a rule without writing it, open an issue with the path, what creates 
 
 ## The removal principle
 
-Discky removes data only through the mechanism its owner provides: the tool's own command (`cargo cache --autoclean`, `brew uninstall --cask`, `mise uninstall`, Ollama's delete API…), a vendor uninstaller, an installer package's file list, or the Trash. If the tool is missing, the step reports an install hint. A failed command stops the plan; it never falls back to `rm`. Keychain items are never touched.
+Discky removes data only through the mechanism its owner provides: the tool's own command (`cargo cache --autoclean`, `brew uninstall --cask`, `mise uninstall`, Ollama's delete API…), a vendor uninstaller, an installer package's file list, or the Trash. If the tool is missing, the step reports an install hint. A failed tool command, Quit or the item's own bundle step skips that item's remaining steps; a failed Trash of a leftover path blocks nothing; other items still run, and the queue stops only when the removal log cannot be written. There is no fallback to `rm`. Keychain items are never touched.
 
 ## Apple Events
 

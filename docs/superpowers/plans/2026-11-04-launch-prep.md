@@ -17,7 +17,7 @@
 - English UI copy, no telemetry, no "coming soon" labels.
 - Owner rules: `cargo test` opens no window; `--self-check` keeps windows hidden and never calls `cx.activate`; at most one short manual app launch per GUI task, quit by the implementer; no synthetic clicks or keys; window-only screenshots, deleted after use, never pasted into reports.
 - Tests and implementers never touch the real Trash or home data, never run `brew install`/`brew uninstall`/`tccutil`, never change System Settings; read-only probes (`read_dir`, `codesign --verify`, `brew style`) are allowed.
-- Fixtures and docs carry no owner paths (`/Users/alxgol`, `OneDrive`, `/private/tmp/claude-…`).
+- Fixtures and docs carry no owner paths (the owner's home folder, cloud-synced folders, session scratchpads).
 - The app must still build and run when `discky-mcp` is absent from the bundle (`cargo run -p discky-app`).
 - Conventional Commits with the crate as scope.
 
@@ -346,6 +346,6 @@ rm ${TMPDIR:-/tmp}/discky-cask-check.rb
 ## Owner steps (outside the plan)
 
 1. Create the GitHub repositories `AlxGolubev/discky` and `AlxGolubev/homebrew-discky` (the tap: empty, a `Casks/` folder arrives with the first release).
-2. Optional secrets on `discky`: `MACOS_SIGN_P12` + `MACOS_SIGN_P12_PASSWORD` (export "Apple Development: alxgol.llait@gmail.com" with its private key from Keychain Access as .p12), `TAP_TOKEN`.
+2. Optional secrets on `discky`: `MACOS_SIGN_P12` + `MACOS_SIGN_P12_PASSWORD` (export your Apple Development certificate with its private key from Keychain Access as .p12), `TAP_TOKEN`.
 3. Push `main`, wait for CI, push `v0.1.0`; if `TAP_TOKEN` is absent, copy `discky.rb` from the release into the tap.
 4. Live checklist: the onboarding card on a scratch home, the relaunch card after a real grant, the banner after a scan without access, `brew install --cask --no-quarantine AlxGolubev/discky/discky` on this Mac after the first release.

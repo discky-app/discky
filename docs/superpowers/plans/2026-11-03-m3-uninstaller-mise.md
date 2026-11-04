@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.99, existing crates (`plist`, `serde_json`, `globset`); `brew`, `pkgutil`, `mdfind`, `lsappinfo`, `launchctl`, `defaults`, `mise` invoked read-only during scans; gpui-kit 0.9.0 for the GUI.
 
-**Spec:** `docs/superpowers/specs/2026-11-02-discky-design.md` §6 (categories, labels), §7 (plan order, official commands), §8 (uninstaller), §9 (mise), §11 (inspector components with checkboxes), §12c, §17. Ground truth from the owner's machine: `/private/tmp/claude-503/-Users-alxgol-OneDrive-Projects-discky/bdece118-e998-4d06-8876-125488509d78/scratchpad/m3-research.md` (copied into the SDD workspace as `m3-research.md` at execution time).
+**Spec:** `docs/superpowers/specs/2026-11-02-discky-design.md` §6 (categories, labels), §7 (plan order, official commands), §8 (uninstaller), §9 (mise), §11 (inspector components with checkboxes), §12c, §17. Ground truth from the owner's machine: the session scratchpad (`m3-research.md`) (copied into the SDD workspace as `m3-research.md` at execution time).
 
 ## Global Constraints
 

@@ -99,7 +99,7 @@ crates/discky-mcp/
 - [ ] **Step 1: Init git repo and workspace**
 
 ```bash
-cd /Users/alxgol/OneDrive/Projects/discky && git init -b main
+cd <repo> && git init -b main
 ```
 `Cargo.toml`: `[workspace] members = ["crates/*"] resolver = "3"`; `[workspace.package] edition = "2024", license = "MIT", rust-version = "1.99"`; `[workspace.dependencies]` listing every crate from Tech Stack with the versions checked on 2026-11-02: `libc = "0.2"`, `rayon = "1"`, `serde = { version = "1", features = ["derive"] }`, `postcard = { version = "1.1", features = ["use-std"] }`, `toml = "1"`, `globset = "0.4"`, `xxhash-rust = { version = "0.8", features = ["xxh3"] }`, `ureq = { version = "3", features = ["json"] }`, `fd-lock = "4"`, `thiserror = "2"`, `serde_json = "1"`, `rmcp = { version = "3.8", features = ["server", "macros", "transport-io"] }`, `tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }`, `schemars = "1"`, `clap = { version = "4", features = ["derive"] }`, `tracing = "0.1"`, `tracing-subscriber = { version = "0.3", features = ["env-filter"] }`, `tempfile = "3"`, `assert_cmd = "2"`.
 `.gitignore`: `/target`, `.superpowers/`, `.DS_Store`.

@@ -22,7 +22,7 @@ What Discky does differently:
 
 - **Honest bytes.** Every size is bytes allocated on disk. Discky tracks the claimed (logical) size separately, flags sparse files, and knows which blocks are shared by APFS clones and hard links, so "frees if deleted" is what removing an item really frees. Dataless iCloud files count as zero on disk.
 - **Explained findings.** Each finding comes from a rule with a category, a safety label (`regenerates`, `app_data`, `do_not_touch`, …) and a plain-language explanation.
-- **Official removal only.** Where a tool owns the data, Discky runs that tool: `cargo cache --autoclean`, `npm cache clean --force`, `brew cleanup`, `brew uninstall --cask`, `mise uninstall`, Ollama's own delete API, `hf cache rm`, `docker system prune`, and so on. Everything else goes to the Trash (or is deleted, if you choose). A failed tool command skips that item's remaining steps (there is no fallback to `rm`); a failed Trash step and every other item still run, and each failure is listed with its reason.
+- **Official removal only.** Where a tool owns the data, Discky runs that tool: `cargo cache --autoclean`, `npm cache clean --force`, `brew cleanup`, `brew uninstall --cask`, `mise uninstall`, Ollama's own delete API, `hf cache rm`, `docker system prune`, and so on. Everything else goes to the Trash (or is deleted, if you choose). A failed tool command or app bundle removal skips that item's remaining steps (there is no fallback to `rm`); a failed Trash of a leftover file and every other item still run, and each failure is listed with its reason.
 - **Agent-ready.** `discky-mcp` exposes the scanner, findings, planner and executor as ten MCP tools. Deletion by an agent is off until you turn it on.
 - **Local only, no telemetry.** Discky itself sends nothing. Its only network calls are to your Ollama server (`OLLAMA_HOST`, local by default) to list and delete models; tools it runs on your behalf (`brew`, `docker`, `hf`…) may use the network as they normally do.
 
@@ -40,15 +40,15 @@ What Discky does differently:
 
 ## Install
 
-Discky needs macOS 15 or newer (Apple Silicon or Intel, APFS). Building from source needs the Rust toolchain; `rust-toolchain.toml` pins Rust 1.99, and `rustup` picks it up on its own.
+Discky needs Apple Silicon, macOS 15 or newer (APFS). Building from source needs the Rust toolchain; `rust-toolchain.toml` pins Rust 1.99, and `rustup` picks it up on its own.
 
 ### Homebrew
 
 ```sh
-brew install --cask --no-quarantine AlxGolubev/discky/discky
+brew install --cask AlxGolubev/discky/discky
 ```
 
-This installs `/Applications/Discky.app` and symlinks `discky-mcp` into Homebrew's `bin`. `--no-quarantine` is there because the app is not notarized (there is no paid Apple account), and macOS would otherwise refuse to open it until you allow it in Privacy & Security. Upgrade with `brew upgrade --cask discky`. Builds are ad-hoc signed until the release workflow has a certificate, so macOS asks for Full Disk Access again after an update.
+This installs `/Applications/Discky.app` and symlinks `discky-mcp` into Homebrew's `bin`. The app is not notarized (there is no paid Apple account), so the cask removes the macOS quarantine attribute from it after installing; for a copy installed another way, run `xattr -dr com.apple.quarantine /Applications/Discky.app` or allow it once in System Settings → Privacy & Security → Open Anyway. Upgrade with `brew upgrade --cask discky`. Builds are ad-hoc signed until the release workflow has a certificate, so macOS asks for Full Disk Access again after an update.
 
 ### From source
 
@@ -108,7 +108,7 @@ The map refuses to remove, and says why:
 
 ### Connect to your agent
 
-`discky-mcp` speaks MCP over stdio. Use the cask's symlink (`/opt/homebrew/bin/discky-mcp`, `/usr/local/bin` on Intel) or the `cargo install` path (`~/.cargo/bin/discky-mcp`; some clients need it written out absolutely). Settings → MCP in the app shows the exact line for the binary it found.
+`discky-mcp` speaks MCP over stdio. Use the cask's symlink (`/opt/homebrew/bin/discky-mcp`) or the `cargo install` path (`~/.cargo/bin/discky-mcp`; some clients need it written out absolutely). Settings → MCP in the app shows the exact line for the binary it found.
 
 **Claude Code**
 
