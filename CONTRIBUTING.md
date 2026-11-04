@@ -110,4 +110,4 @@ Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/rele
 
 ## Design docs
 
-The design spec lives in [`docs/superpowers/specs`](docs/superpowers/specs) and the milestone plans in [`docs/superpowers/plans`](docs/superpowers/plans). Read the spec before a large change, and open an issue to discuss one first.
+The rules of removal, the categories and the MCP contract are documented in the [README](README.md) and in the crate doc comments (`cargo doc --workspace --no-deps --open`). Before a large change, open an issue to discuss it first.

@@ -1,3 +1,5 @@
 /target
 .superpowers/
+# Design spec and milestone plans: working notes in Russian, kept local.
+docs/superpowers/
 .DS_Store
