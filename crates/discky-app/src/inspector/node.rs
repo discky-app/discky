@@ -1,16 +1,13 @@
 //! The inspector's path subject: a disk-map tile without a finding of its own. Its rows
-//! and removal button state are built here, free of GPUI ([`path_rows`]); the planner
-//! (`Engine::plan_paths`) stays the authority on what is removed.
+//! and removal button state are built here, free of GPUI ([`path_rows`]); whether the
+//! path can be removed is the planner's own verdict (`plan::path_refusal`).
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use discky_core::findings::{FindingId, Removal};
+use discky_core::findings::FindingId;
 use discky_core::fs::attr::ObjKind;
-use discky_core::index::NodeFlags;
-use discky_core::plan::{
-    CLOUD_REFUSED, NOT_IN_SNAPSHOT, PROTECTED_REFUSED, ROOT_REFUSED, is_protected, managed_by,
-};
+use discky_core::plan::{NOT_IN_SNAPSHOT, PROTECTED_REFUSED, path_refusal};
 use discky_core::query::NodeFindings;
 use discky_core::rules::Category;
 use discky_core::{Engine, Inspection, RemovalMode};
@@ -23,11 +20,6 @@ use gpui_kit::*;
 use super::{Inspector, InspectorEvent, meta_row, path_link, show_in_button};
 use crate::app::AppState;
 use crate::format;
-
-/// The flag [`inspect_path`] adds to a scan root's entry (`TreeEntry::flags` has none).
-pub const ROOT_FLAG: &str = "root";
-/// The flag of an entry stored in the cloud, not on disk.
-const DATALESS_FLAG: &str = "dataless";
 
 /// What the inspector shows for a path, and whether it offers to remove it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,13 +36,17 @@ pub struct PathRows {
     pub remove_reason: Option<String>,
 }
 
-/// The rows and the removal button state for the path of `insp` (see [`inspect_path`]):
-/// removal is refused, in the planner's order, for a path not in the snapshot, a scan root,
-/// a dataless entry, a protected location (also every path when `home` is unknown), and a
-/// path owned by a finding whose removal is not a plain trash. The planner's other rule
-/// (a folder containing such a finding) shows up as a skipped step in the dialog.
-/// `now` is Unix seconds.
-pub fn path_rows(insp: &Inspection, mode: RemovalMode, home: &Path, now: i64) -> PathRows {
+/// The rows and the removal button state for the path of `insp`; `refusal` is the
+/// planner's verdict on it (see [`inspect_path`]). Removal is refused for a path not in
+/// the snapshot, for every path when `home` is unknown ([`PROTECTED_REFUSED`]), and with
+/// `refusal` otherwise. `now` is Unix seconds.
+pub fn path_rows(
+    insp: &Inspection,
+    refusal: Option<&str>,
+    mode: RemovalMode,
+    home: &Path,
+    now: i64,
+) -> PathRows {
     let mut rows = Vec::new();
     if let Some(e) = &insp.entry {
         rows.push(("Path", format::home_relative(&e.path, home)));
@@ -85,58 +81,59 @@ pub fn path_rows(insp: &Inspection, mode: RemovalMode, home: &Path, now: i64) ->
     if let Some((title, _)) = &insp.rule {
         rows.push(("Rule", title.clone()));
     }
-    let has_flag = |flag: &str| {
-        insp.entry
-            .as_ref()
-            .is_some_and(|e| e.flags.iter().any(|f| f == flag))
-    };
-    let remove_reason = match (&insp.entry, &insp.finding) {
-        (None, _) => Some(NOT_IN_SNAPSHOT.to_string()),
-        _ if !insp.in_snapshot => Some(NOT_IN_SNAPSHOT.to_string()),
-        _ if has_flag(ROOT_FLAG) => Some(ROOT_REFUSED.to_string()),
-        _ if has_flag(DATALESS_FLAG) => Some(CLOUD_REFUSED.to_string()),
-        (Some(e), _) if is_protected(&e.path, home) => Some(PROTECTED_REFUSED.to_string()),
-        (_, Some(f)) if !matches!(f.removal, Removal::Trash { .. }) => Some(managed_by(f.category)),
-        _ => None,
-    };
+    let remove_reason = if insp.entry.is_none() || !insp.in_snapshot {
+        Some(NOT_IN_SNAPSHOT)
+    } else if !home.is_absolute() {
+        Some(PROTECTED_REFUSED)
+    } else {
+        refusal
+    }
+    .map(str::to_string);
     PathRows {
         rows,
         managed_by: insp
             .finding
             .as_ref()
             .map(|f| (f.category, f.id.clone(), f.title.clone())),
-        remove_label: match mode {
-            RemovalMode::Trash => "Move to Trash…",
-            RemovalMode::Permanent => "Delete permanently…",
-        },
+        remove_label: remove_label(mode),
         can_remove: remove_reason.is_none(),
         remove_reason,
     }
 }
 
-/// `Engine::inspect` of `path`, completed for the path subject: when the path is no
-/// finding's own, `finding` is the finding owning it through an ancestor (as the disk map
-/// colours it, `query::NodeFindings`), and a scan root's entry carries [`ROOT_FLAG`].
-/// `None` without a snapshot.
-pub fn inspect_path(engine: &Engine, path: &Path) -> Option<Inspection> {
+/// "Move to Trash…" or "Delete permanently…".
+pub fn remove_label(mode: RemovalMode) -> &'static str {
+    match mode {
+        RemovalMode::Trash => "Move to Trash…",
+        RemovalMode::Permanent => "Delete permanently…",
+    }
+}
+
+/// `Engine::inspect` of `path`, completed for the path subject, with the planner's
+/// refusal of it (`plan::path_refusal` against `home`; `None` when it can be removed or is
+/// not in the snapshot). When the path is no finding's own, `finding` is the finding owning
+/// it through an ancestor (as the disk map colours it, `query::NodeFindings`). `None`
+/// without a snapshot.
+pub fn inspect_path(
+    engine: &Engine,
+    path: &Path,
+    home: &Path,
+) -> Option<(Inspection, Option<String>)> {
     let mut insp = engine.inspect(&path.to_string_lossy())?;
     let Some(snap) = engine.snapshot() else {
-        return Some(insp);
+        return Some((insp, None));
     };
     let Some(node) = path.is_absolute().then(|| snap.index.find(path)).flatten() else {
-        return Some(insp);
+        return Some((insp, None));
     };
+    let findings = NodeFindings::build(&snap);
     if insp.finding.is_none() {
-        insp.finding = NodeFindings::build(&snap)
+        insp.finding = findings
             .owner(&snap.index, node)
             .map(|i| snap.findings[i].clone());
     }
-    if snap.index.node(node).flags.contains(NodeFlags::ROOT)
-        && let Some(e) = &mut insp.entry
-    {
-        e.flags.push(ROOT_FLAG.to_string());
-    }
-    Some(insp)
+    let refusal = path_refusal(&snap, &findings, node, home);
+    Some((insp, refusal))
 }
 
 /// The inspector's title for `path`: its file name (the path itself for `/`).
@@ -148,14 +145,25 @@ pub fn title(path: &Path) -> String {
 }
 
 impl Inspector {
-    /// [`path_rows`] of the loaded inspection; `None` until it is loaded.
-    pub(super) fn path_rows(&self, cx: &App) -> Option<PathRows> {
+    /// [`path_rows`] of the loaded inspection; `None` while it loads or when it could not
+    /// be inspected (no snapshot).
+    pub(super) fn path_rows(&self, mode: RemovalMode) -> Option<PathRows> {
         let insp = self.inspection.as_ref()?;
-        let mode = cx.global::<AppState>().engine.config().removal.mode;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-        Some(path_rows(insp, mode, &self.home, now))
+        Some(path_rows(
+            insp,
+            self.refusal.as_deref(),
+            mode,
+            &self.home,
+            now,
+        ))
+    }
+
+    /// The removal mode of the current config.
+    pub(super) fn removal_mode(cx: &App) -> RemovalMode {
+        cx.global::<AppState>().engine.config().removal.mode
     }
 
     /// The rows (the Path row reveals `path` in Finder), then "Contents · top N".
@@ -168,10 +176,15 @@ impl Inspector {
         let theme = cx.theme();
         let (muted, mono) = (theme.muted_foreground, theme.mono_font_family.clone());
         let Some(rows) = rows else {
+            let text = if self.loading {
+                "Preparing…"
+            } else {
+                NOT_IN_SNAPSHOT
+            };
             return div()
                 .text_sm()
                 .text_color(muted)
-                .child("Preparing…")
+                .child(text)
                 .into_any_element();
         };
         let meta = rows.rows.iter().map(|(label, value)| {
@@ -194,13 +207,18 @@ impl Inspector {
         &self,
         path: &Path,
         rows: Option<&PathRows>,
+        mode: RemovalMode,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
-        let reason = rows.and_then(|r| r.remove_reason.clone());
+        let reason = match rows {
+            Some(r) => r.remove_reason.clone(),
+            None if !self.loading => Some(NOT_IN_SNAPSHOT.to_string()),
+            None => None,
+        };
         let can_remove = rows.is_some_and(|r| r.can_remove);
-        let label = rows.map_or("Move to Trash…", |r| r.remove_label);
+        let label = remove_label(mode);
         let show_in = rows
             .and_then(|r| r.managed_by.clone())
             .map(|(category, id, _)| show_in_button(category, id, cx));
@@ -309,7 +327,7 @@ mod tests {
     #[test]
     fn rows_for_a_plain_folder() {
         let insp = inspection(entry("/Users/me/Projects/notes", 8192, 8192), None);
-        let rows = path_rows(&insp, RemovalMode::Trash, Path::new(HOME), NOW);
+        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
         let labels: Vec<&str> = rows.rows.iter().map(|(l, _)| *l).collect();
         assert_eq!(labels, ["Path", "On disk", "Frees", "Files", "Modified"]);
         assert_eq!(rows.rows[0].1, "~/Projects/notes");
@@ -318,7 +336,7 @@ mod tests {
         assert!(rows.can_remove);
         assert_eq!(rows.remove_reason, None);
         assert_eq!(rows.remove_label, "Move to Trash…");
-        let permanent = path_rows(&insp, RemovalMode::Permanent, Path::new(HOME), NOW);
+        let permanent = path_rows(&insp, None, RemovalMode::Permanent, Path::new(HOME), NOW);
         assert_eq!(permanent.remove_label, "Delete permanently…");
         assert!(permanent.can_remove);
     }
@@ -337,11 +355,18 @@ mod tests {
             },
         );
         let id = f.id.clone();
+        let managed = plan::managed_by(Category::DevCaches);
         let insp = inspection(
             entry("/Users/me/.cargo/registry/cache", 8192, 4096),
             Some(f),
         );
-        let rows = path_rows(&insp, RemovalMode::Trash, Path::new(HOME), NOW);
+        let rows = path_rows(
+            &insp,
+            Some(&managed),
+            RemovalMode::Trash,
+            Path::new(HOME),
+            NOW,
+        );
         assert_eq!(
             rows.managed_by,
             Some((Category::DevCaches, id, "Cache".to_string()))
@@ -371,9 +396,46 @@ mod tests {
             entry("/Users/me/Projects/app/target/debug", 8192, 8192),
             Some(f),
         );
-        let rows = path_rows(&insp, RemovalMode::Trash, Path::new(HOME), NOW);
+        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
         assert!(rows.managed_by.is_some());
         assert!(rows.can_remove);
         assert_eq!(rows.remove_reason, None);
+    }
+
+    /// The removal reason `path_rows` gives a plain folder with `refusal` and `home`.
+    fn reason(refusal: Option<&str>, home: &str) -> Option<String> {
+        let insp = inspection(entry("/Users/me/Projects/notes", 8192, 8192), None);
+        let rows = path_rows(&insp, refusal, RemovalMode::Trash, Path::new(home), NOW);
+        assert_eq!(rows.can_remove, rows.remove_reason.is_none());
+        rows.remove_reason
+    }
+
+    #[test]
+    fn planner_refusals_disable_removal() {
+        for refusal in [
+            plan::ROOT_REFUSED.to_string(),
+            plan::CLOUD_REFUSED.to_string(),
+            plan::PROTECTED_REFUSED.to_string(),
+            plan::managed_by(Category::DevCaches),
+        ] {
+            assert_eq!(reason(Some(&refusal), HOME), Some(refusal));
+        }
+    }
+
+    #[test]
+    fn a_path_not_in_the_snapshot_cannot_be_removed() {
+        let mut insp = inspection(entry("/Users/me/gone", 1, 1), None);
+        insp.in_snapshot = false;
+        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
+        assert_eq!(rows.remove_reason.as_deref(), Some(plan::NOT_IN_SNAPSHOT));
+        insp.entry = None;
+        let rows = path_rows(&insp, None, RemovalMode::Trash, Path::new(HOME), NOW);
+        assert!(!rows.can_remove);
+        assert!(rows.rows.is_empty());
+    }
+
+    #[test]
+    fn unknown_home_protects_every_path() {
+        assert_eq!(reason(None, "").as_deref(), Some(plan::PROTECTED_REFUSED));
     }
 }

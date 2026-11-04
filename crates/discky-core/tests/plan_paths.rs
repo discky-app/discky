@@ -9,8 +9,9 @@ use discky_core::{
     index::snapshot::{Actor, SNAPSHOT_FORMAT, Snapshot, SnapshotMeta},
     plan::{
         CLOUD_REFUSED, NOT_IN_SNAPSHOT, PATH_ID_PREFIX, PROTECTED_REFUSED, ROOT_REFUSED, StepFlags,
-        StepKind, is_protected, managed_by, plan_paths_in,
+        StepKind, is_protected, managed_by, path_refusal, plan_paths_in,
     },
+    query::NodeFindings,
     rules::{Category, SafetyLabel},
 };
 
@@ -380,5 +381,42 @@ fn command() -> Removal {
         cwd: None,
         install_hint: None,
         freed_note: None,
+    }
+}
+
+#[test]
+fn path_refusal_agrees_with_plan_paths_in() {
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("home");
+    let cloud = home.join("docs/big.bin");
+    let kc = home.join("Library/Keychains/k");
+    let reg = home.join(".cargo/registry");
+    let inside = reg.join("cache/x");
+    let plain = home.join("notes/n.txt");
+    for p in [&cloud, &kc, &inside, &plain] {
+        touch(p, 10);
+    }
+    let mut s = snap_flagged(d.path(), &[&cloud], NodeFlags::DATALESS);
+    let f = finding(&s, Category::DevCaches, &reg, command());
+    s.findings.push(f);
+    let nf = NodeFindings::build(&s);
+    let cases = [
+        (d.path().to_path_buf(), Some(ROOT_REFUSED.to_string())),
+        (cloud, Some(CLOUD_REFUSED.to_string())),
+        (kc, Some(PROTECTED_REFUSED.to_string())),
+        (home.clone(), Some(PROTECTED_REFUSED.to_string())),
+        (inside.clone(), Some(managed_by(Category::DevCaches))),
+        (home.join(".cargo"), Some(managed_by(Category::DevCaches))),
+        (plain, None),
+    ];
+    for (path, want) in cases {
+        let node = s.index.find(&path).unwrap();
+        let got = path_refusal(&s, &nf, node, &home);
+        assert_eq!(got, want, "{}", path.display());
+        let plan = plan_paths_in(std::slice::from_ref(&path), &s, &Config::default(), &home);
+        match want {
+            Some(reason) => assert_eq!(skipped_reason(&plan, &path), reason),
+            None => assert_eq!(plan.steps.len(), 1, "{:?}", plan.skipped),
+        }
     }
 }

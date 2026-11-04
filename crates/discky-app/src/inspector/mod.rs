@@ -95,6 +95,9 @@ pub struct Inspector {
     home: PathBuf,
     /// Offer "Show in {category}" for a finding subject (opened from the disk map).
     from_map: bool,
+    /// The planner's refusal of a path subject (`plan::path_refusal`), loaded with
+    /// `inspection`.
+    refusal: Option<String>,
     focus: FocusHandle,
     /// The running inspection; replacing it cancels the previous one.
     _load: Task<()>,
@@ -137,6 +140,7 @@ impl Inspector {
             planning: false,
             home: discky_core::paths::home_dir().unwrap_or_default(),
             from_map: false,
+            refusal: None,
             focus: cx.focus_handle(),
             _load: Task::ready(()),
             _plan: Task::ready(()),
@@ -200,6 +204,7 @@ impl Inspector {
     fn show(&mut self, subject: Subject, cx: &mut Context<Self>) {
         self.subject = subject;
         self.inspection = None;
+        self.refusal = None;
         self.plan = None;
         self.plan_error = None;
         self.load(cx);
@@ -288,12 +293,17 @@ impl Inspector {
             Subject::Path(path) => {
                 let path = path.clone();
                 let target = path.clone();
-                let work = cx.background_spawn(async move { node::inspect_path(&engine, &target) });
+                let home = self.home.clone();
+                let work =
+                    cx.background_spawn(async move { node::inspect_path(&engine, &target, &home) });
                 self._load = cx.spawn(async move |this, cx| {
                     let inspection = work.await;
                     let _ = this.update(cx, |this, cx| {
                         if matches!(&this.subject, Subject::Path(p) if *p == path) {
-                            this.inspection = inspection;
+                            (this.inspection, this.refusal) = match inspection {
+                                Some((i, refusal)) => (Some(i), refusal),
+                                None => (None, None),
+                            };
                             this.loading = false;
                             cx.notify();
                         }
@@ -812,10 +822,12 @@ impl Render for Inspector {
                 )
             }
             Subject::Path(p) => {
-                let rows = self.path_rows(cx);
+                let mode = Self::removal_mode(cx);
+                let rows = self.path_rows(mode);
                 (
                     self.path_body(p, rows.as_ref(), cx).into_any_element(),
-                    self.path_footer(p, rows.as_ref(), cx).into_any_element(),
+                    self.path_footer(p, rows.as_ref(), mode, cx)
+                        .into_any_element(),
                 )
             }
         };

@@ -18,8 +18,8 @@ use crate::findings::{
     Component, ComponentKind, ComponentRemoval, Finding, FindingId, Removal, ollama_url,
 };
 use crate::fs::attr::ObjKind;
-use crate::index::NodeFlags;
 use crate::index::snapshot::Snapshot;
+use crate::index::{NodeFlags, NodeId};
 use crate::paths;
 use crate::query::NodeFindings;
 use crate::rules::Category;
@@ -685,6 +685,47 @@ fn contains_protected(path: &Path, home: &Path) -> bool {
     .any(|prot| prot != path && prot.starts_with(path))
 }
 
+/// Why the disk map cannot remove `node` of `snap` (the skip reason [`plan_paths_in`]
+/// records), or `None` when it can; `findings` is [`NodeFindings::build`] of `snap`. Rules
+/// in order, first failing wins: a scan root, a dataless entry, a protected location
+/// ([`is_protected`], or one inside it), a path in or containing a finding whose removal
+/// is not a plain trash. A `home` that is not absolute protects everything.
+pub fn path_refusal(
+    snap: &Snapshot,
+    findings: &NodeFindings,
+    node: NodeId,
+    home: &Path,
+) -> Option<String> {
+    let index = &*snap.index;
+    let n = index.node(node);
+    if n.flags.contains(NodeFlags::ROOT) {
+        return Some(ROOT_REFUSED.to_string());
+    }
+    if n.flags.contains(NodeFlags::DATALESS) {
+        return Some(CLOUD_REFUSED.to_string());
+    }
+    let p = index.path(node);
+    if is_protected(&p, home) || contains_protected(&p, home) {
+        return Some(PROTECTED_REFUSED.to_string());
+    }
+    if let Some(i) = findings.owner(index, node) {
+        let f = &snap.findings[i];
+        if !matches!(f.removal, Removal::Trash { .. }) {
+            return Some(managed_by(f.category));
+        }
+    }
+    snap.findings
+        .iter()
+        .find(|f| {
+            !matches!(f.removal, Removal::Trash { .. })
+                && f.node.is_some_and(|fnode| {
+                    std::iter::successors(index.node(fnode).parent, |&a| index.node(a).parent)
+                        .any(|a| a == node)
+                })
+        })
+        .map(|f| managed_by(f.category))
+}
+
 /// Plan the removal of arbitrary `paths` of the snapshot (disk map tiles), one step each
 /// by `cfg.removal.mode`. A path is refused, with the reason in [`Plan::skipped`], when it
 /// is not in the snapshot, is a scan root, is dataless, is protected ([`is_protected`]) or
@@ -702,44 +743,22 @@ pub fn plan_paths_in(paths: &[PathBuf], snap: &Snapshot, cfg: &Config, home: &Pa
             continue;
         }
         let id = FindingId(format!("{PATH_ID_PREFIX}{}", p.display()));
-        let verdict = (|| {
-            let node = p
-                .is_absolute()
-                .then(|| index.find(p))
-                .flatten()
-                .ok_or_else(|| NOT_IN_SNAPSHOT.to_string())?;
-            let n = index.node(node);
-            if n.flags.contains(NodeFlags::ROOT) {
-                return Err(ROOT_REFUSED.to_string());
-            }
-            if n.flags.contains(NodeFlags::DATALESS) {
-                return Err(CLOUD_REFUSED.to_string());
-            }
-            if is_protected(p, home) || contains_protected(p, home) {
-                return Err(PROTECTED_REFUSED.to_string());
-            }
-            if let Some(i) = nf.owner(index, node) {
-                let f = &snap.findings[i];
-                if !matches!(f.removal, Removal::Trash { .. }) {
-                    return Err(managed_by(f.category));
-                }
-            }
-            let contained = snap.findings.iter().find(|f| {
-                !matches!(f.removal, Removal::Trash { .. })
-                    && f.node.is_some_and(|fnode| {
-                        std::iter::successors(index.node(fnode).parent, |&a| index.node(a).parent)
-                            .any(|a| a == node)
+        let verdict = p
+            .is_absolute()
+            .then(|| index.find(p))
+            .flatten()
+            .ok_or_else(|| NOT_IN_SNAPSHOT.to_string())
+            .and_then(|node| match path_refusal(snap, &nf, node, home) {
+                Some(reason) => Err(reason),
+                None => {
+                    let n = index.node(node);
+                    Ok(if n.kind == ObjKind::Dir {
+                        n.agg_private
+                    } else {
+                        n.private
                     })
+                }
             });
-            if let Some(f) = contained {
-                return Err(managed_by(f.category));
-            }
-            Ok(if n.kind == ObjKind::Dir {
-                n.agg_private
-            } else {
-                n.private
-            })
-        })();
         match verdict {
             Ok(freed) => steps.push(path_step_for(&id, freed, std::slice::from_ref(p), cfg)),
             Err(reason) => skipped.push((id, reason)),
