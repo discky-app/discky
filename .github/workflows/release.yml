@@ -12,13 +12,21 @@ concurrency: release-${{ github.ref }}
 
 jobs:
   release:
+    # GitHub's macos-15 runners are arm64: the release is Apple Silicon only.
     runs-on: macos-15
-    env:
-      P12: ${{ secrets.MACOS_SIGN_P12 }}
-      P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
-      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      # Secrets reach only the steps that use them; the rest of the job sees two flags.
+      - name: Detect optional secrets
+        env:
+          P12: ${{ secrets.MACOS_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -n "$P12" ]; then echo "HAS_P12=1"; else echo "HAS_P12=0"; fi >> "$GITHUB_ENV"
+          if [ -n "$TAP_TOKEN" ]; then echo "HAS_TAP=1"; else echo "HAS_TAP=0"; fi >> "$GITHUB_ENV"
+
       # Honors rust-toolchain.toml (pinned channel, rustfmt + clippy).
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -33,7 +41,10 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Signing identity (Apple Development)
-        if: env.P12 != ''
+        if: env.HAS_P12 == '1'
+        env:
+          P12: ${{ secrets.MACOS_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
         run: |
           printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/sign.p12"
           security create-keychain -p "" build.keychain
@@ -51,7 +62,7 @@ jobs:
           echo "DISCKY_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Signing identity (ad-hoc fallback)
-        if: env.P12 == ''
+        if: env.HAS_P12 != '1'
         run: |
           echo "DISCKY_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
           echo "::warning::Ad-hoc signed build: Full Disk Access must be granted again after each update"
@@ -76,8 +87,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Discky $VERSION" --generate-notes \
-            "Discky-$VERSION.zip" "Discky-$VERSION.zip.sha256" discky.rb
+          ASSETS=("Discky-$VERSION.zip" "Discky-$VERSION.zip.sha256" discky.rb)
+          # A re-run after a later step failed finds the release already there: replace
+          # its assets instead of failing on create.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "Discky $VERSION" --generate-notes \
+              "${ASSETS[@]}"
+          fi
 
       - name: Upload build (manual run, no release)
         if: github.event_name == 'workflow_dispatch'
@@ -90,7 +108,9 @@ jobs:
             discky.rb
 
       - name: Update the Homebrew tap
-        if: github.event_name == 'push' && env.TAP_TOKEN != ''
+        if: github.event_name == 'push' && env.HAS_TAP == '1'
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
           git clone --quiet "https://x-access-token:$TAP_TOKEN@github.com/AlxGolubev/homebrew-discky" "$RUNNER_TEMP/tap"
           mkdir -p "$RUNNER_TEMP/tap/Casks"
@@ -106,12 +126,12 @@ jobs:
           git push --quiet origin HEAD:main
 
       - name: Tap update instructions
-        if: github.event_name == 'push' && env.TAP_TOKEN == ''
+        if: github.event_name == 'push' && env.HAS_TAP != '1'
         run: |
           echo "TAP_TOKEN is not set: copy discky.rb from the release to AlxGolubev/homebrew-discky/Casks/discky.rb" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Delete the build keychain
-        if: always() && env.P12 != ''
+        if: always() && env.HAS_P12 == '1'
         run: |
           security delete-keychain build.keychain || true
           rm -f "$RUNNER_TEMP/sign.p12"

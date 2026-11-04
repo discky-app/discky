@@ -1,6 +1,6 @@
 # Releasing Discky
 
-Releases are built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) on macOS 15 when a `v*` tag is pushed.
+Releases are built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) on macOS 15 when a `v*` tag is pushed. GitHub's `macos-15` runners are arm64, so the release is Apple Silicon only (the cask declares `depends_on arch: :arm64`).
 
 ## Cutting a release
 
@@ -18,7 +18,7 @@ The workflow fails early if the tag does not match the version printed by `cargo
 
 - `cargo xtask bundle` builds `target/Discky.app` with `discky-mcp` inside, and `codesign --verify --deep --strict` checks it.
 - The bundle is zipped with `ditto` into `Discky-<version>.zip`, its SHA-256 goes to `Discky-<version>.zip.sha256`, and `packaging/homebrew/render-cask.sh` renders the cask `discky.rb`, which `brew style` checks.
-- On a tag push: a GitHub release `v<version>` titled `Discky <version>` with generated notes and those three files as assets, then the tap update (below).
+- On a tag push: a GitHub release `v<version>` titled `Discky <version>` with generated notes and those three files as assets, then the tap update (below). Re-running the workflow for a tag whose release already exists replaces the release's assets instead of failing.
 - On a manual run (`workflow_dispatch`): the same three files as a workflow artifact; no release and no tap update.
 
 ## Secrets (all optional)
@@ -31,7 +31,9 @@ Set them under the repository's Settings → Secrets and variables → Actions.
 | `MACOS_SIGN_P12_PASSWORD` | The password chosen when exporting `cert.p12` |
 | `TAP_TOKEN` | A fine-grained personal access token with Contents: read and write on `AlxGolubev/homebrew-discky` only |
 
-Without `MACOS_SIGN_P12` the build is ad-hoc signed and the run shows a warning. Without `TAP_TOKEN` the job summary says to update the tap by hand.
+Without `MACOS_SIGN_P12` the build is ad-hoc signed and the run shows a warning. Without `TAP_TOKEN` the job summary says to update the tap by hand. The secrets reach only the steps that use them.
+
+If the first signed run fails with "0 valid identities found", the runner lacks Apple's WWDR G3 intermediate certificate: import `AppleWWDRCAG3.cer` (from Apple's certificate authority page) into `build.keychain` in the same step, before `security find-identity`.
 
 ## Updating the tap by hand
 
@@ -39,4 +41,4 @@ Download `discky.rb` from the release and commit it as `Casks/discky.rb` in `Alx
 
 ## Why the signature matters for Full Disk Access
 
-macOS ties a Full Disk Access grant to the app's designated requirement. An ad-hoc signature has no identity, so its designated requirement is the exact code hash: every update is a different app to macOS, and the user has to grant Full Disk Access again. A build signed with an Apple Development certificate has a designated requirement that names the signing identity (Apple's certificate chain plus your developer identity, tied to your Team ID) instead of a hash, so every build you sign matches it, renewing the certificate keeps it, and the grant carries over across updates. Check it with `codesign -d -r- /Applications/Discky.app`.
+macOS ties a Full Disk Access grant to the app's designated requirement. An ad-hoc signature has no identity, so its designated requirement is the exact code hash: every update is a different app to macOS, and the user has to grant Full Disk Access again. A build signed with an Apple Development certificate has a designated requirement that names the signing identity instead of a hash: it is pinned to the certificate's subject (your developer identity) under Apple's chain, which a renewed certificate keeps. Every build you sign matches it, and the grant carries over across updates. Check it with `codesign -d -r- /Applications/Discky.app`.
