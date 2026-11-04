@@ -41,7 +41,7 @@ cargo run -p discky-app -- --self-check                 # opens the app in a hid
 
 ### Debug variables
 
-Debug builds of the app read a few `DISCKY_START_*` variables so a screen can be opened without clicking. Release builds ignore them.
+Debug builds of the app read a few `DISCKY_START_*` variables so a screen can be opened without clicking, and `DISCKY_FDA` to try the Full Disk Access notices. Release builds ignore them.
 
 | Variable | Value |
 | --- | --- |
@@ -49,6 +49,7 @@ Debug builds of the app read a few `DISCKY_START_*` variables so a screen can be
 | `DISCKY_START_SETTINGS` | a settings page: `scanning`, `removal`, `version_manager`, `mcp`, `disk_access`, `about` |
 | `DISCKY_START_INSPECT` | a finding (id, absolute path or title) to open in the inspector; an absolute path that is no finding's own opens the path inspector |
 | `DISCKY_START_REMOVE` | comma-separated findings for the removal dialog; absolute paths that are no finding's own are planned as disk-map paths. It only plans: nothing runs until Run is pressed |
+| `DISCKY_FDA` | comma-separated `denied`, `granted` or `unknown` used instead of the Full Disk Access probe, one value per probe, the last repeating (`denied,granted` shows the onboarding card, then the relaunch card once the window is activated again) |
 
 ```sh
 DISCKY_START_ROUTE=map cargo run -p discky-app

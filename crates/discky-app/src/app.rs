@@ -24,6 +24,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::access;
 use crate::category::{CategoryEvent, CategoryView};
 use crate::format;
 use crate::inspector::{INSPECTOR_CONTEXT, Inspector, InspectorEvent, Subject};
@@ -145,7 +146,7 @@ impl AppView {
         let app = cx.weak_entity();
         let overview_scan = scan.clone();
         let settings_app = app.clone();
-        let overview = cx.new(|cx| OverviewView::new(app, overview_scan, cx));
+        let overview = cx.new(|cx| OverviewView::new(app, overview_scan, window, cx));
         let settings =
             cx.new(|cx| SettingsView::new(start_settings_section(), settings_app, window, cx));
         let map = cx.new(|cx| MapView::new(window, cx));
@@ -795,6 +796,29 @@ fn defaults(ids: Vec<String>) -> Vec<PlanItem> {
 fn removal_running(cx: &App) -> bool {
     cx.try_global::<AppState>()
         .is_some_and(|s| s.removal_running.is_running())
+}
+
+/// Quit and start Discky again (a new process picks up Full Disk Access). While a removal
+/// runs it only says so; if the relaunch cannot be arranged it says that and stays.
+pub fn relaunch_app(window: &mut Window, cx: &mut App) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            window.push_notification(Notification::error(format!("Could not relaunch: {e}")), cx);
+            return;
+        }
+    };
+    let plan = access::relaunch_plan(&exe, removal_running(cx));
+    if plan == access::RelaunchPlan::Busy {
+        window.push_notification(Notification::warning(BUSY_MESSAGE), cx);
+        return;
+    }
+    match access::relaunch(&plan, std::process::id()) {
+        Ok(()) => cx.quit(),
+        Err(e) => {
+            window.push_notification(Notification::error(format!("Could not relaunch: {e}")), cx)
+        }
+    }
 }
 
 /// The app is quitting: if a removal step is running, append an `interrupted` record for

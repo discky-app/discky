@@ -6,7 +6,7 @@ use gpui_kit::*;
 
 use super::helpers::no_access_preview;
 use super::{SettingsView, group_title, help, mono, page_title, row};
-use crate::access::{FDA_SETTINGS_URL, FdaStatus};
+use crate::access::{self, FdaStatus};
 use crate::app::{AppState, Rescan};
 
 /// How many unreadable folders the page lists.
@@ -57,7 +57,7 @@ impl SettingsView {
                         Button::new("open-fda")
                             .small()
                             .label("Open System Settings")
-                            .on_click(|_, _, cx| cx.open_url(FDA_SETTINGS_URL)),
+                            .on_click(|_, _, cx| access::open_fda_settings(cx)),
                     ),
                 cx,
             ))

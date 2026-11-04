@@ -1,7 +1,10 @@
 //! The Overview screen (mockup A): hero number, disk bar and category cards.
 
+mod access_notice;
 pub mod model;
 
+#[cfg(debug_assertions)]
+use std::collections::VecDeque;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use discky_core::rules::Category;
@@ -14,6 +17,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::access::{self, AccessNotice, FdaStatus};
 use crate::app::{AppState, AppView, Rescan, Route};
 use crate::duck::{DuckScene, logo_element};
 use crate::format;
@@ -35,6 +39,19 @@ pub struct OverviewView {
     _scan_changed: Subscription,
     _scan_events: Subscription,
     _scene_changed: Subscription,
+    /// Full Disk Access as last probed; `None` until the first probe ends.
+    fda: Option<FdaStatus>,
+    /// Access was seen denied this session, so a grant now needs a relaunch.
+    saw_denied: bool,
+    /// The access banner was closed (until the next launch).
+    banner_dismissed: bool,
+    /// The window lost activation at least once, so its next activation is a return.
+    window_was_inactive: bool,
+    /// Debug builds: `DISCKY_FDA` values used instead of the probe, one per check.
+    #[cfg(debug_assertions)]
+    fda_override: VecDeque<FdaStatus>,
+    _fda_task: Task<()>,
+    _activation: Subscription,
 }
 
 impl OverviewView {
@@ -43,6 +60,7 @@ impl OverviewView {
     pub fn new(
         app: WeakEntity<AppView>,
         scan: Entity<ScanController>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let scan_changed = cx.observe(&scan, |this, scan, cx| {
@@ -56,10 +74,22 @@ impl OverviewView {
         });
         let scan_events = cx.subscribe(&scan, |this, _, msg: &ScanMsg, cx| {
             this.scene.update(cx, |s, cx| s.apply(msg, cx));
+            if let ScanMsg::Finished(_) = msg {
+                this.check_access(cx);
+            }
+        });
+        // Coming back (from System Settings) re-probes, so a fresh grant offers the relaunch.
+        // The window's first activation at launch is no return: `new` already probes.
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.window_was_inactive = true;
+            } else if this.window_was_inactive {
+                this.check_access(cx);
+            }
         });
         let scene = cx.new(|_| DuckScene::new());
         let scene_changed = cx.observe(&scene, |_, _, cx| cx.notify());
-        OverviewView {
+        let mut view = OverviewView {
             model: current_model(cx),
             app,
             scene_scan: scan.read(cx).started_at,
@@ -68,7 +98,48 @@ impl OverviewView {
             _scan_changed: scan_changed,
             _scan_events: scan_events,
             _scene_changed: scene_changed,
+            fda: None,
+            saw_denied: false,
+            banner_dismissed: false,
+            window_was_inactive: false,
+            #[cfg(debug_assertions)]
+            fda_override: fda_override(),
+            _fda_task: Task::ready(()),
+            _activation: activation,
+        };
+        view.check_access(cx);
+        view
+    }
+
+    /// Probe Full Disk Access off the main thread; the last status stays shown meanwhile.
+    fn check_access(&mut self, cx: &mut Context<Self>) {
+        let forced = self.forced_fda();
+        let home = discky_core::paths::home_dir().unwrap_or_default();
+        let work =
+            cx.background_spawn(async move { forced.unwrap_or_else(|| access::probe_fda(&home)) });
+        self._fda_task = cx.spawn(async move |this, cx| {
+            let status = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.saw_denied |= status == FdaStatus::Denied;
+                this.fda = Some(status);
+                cx.notify();
+            });
+        });
+    }
+
+    /// Debug builds: the next `DISCKY_FDA` value, the last one repeating.
+    #[cfg(debug_assertions)]
+    fn forced_fda(&mut self) -> Option<FdaStatus> {
+        if self.fda_override.len() > 1 {
+            self.fda_override.pop_front()
+        } else {
+            self.fda_override.front().copied()
         }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn forced_fda(&mut self) -> Option<FdaStatus> {
+        None
     }
 
     /// Show `scene` from now on and re-render when it changes.
@@ -304,8 +375,15 @@ impl OverviewView {
 
 impl Render for OverviewView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let has_snapshot = self.model.scanned_line.is_some();
+        let notice = access::notice(
+            self.fda,
+            has_snapshot,
+            self.saw_denied,
+            self.banner_dismissed,
+        );
+        let banner = (notice == AccessNotice::Banner).then(|| self.access_banner(cx));
+        let theme = cx.theme();
         let running = self.scan.read(cx).is_running();
         let scene_visible = self.scene.read(cx).visible();
         // The scene plays out after the scan ends; the hero number appears when it is done.
@@ -324,6 +402,9 @@ impl Render for OverviewView {
                 v_flex()
                     .p_6()
                     .gap_6()
+                    .when(notice == AccessNotice::Relaunch, |this| {
+                        this.child(self.relaunch_card(cx))
+                    })
                     .when_some(self.model.last_error.clone(), |this, e| {
                         this.child(
                             h_flex()
@@ -339,6 +420,7 @@ impl Render for OverviewView {
                                 .child(div().flex_1().child(e)),
                         )
                     })
+                    .children(banner)
                     .child(self.toolbar(cx))
                     .when(busy, |this| {
                         this.child(self.scan_progress(scene_visible, cx))
@@ -349,7 +431,11 @@ impl Render for OverviewView {
                             .child(div().grid().grid_cols(2).gap_4().children(cards))
                     })
                     .when(!has_snapshot && !busy, |this| {
-                        this.child(self.empty_state())
+                        if notice == AccessNotice::Onboarding {
+                            this.child(self.onboarding_card(cx))
+                        } else {
+                            this.child(self.empty_state())
+                        }
                     }),
             )
     }
@@ -361,6 +447,27 @@ fn current_model(cx: &App) -> OverviewModel {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     model::build(&cx.global::<AppState>().engine, now)
+}
+
+/// Debug builds: `DISCKY_FDA`, a comma list of `denied`, `granted` or `unknown`.
+#[cfg(debug_assertions)]
+fn fda_override() -> VecDeque<FdaStatus> {
+    let Ok(list) = std::env::var("DISCKY_FDA") else {
+        return VecDeque::new();
+    };
+    list.split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .filter_map(|v| match v {
+            "denied" => Some(FdaStatus::Denied),
+            "granted" => Some(FdaStatus::Granted),
+            "unknown" => Some(FdaStatus::Unknown),
+            other => {
+                eprintln!("DISCKY_FDA: unknown value `{other}`");
+                None
+            }
+        })
+        .collect()
 }
 
 /// A button that dispatches [`Rescan`].
