@@ -1,8 +1,13 @@
 //! Running a [`Plan`]: the only code in Discky that removes anything.
 //!
 //! Every fingerprint of every step to run is re-taken first; any change refuses the
-//! whole plan. Steps then run in order, the first failure stops the plan, and every
-//! executed step is appended to the history log before the next one starts. Paths are
+//! whole plan. Steps then run in order, and every executed step is appended to the
+//! history log before the next one starts; only a log that cannot be written stops the
+//! whole queue. A failed step stops its own finding, not the queue: when it is a step the
+//! later ones depend on — a `GATE` step (a `Quit`, a vendor script) or the tool's own
+//! removal (`Command`, `OllamaDelete`: no trashing after the official command failed) —
+//! the later non-`Quit` steps of its finding are `Skipped`. A failed `Trash` or `Remove`
+//! step blocks nothing. Paths are
 //! only ever handed to the Trash or removed when they are listed in the step itself.
 //! A window between the stale check and each action is unavoidable; the last path
 //! component is still protected because every removal decides by `lstat`.
@@ -38,6 +43,9 @@ const INTERACTIVE_REASON: &str = "Needs an interactive session; run from Discky.
 const QUIT_FIRST_REASON: &str = "Needs the app quit first; run from Discky.app";
 /// Why a step after another `GATE` step (a vendor script) that did not run is skipped.
 const EARLIER_STEP_REASON: &str = "Needs an earlier interactive step; run from Discky.app";
+/// Why a step is skipped after a step of its finding that the rest depend on failed: a
+/// `GATE` step (a vendor script) or the tool's own command (`Command`, `OllamaDelete`).
+pub const FAILED_STEP_REASON: &str = "an earlier command of this item failed";
 /// Absolute, never looked up through `PATH`: it may show an administrator prompt.
 pub const OSASCRIPT: &str = "/usr/bin/osascript";
 
@@ -72,7 +80,8 @@ pub struct ExecutionReport {
     pub freed_total: u64,
     /// The part of `freed_total` moved to the Trash (still on disk until emptied).
     pub trashed_bytes: u64,
-    /// Index of the step that failed and stopped the plan.
+    /// Index of the step at which the whole queue stopped: its history record could not
+    /// be written. A failed step only skips the rest of its own finding.
     pub stopped_at: Option<usize>,
     pub log_path: PathBuf,
 }
@@ -183,8 +192,9 @@ impl Outcome {
 
 /// Run `plan` (see the module docs). `Err(BadStepIndex)` for an `only_steps` index
 /// outside the plan, `Err(PlanStale)` and a log that cannot be opened are reported before
-/// any side effect. A history write that fails after a step ran
-/// stops the plan at that step (noted in its `reason`) and the report is still returned.
+/// any side effect. A history write that fails after a step ran stops the whole queue at
+/// that step (noted in its `reason`; later steps are `NotRun`) and the report is still
+/// returned.
 /// Each step that runs is reported to `opts.on_step` as it starts and finishes.
 pub fn execute_plan(
     plan: &Plan,
@@ -239,6 +249,9 @@ pub fn execute_plan(
 
     let mut results = Vec::with_capacity(plan.steps.len());
     let mut stopped_at = None;
+    // Findings whose step the rest depend on failed, with the reason their later steps
+    // are skipped.
+    let mut failed: HashMap<&str, &'static str> = HashMap::new();
     let mut trashed_bytes = 0;
     for step in &plan.steps {
         if stopped_at.is_some() || !selected(step.index) {
@@ -246,7 +259,13 @@ pub fn execute_plan(
             continue;
         }
         emit(opts, StepEvent::Started { index: step.index });
-        let mut outcome = match blocked(step) {
+        let reason = blocked(step).or_else(|| {
+            if matches!(step.kind, StepKind::Quit { .. }) {
+                return None;
+            }
+            failed.get(step.finding.0.as_str()).copied()
+        });
+        let mut outcome = match reason {
             Some(reason) => Outcome::skipped(reason),
             None => run_step(step, opts),
         };
@@ -258,8 +277,13 @@ pub fn execute_plan(
         if outcome.status == StepStatus::Done && matches!(step.kind, StepKind::Trash { .. }) {
             trashed_bytes += freed;
         }
-        if outcome.status == StepStatus::Failed {
-            stopped_at = Some(step.index);
+        if outcome.status == StepStatus::Failed && blocks_its_finding(step) {
+            let reason = if matches!(step.kind, StepKind::Quit { .. }) {
+                QUIT_FIRST_REASON
+            } else {
+                FAILED_STEP_REASON
+            };
+            failed.entry(step.finding.0.as_str()).or_insert(reason);
         }
         if let Err(e) = history::append(paths, &record(plan, step, opts.actor, &outcome, freed)) {
             let note = format!("History write failed: {e}; stopping");
@@ -287,6 +311,16 @@ pub fn execute_plan(
         stopped_at,
         log_path: paths.log.clone(),
     })
+}
+
+/// A failure of `step` skips the later steps of its finding: a `GATE` step or the tool's
+/// own removal. A failed `Trash` or `Remove` leaves the finding's other paths to run.
+fn blocks_its_finding(step: &Step) -> bool {
+    step.flags.contains(StepFlags::GATE)
+        || matches!(
+            step.kind,
+            StepKind::Command { .. } | StepKind::OllamaDelete { .. }
+        )
 }
 
 /// Deliver `event` to the sink, if any. A panicking sink is ignored: it must not abort

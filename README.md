@@ -22,7 +22,7 @@ What Discky does differently:
 
 - **Honest bytes.** Every size is bytes allocated on disk. Discky tracks the claimed (logical) size separately, flags sparse files, and knows which blocks are shared by APFS clones and hard links, so "frees if deleted" is what removing an item really frees. Dataless iCloud files count as zero on disk.
 - **Explained findings.** Each finding comes from a rule with a category, a safety label (`regenerates`, `app_data`, `do_not_touch`, …) and a plain-language explanation.
-- **Official removal only.** Where a tool owns the data, Discky runs that tool: `cargo cache --autoclean`, `npm cache clean --force`, `brew cleanup`, `brew uninstall --cask`, `mise uninstall`, Ollama's own delete API, `hf cache rm`, `docker system prune`, and so on. Everything else goes to the Trash (or is deleted, if you choose). A failed command stops the plan; there is no fallback to `rm`.
+- **Official removal only.** Where a tool owns the data, Discky runs that tool: `cargo cache --autoclean`, `npm cache clean --force`, `brew cleanup`, `brew uninstall --cask`, `mise uninstall`, Ollama's own delete API, `hf cache rm`, `docker system prune`, and so on. Everything else goes to the Trash (or is deleted, if you choose). A failed tool command skips that item's remaining steps (there is no fallback to `rm`); a failed Trash step and every other item still run, and each failure is listed with its reason.
 - **Agent-ready.** `discky-mcp` exposes the scanner, findings, planner and executor as ten MCP tools. Deletion by an agent is off until you turn it on.
 - **Local only, no telemetry.** Discky itself sends nothing. Its only network calls are to your Ollama server (`OLLAMA_HOST`, local by default) to list and delete models; tools it runs on your behalf (`brew`, `docker`, `hf`…) may use the network as they normally do.
 
@@ -102,7 +102,7 @@ The map refuses to remove, and says why:
 
 ### Prompts, quitting and upgrading
 
-**Automation prompt.** Some removals go through Apple Events: Finder moves admin-owned items to the Trash, apps are asked to quit before their files are removed, and Empty Trash asks Finder. The first time, macOS asks whether Discky may control Finder (or that app); allow it, or those steps fail. The choice can be changed in System Settings → Privacy & Security → Automation. System-level steps such as `pkgutil --forget` and `launchctl bootout system` show an administrator password prompt instead; cancelling it stops the removal at that step.
+**Automation prompt.** Some removals go through Apple Events: Finder moves admin-owned items to the Trash, apps are asked to quit before their files are removed, and Empty Trash asks Finder. The first time, macOS asks whether Discky may control Finder (or that app); allow it, or those steps fail. The choice can be changed in System Settings → Privacy & Security → Automation. System-level steps such as `pkgutil --forget` and `launchctl bootout system` show an administrator password prompt instead; cancelling it fails that step; the item's remaining steps are skipped and the other items still run.
 
 **Quitting during a removal.** ⌘Q and closing the window are refused with a notification while a removal runs; quitting from the Dock or logging out interrupts the running step and the log records it (`"kind": "interrupted"`). The next scan shows what is left.
 

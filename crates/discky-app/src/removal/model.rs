@@ -73,8 +73,13 @@ pub struct Summary {
     pub freed: u64,
     /// The part of `freed` moved to the Trash.
     pub trashed: u64,
-    /// The step that failed and stopped the plan.
+    /// The step at which the whole queue stopped (the removal log could not be written).
     pub stopped_at: Option<usize>,
+    /// Steps that failed; each skips only the rest of its own item.
+    pub failed: usize,
+    /// Steps that were skipped (interactive, behind an app to quit, or after a failed
+    /// command of their item).
+    pub skipped: usize,
     /// The removal log.
     pub log: PathBuf,
 }
@@ -187,6 +192,8 @@ impl RemovalModel {
     pub fn finish(&mut self, r: Result<ExecutionReport, ExecuteError>) {
         self.phase = match r {
             Ok(report) => {
+                let count = |status| report.results.iter().filter(|r| r.status == status).count();
+                let (failed, skipped) = (count(StepStatus::Failed), count(StepStatus::Skipped));
                 for result in report.results {
                     self.record(result);
                 }
@@ -194,6 +201,8 @@ impl RemovalModel {
                     freed: report.freed_total,
                     trashed: report.trashed_bytes,
                     stopped_at: report.stopped_at,
+                    failed,
+                    skipped,
                     log: report.log_path,
                 })
             }
@@ -264,12 +273,13 @@ impl RemovalModel {
     }
 
     /// The success toast after a run: "Freed X", or "Freed X, Y in the Trash". None for a
-    /// run that stopped without freeing anything (its warning toast says enough).
+    /// run that stopped or had failures without freeing anything (its warning toast says
+    /// enough).
     pub fn freed_message(&self) -> Option<String> {
         let Phase::Finished(s) = &self.phase else {
             return None;
         };
-        if s.freed == 0 && s.stopped_at.is_some() {
+        if s.freed == 0 && (s.stopped_at.is_some() || s.failed > 0) {
             return None;
         }
         let mut msg = format!("Freed {}", format::bytes(s.freed));
@@ -279,14 +289,21 @@ impl RemovalModel {
         Some(msg)
     }
 
-    /// The warning toast after a run that stopped: "Stopped at step N: <reason>".
+    /// The warning toast after a run that stopped: "Stopped at step N: <reason>"; else,
+    /// after a run with failed steps, "F of N steps failed; the rest ran. See the list for
+    /// why." ("1 step failed. …" for a one-step run).
     pub fn stop_message(&self) -> Option<String> {
-        let Phase::Finished(Summary {
-            stopped_at: Some(i),
-            ..
-        }) = &self.phase
-        else {
+        let Phase::Finished(s) = &self.phase else {
             return None;
+        };
+        let Some(i) = &s.stopped_at else {
+            return match (s.failed, self.rows.len()) {
+                (0, _) => None,
+                (_, 1) => Some("1 step failed. See the list for why.".to_string()),
+                (failed, total) => Some(format!(
+                    "{failed} of {total} steps failed; the rest ran. See the list for why."
+                )),
+            };
         };
         let reason = self
             .rows
@@ -533,7 +550,7 @@ mod tests {
     use discky_core::PlanItem;
     use discky_core::findings::FindingId;
     use discky_core::plan::execute::{
-        ExecuteError, ExecutionReport, StepEvent, StepResult, StepStatus,
+        ExecuteError, ExecutionReport, FAILED_STEP_REASON, StepEvent, StepResult, StepStatus,
     };
     use discky_core::plan::{Plan, PlanId, Step, StepFlags, StepKind};
     use discky_core::{Config, RemovalMode};
@@ -781,16 +798,14 @@ mod tests {
         let mut failed = result(1, StepStatus::Failed, 0);
         failed.reason = Some("Finder refused".into());
         failed.output = "error -1743".into();
+        let mut skipped = result(2, StepStatus::Skipped, 0);
+        skipped.reason = Some(FAILED_STEP_REASON.into());
         let report = ExecutionReport {
             plan: PlanId("p".into()),
-            results: vec![
-                result(0, StepStatus::Done, 9),
-                failed,
-                result(2, StepStatus::NotRun, 0),
-            ],
+            results: vec![result(0, StepStatus::Done, 9), failed, skipped],
             freed_total: 9,
             trashed_bytes: 9,
-            stopped_at: Some(1),
+            stopped_at: None,
             log_path: PathBuf::from("/tmp/home/removals.log"),
         };
         m.finish(Ok(report));
@@ -799,25 +814,85 @@ mod tests {
             Phase::Finished(Summary {
                 freed: 9,
                 trashed: 9,
-                stopped_at: Some(1),
+                stopped_at: None,
+                failed: 1,
+                skipped: 1,
                 log: PathBuf::from("/tmp/home/removals.log"),
             })
         );
         let statuses: Vec<_> = m.rows.iter().map(|r| r.status).collect();
         assert_eq!(
             statuses,
-            [RowStatus::Done, RowStatus::Failed, RowStatus::NotRun]
+            [RowStatus::Done, RowStatus::Failed, RowStatus::Skipped]
         );
         assert_eq!(m.rows[0].freed, Some(9));
         assert_eq!(m.rows[1].output, "error -1743");
+        assert_eq!(m.rows[2].reason.as_deref(), Some(FAILED_STEP_REASON));
         assert_eq!(
             m.freed_message().as_deref(),
             Some("Freed 9 B, 9 B in the Trash")
         );
         assert_eq!(
             m.stop_message().as_deref(),
-            Some("Stopped at step 2: Finder refused")
+            Some("1 of 3 steps failed; the rest ran. See the list for why.")
         );
+    }
+
+    #[test]
+    fn failed_steps_toast_counts_them_and_a_one_step_run_says_1_step() {
+        let p = plan(
+            vec![
+                trash(0, "/tmp/a", StepFlags::empty(), 10),
+                trash(1, "/tmp/b", StepFlags::empty(), 20),
+            ],
+            &[],
+        );
+        let mut m = RemovalModel::from_plan(p, &Config::default());
+        m.finish(Ok(ExecutionReport {
+            plan: PlanId("p".into()),
+            results: vec![
+                result(0, StepStatus::Failed, 0),
+                result(1, StepStatus::Failed, 0),
+            ],
+            freed_total: 0,
+            trashed_bytes: 0,
+            stopped_at: None,
+            log_path: PathBuf::from("/tmp/home/removals.log"),
+        }));
+        assert_eq!(
+            m.stop_message().as_deref(),
+            Some("2 of 2 steps failed; the rest ran. See the list for why.")
+        );
+        // Nothing freed and failures: the warning says enough.
+        assert_eq!(m.freed_message(), None);
+
+        let p = plan(vec![trash(0, "/tmp/a", StepFlags::empty(), 10)], &[]);
+        let mut m = RemovalModel::from_plan(p, &Config::default());
+        m.finish(Ok(ExecutionReport {
+            plan: PlanId("p".into()),
+            results: vec![result(0, StepStatus::Failed, 0)],
+            freed_total: 0,
+            trashed_bytes: 0,
+            stopped_at: None,
+            log_path: PathBuf::from("/tmp/home/removals.log"),
+        }));
+        assert_eq!(
+            m.stop_message().as_deref(),
+            Some("1 step failed. See the list for why.")
+        );
+
+        // No failures: no warning.
+        let p = plan(vec![trash(0, "/tmp/a", StepFlags::empty(), 10)], &[]);
+        let mut m = RemovalModel::from_plan(p, &Config::default());
+        m.finish(Ok(ExecutionReport {
+            plan: PlanId("p".into()),
+            results: vec![result(0, StepStatus::Done, 10)],
+            freed_total: 10,
+            trashed_bytes: 10,
+            stopped_at: None,
+            log_path: PathBuf::from("/tmp/home/removals.log"),
+        }));
+        assert_eq!(m.stop_message(), None);
     }
 
     #[test]
@@ -832,8 +907,9 @@ mod tests {
     fn stopped_run_that_freed_nothing_has_no_success_toast() {
         let p = plan(vec![trash(0, "/tmp/a", StepFlags::empty(), 10)], &[]);
         let mut m = RemovalModel::from_plan(p, &Config::default());
+        // The removal log could not be written after the step ran.
         let mut failed = result(0, StepStatus::Failed, 0);
-        failed.reason = Some("exit 1".into());
+        failed.reason = Some("exit 1; History write failed: denied; stopping".into());
         m.finish(Ok(ExecutionReport {
             plan: PlanId("p".into()),
             results: vec![failed],
@@ -845,7 +921,7 @@ mod tests {
         assert_eq!(m.freed_message(), None);
         assert_eq!(
             m.stop_message().as_deref(),
-            Some("Stopped at step 1: exit 1")
+            Some("Stopped at step 1: exit 1; History write failed: denied; stopping")
         );
 
         // A run that finished but freed nothing (already absent) still says so.

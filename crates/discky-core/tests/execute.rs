@@ -5,7 +5,10 @@ use discky_core::{
     history,
     index::snapshot::Actor,
     plan::{
-        execute::{ExecuteError, ExecuteOptions, StepEvent, StepSink, StepStatus, execute_plan},
+        execute::{
+            ExecuteError, ExecuteOptions, FAILED_STEP_REASON, StepEvent, StepSink, StepStatus,
+            execute_plan,
+        },
         plan_removal,
     },
     rules::{Category, SafetyLabel},
@@ -110,36 +113,6 @@ fn stale_plan_is_refused() {
 }
 
 #[test]
-fn failed_command_stops_the_plan() {
-    let (d, paths, bin) = setup();
-    let later = d.path().join("later");
-    std::fs::create_dir(&later).unwrap();
-    let f1 = Finding {
-        removal: Removal::Command {
-            tool: "sh".into(),
-            argv: vec!["sh".into(), "-c".into(), "echo boom; exit 3".into()],
-            cwd: None,
-            install_hint: None,
-            freed_note: None,
-        },
-        path: None,
-        ..trash_finding(&d.path().join("nope"))
-    };
-    let f2 = trash_finding(&later);
-    let plan = plan_removal(&[&f1, &f2], &Config::default());
-    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
-    assert!(matches!(rep.results[0].status, StepStatus::Failed));
-    assert!(rep.results[0].output.contains("boom"));
-    assert!(matches!(rep.results[1].status, StepStatus::NotRun));
-    assert_eq!(rep.stopped_at, Some(0));
-    assert_eq!(rep.freed_total, 0);
-    assert!(later.exists());
-    let h = history::read(&paths, 10).unwrap();
-    assert_eq!(h.len(), 1);
-    assert_eq!(h[0].argv.as_ref().unwrap()[1], "-c");
-}
-
-#[test]
 fn step_events_arrive_in_order() {
     let (d, paths, bin) = setup();
     let dirs: Vec<_> = ["a", "b", "c"].iter().map(|n| d.path().join(n)).collect();
@@ -182,7 +155,7 @@ fn step_events_arrive_in_order() {
 #[test]
 fn finished_event_carries_the_history_failure_reason() {
     let (d, paths, bin) = setup();
-    // As in `failed_history_write_stops_the_plan_but_returns_the_report`: the step
+    // As in `history_write_failure_still_stops_the_queue`: the step
     // replaces the log file with a directory, so the append right after it fails.
     let log = paths.log.display().to_string();
     let f1 = command_finding(d.path(), &format!("rm -f '{log}' && mkdir '{log}'"), None);
@@ -333,11 +306,11 @@ exit 0
             .contains("Still present")
     );
     assert_eq!((rep.freed_total, rep.trashed_bytes), (0, 0));
-    assert_eq!(rep.stopped_at, Some(0));
+    assert_eq!(rep.stopped_at, None);
 }
 
 #[test]
-fn missing_tool_fails_and_stops() {
+fn missing_tool_fails_and_other_items_still_run() {
     let (d, paths, bin) = setup();
     let later = d.path().join("later");
     std::fs::create_dir(&later).unwrap();
@@ -352,7 +325,11 @@ fn missing_tool_fails_and_stops() {
         path: None,
         ..trash_finding(&d.path().join("nope"))
     };
-    let plan = plan_removal(&[&f1, &trash_finding(&later)], &Config::default());
+    let f2 = Finding {
+        id: FindingId("f2".into()),
+        ..trash_finding(&later)
+    };
+    let plan = plan_removal(&[&f1, &f2], &Config::default());
     let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
     assert!(matches!(rep.results[0].status, StepStatus::Failed));
     assert!(
@@ -362,8 +339,9 @@ fn missing_tool_fails_and_stops() {
             .unwrap()
             .contains("not found")
     );
-    assert!(matches!(rep.results[1].status, StepStatus::NotRun));
-    assert!(later.exists());
+    assert_eq!(rep.results[1].status, StepStatus::Done);
+    assert!(!later.exists());
+    assert_eq!(rep.stopped_at, None);
 }
 
 #[test]
@@ -409,23 +387,29 @@ fn command_finding(d: &std::path::Path, script: &str, cwd: Option<std::path::Pat
 }
 
 #[test]
-fn failed_history_write_stops_the_plan_but_returns_the_report() {
+fn history_write_failure_still_stops_the_queue() {
     let (d, paths, bin) = setup();
     let later = d.path().join("later");
     std::fs::create_dir(&later).unwrap();
     // Step 0 replaces the (already opened-and-checked) log file with a directory, so the
-    // append right after it fails.
+    // append right after it fails. Step 1 belongs to another item: only a log that cannot
+    // be written stops the whole queue.
     let log = paths.log.display().to_string();
     let f1 = command_finding(d.path(), &format!("rm -f '{log}' && mkdir '{log}'"), None);
-    let plan = plan_removal(&[&f1, &trash_finding(&later)], &Config::default());
+    let f2 = Finding {
+        id: FindingId("f2".into()),
+        ..trash_finding(&later)
+    };
+    let plan = plan_removal(&[&f1, &f2], &Config::default());
     let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
-    assert!(matches!(rep.results[0].status, StepStatus::Done));
+    assert_eq!(rep.results[0].status, StepStatus::Done);
     let reason = rep.results[0].reason.as_deref().unwrap();
     assert!(reason.starts_with("History write failed:"), "{reason}");
     assert!(reason.ends_with("; stopping"));
     assert_eq!(rep.stopped_at, Some(0));
-    assert!(matches!(rep.results[1].status, StepStatus::NotRun));
+    assert_eq!(rep.results[1].status, StepStatus::NotRun);
     assert!(later.exists());
+    assert!(paths.log.is_dir());
 }
 
 /// A plan for `f` made while its paths existed, then the paths removed behind its back
@@ -863,4 +847,121 @@ fn skipped_script_skips_the_findings_remaining_steps() {
     let rep = execute_plan(&plan, &only, &paths).unwrap();
     assert_eq!(rep.results[1].status, StepStatus::Skipped);
     assert!(bundle.exists() && !marker.exists());
+}
+
+/// A fake trash binary that refuses (exit 1) any path whose name contains "fail" and
+/// otherwise `mv`s its arguments into `<tmp>/trashed`, like [`setup`]'s.
+fn failing_trash(d: &std::path::Path) -> std::path::PathBuf {
+    let bin = d.join("failing-trash");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\nfor p in \"$@\"; do\n  case \"$(basename \"$p\")\" in\n    *fail*) echo \"cannot trash $p\" >&2; exit 1 ;;\n  esac\ndone\nmv \"$@\" \"{}\"/\n",
+            d.join("trashed").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// A finding with id `id` that trashes `p`.
+fn trash_item(id: &str, p: &std::path::Path) -> Finding {
+    Finding {
+        id: FindingId(id.into()),
+        ..trash_finding(p)
+    }
+}
+
+fn statuses(rep: &discky_core::plan::execute::ExecutionReport) -> Vec<StepStatus> {
+    rep.results.iter().map(|r| r.status).collect()
+}
+
+/// The removal log's records, oldest first.
+fn read_log(paths: &DisckyPaths) -> Vec<history::HistoryRecord> {
+    let mut records = history::read(paths, usize::MAX).unwrap();
+    records.reverse();
+    records
+}
+
+#[test]
+fn failed_step_skips_the_rest_of_its_item_only() {
+    let (d, paths, bin) = setup();
+    let a = d.path().join("a");
+    let b = d.path().join("b");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    // Item A: the tool's command, which fails, then a Trash step for `a`. Item B: a Trash
+    // step for `b`.
+    let cmd = Finding {
+        id: FindingId("A".into()),
+        ..command_finding(d.path(), "echo boom; exit 1", None)
+    };
+    let mut plan = plan_removal(
+        &[&cmd, &trash_item("A-path", &a), &trash_item("B", &b)],
+        &Config::default(),
+    );
+    assert_eq!(plan.steps.len(), 3, "{:#?}", plan.steps);
+    plan.steps[1].finding = FindingId("A".into());
+
+    let rep = execute_plan(&plan, &opts(Actor::App, bin), &paths).unwrap();
+    assert_eq!(
+        statuses(&rep),
+        [StepStatus::Failed, StepStatus::Skipped, StepStatus::Done]
+    );
+    assert!(rep.results[0].output.contains("boom"));
+    assert_eq!(rep.results[1].reason.as_deref(), Some(FAILED_STEP_REASON));
+    assert!(a.exists(), "the failed item's trash step must not run");
+    assert!(!b.exists(), "the other item still runs");
+    assert_eq!(rep.stopped_at, None);
+    // The removal log keeps the failure and the skip with their reasons, one record per
+    // step, in order.
+    let records = read_log(&paths);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| (r.step, r.status))
+            .collect::<Vec<_>>(),
+        [
+            (0, StepStatus::Failed),
+            (1, StepStatus::Skipped),
+            (2, StepStatus::Done)
+        ]
+    );
+    assert!(records[0].reason.is_some(), "a failed step records why");
+    assert!(records[0].output_tail.contains("boom"));
+    assert_eq!(records[0].argv.as_ref().unwrap()[1], "-c");
+    assert_eq!(records[1].reason.as_deref(), Some(FAILED_STEP_REASON));
+}
+
+#[test]
+fn failed_trash_step_blocks_nothing() {
+    let (d, paths, _bin) = setup();
+    let a1 = d.path().join("a1-fail");
+    let a2 = d.path().join("a2");
+    let b = d.path().join("b");
+    for p in [&a1, &a2, &b] {
+        std::fs::create_dir(p).unwrap();
+    }
+    // Item A: Trash `a1-fail` (refused by the fake trash), then Trash `a2`. Item B: Trash `b`.
+    let mut plan = plan_removal(
+        &[
+            &trash_item("A", &a1),
+            &trash_item("A-more", &a2),
+            &trash_item("B", &b),
+        ],
+        &Config::default(),
+    );
+    assert_eq!(plan.steps.len(), 3, "{:#?}", plan.steps);
+    plan.steps[1].finding = FindingId("A".into());
+
+    let rep = execute_plan(&plan, &opts(Actor::App, failing_trash(d.path())), &paths).unwrap();
+    assert_eq!(
+        statuses(&rep),
+        [StepStatus::Failed, StepStatus::Done, StepStatus::Done]
+    );
+    assert!(a1.exists());
+    assert!(!a2.exists() && !b.exists());
+    assert_eq!(rep.stopped_at, None);
+    assert_eq!(read_log(&paths).len(), 3);
 }

@@ -422,7 +422,8 @@ pub struct ExecuteOut {
     pub freed_total: u64,
     /// Part of `freed_total` still in the Trash until it is emptied.
     pub trashed_bytes: u64,
-    /// Index of the step that failed and stopped the plan.
+    /// Index of the step at which the whole queue stopped (the removal log could not be
+    /// written); a failed step only skips the rest of its own item.
     pub stopped_at: Option<usize>,
     pub log_path: PathBuf,
     /// Steps that need the user (admin prompt or quitting an app): run them from
