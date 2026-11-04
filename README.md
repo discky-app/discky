@@ -24,7 +24,7 @@ What Discky does differently:
 - **Explained findings.** Each finding comes from a rule with a category, a safety label (`regenerates`, `app_data`, `do_not_touch`, …) and a plain-language explanation.
 - **Official removal only.** Where a tool owns the data, Discky runs that tool: `cargo cache --autoclean`, `npm cache clean --force`, `brew cleanup`, `brew uninstall --cask`, `mise uninstall`, Ollama's own delete API, `hf cache rm`, `docker system prune`, and so on. Everything else goes to the Trash (or is deleted, if you choose). A failed command stops the plan; there is no fallback to `rm`.
 - **Agent-ready.** `discky-mcp` exposes the scanner, findings, planner and executor as ten MCP tools. Deletion by an agent is off until you turn it on.
-- **Local only, no telemetry.** Nothing leaves your Mac. The only network calls are to a local Ollama server, when you have one, to list and delete models.
+- **Local only, no telemetry.** Discky itself sends nothing. Its only network calls are to your Ollama server (`OLLAMA_HOST`, local by default) to list and delete models; tools it runs on your behalf (`brew`, `docker`, `hf`…) may use the network as they normally do.
 
 ## What it finds
 
@@ -97,7 +97,7 @@ The map refuses to remove, and says why:
 - a scan root;
 - an iCloud file that is only in the cloud;
 - a protected location: `~/Library` itself, anything in `~/Library/Keychains`, `~/Library/Mobile Documents`, `~/Library/CloudStorage` or `~/Library/Preferences`, `/Library/Keychains`, `/System`, or a folder that contains one of these;
-- anything inside, or containing, a finding that an official command removes ("Managed by Dev caches; remove it from there"). Use **Show in {category}** to remove it the proper way.
+- anything inside, or containing, a finding that Discky removes another way (an official command, an uninstaller) or never removes ("Managed by Dev caches; remove it from there"). Use **Show in {category}** to remove it the proper way.
 
 ### Prompts, quitting and upgrading
 
@@ -185,7 +185,7 @@ Under MCP, steps that need an administrator password or quit a running app are s
 
 A scheduled agent can tell you every morning what could be cleaned, without cleaning anything. It has to run on your Mac: a cloud routine cannot see your disk.
 
-[`docs/automation/`](docs/automation/nightly-report.md) has a worked example: a `launchd` agent runs [`nightly-report.sh`](docs/automation/nightly-report.sh) at 09:00. The script runs `claude -p` with `--mcp-config` pointing at `discky-mcp` and an allow-list of only `mcp__discky__scan`, `mcp__discky__scan_status`, `mcp__discky__disk_overview`, `mcp__discky__findings` and `Bash(osascript:*)`. It asks Claude to scan, then report the five largest safe-to-remove findings over 1 GB, and to post the summary as a macOS notification titled "Discky". It never plans or executes a removal: the report says what *can* be cleaned, and you decide in the app or in a chat. For Slack instead of a notification, connect a Slack MCP server and replace the `osascript` instruction and allow-list entry with its send-message tool.
+[`docs/automation/`](docs/automation/nightly-report.md) has a worked example: a `launchd` agent runs [`nightly-report.sh`](docs/automation/nightly-report.sh) at 09:00. The script runs `claude -p` with every built-in tool off (`--tools ""`), `--mcp-config` pointing at `discky-mcp` and an allow-list of only `mcp__discky__scan`, `mcp__discky__scan_status`, `mcp__discky__disk_overview` and `mcp__discky__findings`. It asks Claude to scan, then report the five largest safe-to-remove findings over 1 GB, ending with a `SUMMARY:` line that the script itself posts as a macOS notification titled "Discky". Nothing in it can plan or execute a removal: the report says what *can* be cleaned, and you decide in the app or in a chat. The job keeps its own snapshot (`DISCKY_HOME=~/Library/Application Support/Discky/nightly`), because it runs without Discky.app's Full Disk Access and must not replace the app's fuller scan. For Slack instead of a notification, replace the script's `osascript` call with a `curl` to a Slack incoming webhook.
 
 ## Safety model
 

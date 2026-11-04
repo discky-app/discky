@@ -69,7 +69,7 @@ Two core variables make a safe sandbox for trying removals:
 
 ## Adding a rule
 
-Rules live in [`crates/discky-core/src/rules/builtin.toml`](crates/discky-core/src/rules/builtin.toml) and are parsed by [`crates/discky-core/src/rules/mod.rs`](crates/discky-core/src/rules/mod.rs). Copy an existing rule as the template; `cargo-registry` (the first one) shows every field: `id`, `category`, `label`, `title`, `explain`, a `[rule.matcher]` (`path`, `glob` or `build_dir`) and, when a tool owns the data, a `[rule.command]` with its `argv` and an `install_hint`.
+Rules live in [`crates/discky-core/src/rules/builtin.toml`](crates/discky-core/src/rules/builtin.toml) and are parsed by [`crates/discky-core/src/rules/mod.rs`](crates/discky-core/src/rules/mod.rs). Copy an existing rule as the template; `cargo-registry` (the first one) shows every field: `id`, `category`, `label`, `title`, `explain`, a `[rule.matcher]` (`path`, `glob` or `build_dir`) and, when a tool owns the data, a `[rule.command]` with the `tool` it needs, its `argv`, an `install_hint` and, when the command frees less than the whole folder, a `freed_note`.
 
 - Pick the label honestly: `regenerates` only when the owner re-creates the data on its own (a cache), `app_data` when removing it loses something the user may want (toolchains, VM images), `do_not_touch` for things to show but never remove (Keychains, Mail).
 - The `explain` text says what the thing is and what happens after removal, in one or two plain sentences.
