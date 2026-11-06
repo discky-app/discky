@@ -10,7 +10,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/macOS-15%2B-lightgrey?logo=apple" alt="macOS 15+">
   <img src="https://img.shields.io/badge/Rust-1.99-orange?logo=rust" alt="Rust 1.99">
+  <a href="https://www.producthunt.com/products/discky?launch=discky"><img src="https://img.shields.io/badge/Product%20Hunt-Discky-da552f?logo=producthunt&logoColor=white" alt="Discky on Product Hunt"></a>
 </p>
+
+<p align="center"><a href="https://discky.xyz">discky.xyz</a> · <a href="https://www.producthunt.com/products/discky?launch=discky">Product Hunt</a></p>
 
 <p align="center"><img src="assets/scan.gif" width="480" alt="While a scan runs, the robo-duck carries paper stacks and drags a crate into the bin"></p>
 
